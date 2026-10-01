@@ -5,15 +5,12 @@ import { useState } from "react"
 import { DownloadButtons } from "@/components/download-buttons"
 import { WaitlistButton } from "@/components/waitlist-button"
 
-export function DownloadActions({ downloadError }: { downloadError?: string }) {
+export function DownloadActions() {
   const [waitlistHandle] = useState(() => Dialog.createHandle<void>())
 
   return (
     <>
-      <DownloadButtons
-        downloadError={downloadError}
-        waitlistHandle={waitlistHandle}
-      />
+      <DownloadButtons waitlistHandle={waitlistHandle} />
       <WaitlistButton handle={waitlistHandle} />
     </>
   )

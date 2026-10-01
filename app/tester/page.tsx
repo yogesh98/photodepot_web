@@ -2,12 +2,7 @@ import Image from "next/image"
 import Link from "next/link"
 import { DownloadActions } from "@/components/download-actions"
 
-export default async function Page({
-  searchParams,
-}: {
-  searchParams: Promise<{ download?: string }>
-}) {
-  const { download } = await searchParams
+export default function Page() {
   return (
     <div className="preview-page">
       <header className="site-header">
@@ -36,7 +31,7 @@ export default async function Page({
             <span>All together.</span>
           </h1>
           <div className="download-section">
-            <DownloadActions downloadError={download} />
+            <DownloadActions />
           </div>
         </section>
       </main>

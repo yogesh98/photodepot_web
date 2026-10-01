@@ -61,22 +61,13 @@ export default function Page() {
             aria-labelledby="hero-title"
           >
             <Reveal className="hero-copy">
-              <p className="landing-eyebrow hero-eyebrow">
-                <span className="color-registration" aria-hidden="true">
-                  <i />
-                  <i />
-                  <i />
-                </span>
-                Photo &amp; video · For Mac
-              </p>
               <h1 id="hero-title">
-                From camera card
+                Shoot together.
                 <br />
-                to <span className="hero-highlight">final selection.</span>
+                <span className="hero-highlight">Cull together.</span>
               </h1>
               <p className="hero-description">
-                A local workspace to ingest, cull, organize, and export your
-                photos and video.
+                Ingest, cull, organize as a team
               </p>
               <LandingWaitlistTrigger />
             </Reveal>
@@ -101,13 +92,6 @@ export default function Page() {
                     />
                   </div>
                 </div>
-                <figcaption className="screenshot-caption">
-                  <span>
-                    <span className="caption-dot" />
-                    The Cull workspace
-                  </span>
-                  <span>Actual app · Demo project</span>
-                </figcaption>
               </figure>
             </Reveal>
           </section>
@@ -265,7 +249,6 @@ export default function Page() {
         </main>
         <footer className="landing-footer landing-container">
           <span>photodepot.</span>
-          <span>For macOS</span>
         </footer>
       </div>
     </LandingWaitlist>

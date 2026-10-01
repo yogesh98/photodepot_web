@@ -48,8 +48,10 @@ Missing passwords or files keep downloads closed. Changing the password
 invalidates existing access cookies; restart after changing environment values.
 Next.js expands `$` in `.env` values; escape it as `\$` if your password contains it.
 
-Deploy with HTTPS and a Node.js runtime (`pnpm build`, then `pnpm start`), not a
-static export. All requests to `public/downloads` must pass through Next.js and
+Deploy with a Node.js runtime (`pnpm build`, then `pnpm start`), not a
+static export. HTTPS can terminate at your external reverse proxy while the VM
+serves HTTP. Download cookies use the browser's protocol, passed through
+`X-Forwarded-Proto`. All requests to `public/downloads` must pass through Next.js and
 its proxy; do not expose that folder separately through a static server or CDN.
 Upload installers before starting the server. For standalone deployments, copy
 `public/` alongside the standalone server. Choose hosting that supports streaming
@@ -79,6 +81,46 @@ server with a writable persistent disk, and keep the database outside `public/`.
 Mount that disk at the configured path so signups survive restarts and redeploys;
 ephemeral serverless filesystems will not retain the waitlist. Back up the
 database using SQLite's backup tools.
+
+## Ubuntu VM deployment
+
+`deploy/install-vm.sh` installs Node 22 LTS and pnpm, installs Linux dependencies,
+and runs `pnpm build` **on the VM**. It then runs
+`next start` under `photodepot.service`, enabled at boot and restarted on failure.
+The homepage is pre-rendered as static HTML; downloads and waitlist remain live
+Node.js APIs. This deployment does not use the development server.
+
+Upload this repository, `.env`, and both installers to the VM (exclude local
+`node_modules`, `.next`, `.git`, and `data`). On the VM, run:
+
+```sh
+sudo bash ~/photodepot_web/deploy/install-vm.sh
+```
+
+The installer targets the `photodepot` Linux user and LAN IP `192.168.1.152`:
+
+- App: `/srv/photodepot/app`
+- Private environment: `/srv/photodepot/.env` (mode `0600`, preserved on reinstall)
+- Persistent waitlist: `/var/lib/photodepot/waitlist.sqlite`
+- URL / reverse proxy upstream: `http://192.168.1.152:80`
+- Logs: `sudo journalctl -u photodepot -f`
+- Restart after changing the password: `sudo systemctl restart photodepot`
+
+Run `~/waitlist.sh` on the VM to print every waitlist signup, including the
+name, email, referral answer, and UTC signup time. The script reads the database
+path from the production `.env` and opens SQLite read-only.
+
+Nginx serves HTTP on port 80 and forwards every request to Next.js, whose port
+3000 only listens on loopback. It accepts the public domain in the `Host` header
+and preserves `X-Forwarded-Proto` from your external reverse proxy. Configure
+that proxy to preserve the original `Host` (including a nonstandard port) and
+set `X-Forwarded-Proto` to the browser's scheme; this keeps same-origin forms,
+redirects, and secure cookies working. There is no VM TLS certificate or HTTPS
+redirect. Do not configure a separate static alias for installers.
+
+Nginx overwrites forwarded client IP headers. To apply per-client rate limits
+behind the external proxy, configure nginx's real-IP module with that proxy's
+exact trusted IP so `$remote_addr` reflects the browser's IP.
 
 ## Verify
 

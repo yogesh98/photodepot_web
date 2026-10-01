@@ -79,7 +79,8 @@ export async function POST(request: NextRequest, context: Context) {
     createAccessToken(architecture, password),
     {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
+      // Next derives the protocol from X-Forwarded-Proto behind a reverse proxy.
+      secure: request.nextUrl.protocol === "https:",
       sameSite: "strict",
       path: `/api/download/${architecture}`,
       maxAge: ACCESS_SECONDS,

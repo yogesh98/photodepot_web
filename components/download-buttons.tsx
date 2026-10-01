@@ -1,7 +1,8 @@
 "use client"
 
 import { Dialog } from "@base-ui/react/dialog"
-import { useRef, useState, type FormEvent } from "react"
+import { Suspense, useRef, useState, type FormEvent } from "react"
+import { useSearchParams } from "next/navigation"
 import {
   ArrowDownToLine,
   Check,
@@ -28,10 +29,8 @@ const builds = [
 ] as const
 
 export function DownloadButtons({
-  downloadError,
   waitlistHandle,
 }: {
-  downloadError?: string
   waitlistHandle: Dialog.Handle<void>
 }) {
   const [selected, setSelected] = useState<(typeof builds)[number] | null>(null)
@@ -105,12 +104,10 @@ export function DownloadButtons({
           </div>
         ))}
       </div>
-      {downloadError && !selected && !started && (
-        <p className="download-message download-error" role="alert">
-          {downloadError === "locked"
-            ? "Your access has expired. Select a download and enter your password again."
-            : "This download isn't available right now. Please try again later."}
-        </p>
+      {!selected && !started && (
+        <Suspense fallback={null}>
+          <DownloadError />
+        </Suspense>
       )}
       {started && (
         <p className="download-message" role="status">
@@ -201,5 +198,19 @@ export function DownloadButtons({
         </Dialog.Portal>
       </Dialog.Root>
     </>
+  )
+}
+
+// Only the redirect notice depends on the URL, so the page and download buttons
+// can be pre-rendered as static HTML during the production build.
+function DownloadError() {
+  const downloadError = useSearchParams().get("download")
+  if (!downloadError) return null
+  return (
+    <p className="download-message download-error" role="alert">
+      {downloadError === "locked"
+        ? "Your access has expired. Select a download and enter your password again."
+        : "This download isn't available right now. Please try again later."}
+    </p>
   )
 }
