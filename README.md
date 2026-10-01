@@ -1,8 +1,18 @@
-# photodepot download page
+# photodepot website
 
-A light-only download page using PhotoDepot's app icon, locally bundled Inter
-font, and the existing stone / Mira shadcn preset. The workflow line matches the
-app's welcome screen.
+A light-only landing page and tester download page using PhotoDepot's app icon,
+locally bundled Inter font, and the app's warm stone palette, square corners,
+and thin borders. Restrained Framer Motion transitions respect reduced-motion
+preferences.
+
+The landing page at `/` explains the implemented Ingest, Cull, Organize, and
+Export workflow, plus Mac-to-Mac review on a local network. Joining the waitlist
+is its only call to action. The original download page lives at `/tester`, with
+its password-protected Apple Silicon and Intel downloads.
+
+Screenshots show the actual PhotoDepot desktop app in light mode with demo
+media. Capture and media provenance are documented in
+`public/screenshots/README.md`.
 
 ## Run
 
@@ -50,8 +60,9 @@ ensure the proxy overwrites untrusted `X-Forwarded-For` headers.
 
 ## Waitlist
 
-The link below the downloads opens an interest form. First name, email, and
-how the visitor heard about PhotoDepot are required; last name is optional.
+The landing page's Join waitlist buttons and the link on `/tester` open an
+interest form. First name, email, and how the visitor heard about PhotoDepot
+are required; last name is optional.
 `POST /api/waitlist` validates and saves submissions to a server-side SQLite
 `waitlist` table, including a UTC creation timestamp. Emails are normalized to
 lowercase and unique; repeat submissions succeed without replacing the original.

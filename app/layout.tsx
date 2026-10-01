@@ -12,7 +12,7 @@ const inter = localFont({
 export const metadata: Metadata = {
   title: "photodepot",
   description:
-    "Ingest, cull, organize, deliver. A new home for your photography workflow on Mac.",
+    "Ingest, cull, organize, and export photos and video in one local workspace for Mac. Review together on the same network.",
   robots: { index: false, follow: false },
 }
 

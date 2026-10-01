@@ -94,7 +94,7 @@ export async function GET(request: NextRequest, context: Context) {
   function back(reason: string) {
     const requestOrigin = `${request.nextUrl.protocol}//${request.headers.get("host") || request.nextUrl.host}`
     return NextResponse.redirect(
-      new URL(`/?download=${reason}`, requestOrigin),
+      new URL(`/tester?download=${reason}`, requestOrigin),
       {
         status: 303,
         headers: privateHeaders,
