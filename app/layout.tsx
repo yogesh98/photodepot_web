@@ -1,15 +1,20 @@
-import { Geist, Geist_Mono, Inter } from "next/font/google"
+import type { Metadata } from "next"
+import localFont from "next/font/local"
 
 import "./globals.css"
-import { ThemeProvider } from "@/components/theme-provider"
-import { cn } from "@/lib/utils";
-
-const inter = Inter({subsets:['latin'],variable:'--font-sans'})
-
-const fontMono = Geist_Mono({
-  subsets: ["latin"],
-  variable: "--font-mono",
+const inter = localFont({
+  src: "./fonts/inter-latin.woff2",
+  variable: "--font-inter",
+  display: "swap",
+  weight: "100 900",
 })
+
+export const metadata: Metadata = {
+  title: "photodepot",
+  description:
+    "Ingest, cull, organize, deliver. A new home for your photography workflow on Mac.",
+  robots: { index: false, follow: false },
+}
 
 export default function RootLayout({
   children,
@@ -17,14 +22,8 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html
-      lang="en"
-      suppressHydrationWarning
-      className={cn("antialiased", fontMono.variable, "font-sans", inter.variable)}
-    >
-      <body>
-        <ThemeProvider>{children}</ThemeProvider>
-      </body>
+    <html lang="en" className={`${inter.variable} antialiased`}>
+      <body>{children}</body>
     </html>
   )
 }
