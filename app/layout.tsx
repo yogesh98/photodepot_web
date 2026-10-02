@@ -12,7 +12,7 @@ const inter = localFont({
 export const metadata: Metadata = {
   title: "photodepot",
   description:
-    "Ingest, cull, organize, and export photos and video in one local workspace for Mac. Review together on the same network.",
+    "Cull and organize photographs together in PhotoDepot. One Mac hosts; approved reviewers join from their own Macs on the same local network, with changes shared across the project.",
   robots: { index: false, follow: false },
 }
 
@@ -22,7 +22,11 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="en" className={`${inter.variable} antialiased`}>
+    <html
+      lang="en"
+      data-scroll-behavior="smooth"
+      className={`${inter.variable} antialiased`}
+    >
       <body>{children}</body>
     </html>
   )

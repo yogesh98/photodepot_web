@@ -1,12 +1,18 @@
 # photodepot website
 
-A light-only landing page and tester download page using PhotoDepot's app icon,
-locally bundled Inter font, and the app's warm stone palette, square corners,
-and thin borders. Restrained Framer Motion transitions respect reduced-motion
-preferences.
+The homepage at `/` uses the **Daylight** design: warm white backgrounds, dark
+type, changing photograph pairs, photo selectors, and scroll-driven reveals.
+It retains PhotoDepot’s original app icon, wordmark, and locally hosted Inter.
+Seven curated Pexels photographs cover portraiture, dance, human detail,
+architecture, street scenes, and sculptural still life. Framer Motion and CSS
+transitions respect reduced-motion preferences. Previous concept preview URLs
+redirect to the homepage.
 
-The landing page at `/` explains the implemented Ingest, Cull, Organize, and
-Export workflow, plus Mac-to-Mac review on a local network. Joining the waitlist
+The landing page foregrounds collaboration with dedicated sections linked from
+the header: one Mac hosts, approved reviewers cull and organize from their own
+Macs on the same local network, and changes are shared across the project.
+Ingest and export remain with the host. The complete Ingest, Cull, Organize, and
+Export workflow is also explained. Joining the waitlist
 is its only call to action. The original download page lives at `/tester`, with
 its password-protected Apple Silicon and Intel downloads.
 
@@ -132,5 +138,6 @@ pnpm build
 ```
 
 Tests use Node's built-in runner and TypeScript support (Node 22.18+).
-Brand assets are copied from the sibling `photodepot` repository. The Inter font
+Brand assets are copied from the sibling `photodepot` repository. Photography
+provenance and photographer credits are in `public/photography/pexels/README.md`. The Inter font
 license is in `app/fonts/OFL.txt`.
