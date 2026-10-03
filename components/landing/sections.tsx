@@ -77,6 +77,9 @@ export function LandingSections({ children }: { children: ReactNode }) {
     const motionPreference = window.matchMedia(
       "(prefers-reduced-motion: reduce)"
     )
+    const nativeScrolling = window.matchMedia(
+      "(max-width: 760px), (pointer: coarse)"
+    )
     const gesture = createScrollGesture()
     let transitionTarget: number | null = null
     let transitionFrame = 0
@@ -109,6 +112,7 @@ export function LandingSections({ children }: { children: ReactNode }) {
 
     function handleWheel(event: WheelEvent) {
       if (
+        nativeScrolling.matches ||
         event.ctrlKey ||
         event.deltaY === 0 ||
         Math.abs(event.deltaX) > Math.abs(event.deltaY)

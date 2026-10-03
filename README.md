@@ -4,9 +4,10 @@ The homepage at `/` uses the **Daylight** design: warm white backgrounds, dark
 type, curated photograph pairs, and full-screen sections that snap vertically
 as you scroll. The header stays visible while each section fills the remaining
 viewport; shorter screens can scroll through content that needs extra room.
-Wheel and trackpad gestures advance one section at a time, pausing at the edge
-of taller content until a fresh gesture. Touch navigation uses gentler native
-proximity snapping so small swipes can settle within a section before moving on.
+Desktop wheel and trackpad gestures advance one section at a time, pausing at
+the edge of taller content until a fresh gesture. Small screens (760px wide or
+less) and devices with a coarse pointer use normal scrolling without section
+snapping or automatic section navigation.
 It retains Photodepot’s original app icon, wordmark, and locally hosted Inter.
 Seven curated Pexels photographs cover portraiture, bridal detail, architecture,
 aerial and underwater photography, sculptural still life, and teams. Framer Motion and CSS
