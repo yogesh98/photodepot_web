@@ -1,3 +1,7 @@
+# Brand naming
+
+Use `photodepot` or `Photodepot` for the product name. Keep the internal `d` lowercase in all copy, documentation, metadata, and accessibility labels.
+
 <!-- BEGIN:nextjs-agent-rules -->
 
 # This is NOT the Next.js you know

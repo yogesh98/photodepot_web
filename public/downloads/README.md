@@ -1,4 +1,4 @@
-# PhotoDepot installers
+# Photodepot installers
 
 Drop the builds into this folder with these exact names:
 

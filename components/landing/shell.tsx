@@ -4,6 +4,7 @@ import { ArrowUpRight } from "lucide-react"
 import type { ReactNode } from "react"
 import { LandingWaitlist } from "@/components/landing-waitlist"
 import { WaitlistTrigger } from "@/components/waitlist-button"
+import { LandingSections } from "./sections"
 import styles from "./shell.module.css"
 
 export function LandingShell({ children }: { children: ReactNode }) {
@@ -17,18 +18,13 @@ export function LandingShell({ children }: { children: ReactNode }) {
           <Link
             href="/"
             className={styles.wordmark}
-            aria-label="PhotoDepot home"
+            aria-label="Photodepot home"
           >
             <Image src="/brand/photodepot.png" alt="" width={36} height={36} />
             <span>
               photodepot<span className={styles.period}>.</span>
             </span>
           </Link>
-          <nav className={styles.navigation} aria-label="Main navigation">
-            <a href="#philosophy">Why PhotoDepot</a>
-            <a href="#collaboration">Collaboration</a>
-            <a href="#workflow">The workflow</a>
-          </nav>
           <WaitlistTrigger
             className={styles.waitlist}
             render={<button type="button" />}
@@ -36,7 +32,7 @@ export function LandingShell({ children }: { children: ReactNode }) {
             Join the waitlist <ArrowUpRight size={15} aria-hidden="true" />
           </WaitlistTrigger>
         </header>
-        <main id="main">{children}</main>
+        <LandingSections>{children}</LandingSections>
       </div>
     </LandingWaitlist>
   )

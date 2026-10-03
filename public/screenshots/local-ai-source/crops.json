@@ -1,0 +1,56 @@
+{
+  "ai-stacks": [
+    "ai-stacks-full.png",
+    [
+      0,
+      286,
+      484,
+      1286
+    ]
+  ],
+  "ai-ranking": [
+    "ai-ranking-full.png",
+    [
+      2042,
+      288,
+      2560,
+      790
+    ]
+  ],
+  "ai-local": [
+    "ai-local-full.png",
+    [
+      706,
+      754,
+      1072,
+      882
+    ]
+  ],
+  "ai-decisions": [
+    "ai-decisions-full.png",
+    [
+      2262,
+      1064,
+      2530,
+      1426
+    ]
+  ],
+  "ai-decision-toolbar": [
+    "ai-decisions-full.png",
+    [
+      208,
+      1520,
+      951,
+      1610
+    ]
+  ],
+  "ai-local-context": [
+    "ai-local-full.png",
+    [
+      694,
+      746,
+      2308,
+      1294
+    ]
+  ]
+}

@@ -67,7 +67,7 @@ systemctl enable photodepot nginx
 systemctl restart photodepot
 systemctl reload-or-restart nginx
 systemctl is-active photodepot nginx
-echo 'PhotoDepot production build is running at http://192.168.1.152'
+echo 'Photodepot production build is running at http://192.168.1.152'
 echo 'Reverse proxy upstream: http://192.168.1.152:80 (preserve Host and X-Forwarded-Proto).'
 echo 'Private environment file: /srv/photodepot/.env'
 echo 'Waitlist database: /var/lib/photodepot/waitlist.sqlite'

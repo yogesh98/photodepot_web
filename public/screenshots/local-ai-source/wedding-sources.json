@@ -1,0 +1,420 @@
+{
+  "source_profile": "https://www.pexels.com/@emma-bauso-1183828/",
+  "license_url": "https://www.pexels.com/license/",
+  "downloaded_at": "2026-10-02",
+  "processing": "Downloaded public Pexels CDN1200px JPEGs as served. No visual edits, duplicated images, or synthesized capture dates.",
+  "same_event_note": "Shared wedding events and related series are inferred from matching attire, setting and composition; event dates and shared-event metadata were not independently verified.",
+  "same_event_evidence": [
+    {
+      "series": "Indoor ring ceremony",
+      "photo_ids": [
+        2253838,
+        2253840,
+        2253842,
+        2253843
+      ],
+      "basis": "Visual inspection: same off-shoulder white gown, dark navy groom suit, window and room; repeated ring-exchange compositions. Same event is an inference, not independently verified metadata."
+    },
+    {
+      "series": "Lace-gown wedding portraits",
+      "photo_ids": [
+        2253866,
+        2253867,
+        2253868,
+        2253870,
+        2253871
+      ],
+      "basis": "Visual inspection: same lace gown, floral bouquet, dark groom suit and autumn light. 2253868 is a distinct Pexels black-and-white version; files have unique content hashes. Same event is an inference, not independently verified metadata."
+    },
+    {
+      "series": "Rustic celebration and details",
+      "photo_ids": [
+        2253846,
+        2253847,
+        2253848,
+        2253849,
+        2253850,
+        2253851,
+        2253852,
+        2253853,
+        2253854,
+        2253855
+      ],
+      "basis": "Visual inspection: matching rustic barn setting, man in suspenders and bow tie, beer cart and macarons. Wedding/styled-event series is an inference, not independently verified metadata."
+    },
+    {
+      "series": "Wedding preparation and party",
+      "photo_ids": [
+        3585798,
+        3585799,
+        3585802,
+        3585805,
+        3585806
+      ],
+      "basis": "Photographer-profile source descriptions identify wedding rings, preparation, bride and bridesmaids. Different event dates not confirmed."
+    },
+    {
+      "series": "Casual couple session",
+      "photo_ids": [
+        3585811,
+        3585812,
+        3585817
+      ],
+      "basis": "Matching casual attire, barn and staircase; intentionally included as related couple-session photography to fill the demo. These are not claimed to be wedding ceremony photographs."
+    }
+  ],
+  "photos": [
+    {
+      "photo_id": 2253831,
+      "filename": "WEDDING_2253831.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/assorted-flowers-on-table-2253831/",
+      "download_url": "https://images.pexels.com/photos/2253831/pexels-photo-2253831.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 801,
+      "sha256": "c04ed758c577e30d2eb236c23794a7a574079824d52938263e24a475f0911771"
+    },
+    {
+      "photo_id": 2253837,
+      "filename": "WEDDING_2253837.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/person-holding-mortar-and-pestle-2253837/",
+      "download_url": "https://images.pexels.com/photos/2253837/pexels-photo-2253837.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 801,
+      "sha256": "2fc8ec1c63a94d9c1391ff41e75d1145d1ef19c84dc2fd87aa40ee3ba0a32702"
+    },
+    {
+      "photo_id": 2253838,
+      "filename": "WEDDING_2253838.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/woman-putting-wedding-ring-on-groom-s-finger-2253838/",
+      "download_url": "https://images.pexels.com/photos/2253838/pexels-photo-2253838.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 801,
+      "sha256": "f17bd23a422ec5a67608a8cb28578a24a38cfa5ee050c49a368fd8031cc58c06"
+    },
+    {
+      "photo_id": 2253840,
+      "filename": "WEDDING_2253840.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/woman-putting-ring-on-person-s-hand-2253840/",
+      "download_url": "https://images.pexels.com/photos/2253840/pexels-photo-2253840.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 801,
+      "sha256": "2b081f32638273ff4956a0d98a999bb142d8cf36c7773c9545d0cc45569d5ea1"
+    },
+    {
+      "photo_id": 2253841,
+      "filename": "WEDDING_2253841.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/cute-potted-plant-2253841/",
+      "download_url": "https://images.pexels.com/photos/2253841/pexels-photo-2253841.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 801,
+      "sha256": "e6d8bc820d0f3a17af2f1bd5a9f44330e5a07b27f4c62347d46e106e02b3c476"
+    },
+    {
+      "photo_id": 2253842,
+      "filename": "WEDDING_2253842.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/woman-and-man-holding-each-others-hands-2253842/",
+      "download_url": "https://images.pexels.com/photos/2253842/pexels-photo-2253842.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 801,
+      "sha256": "958f1d3f1c28e3a38676e96e0f5338f6afcff7c04094bd8bfb863d609ede481c"
+    },
+    {
+      "photo_id": 2253843,
+      "filename": "WEDDING_2253843.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/woman-holding-bouquet-of-flower-2253843/",
+      "download_url": "https://images.pexels.com/photos/2253843/pexels-photo-2253843.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 801,
+      "sha256": "a2723d23d733d4adb17ac5b13b6bba99036071c47e0fd51bae18c0f9d22b42a8"
+    },
+    {
+      "photo_id": 2253844,
+      "filename": "WEDDING_2253844.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/green-leafed-plant-in-a-pot-2253844/",
+      "download_url": "https://images.pexels.com/photos/2253844/pexels-photo-2253844.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 1798,
+      "sha256": "78dcaeb2ddc6298eb92b9231de7286016cdcc92f33c3080dc73cee9f26ddaafe"
+    },
+    {
+      "photo_id": 2253846,
+      "filename": "WEDDING_2253846.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/four-beer-bottles-on-cart-2253846/",
+      "download_url": "https://images.pexels.com/photos/2253846/pexels-photo-2253846.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 801,
+      "sha256": "82a98d0625af50c9477e9f28f13288cf99e18544071034fc01d357b16b85e2ad"
+    },
+    {
+      "photo_id": 2253847,
+      "filename": "WEDDING_2253847.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/bottles-and-drinking-glasses-on-cart-2253847/",
+      "download_url": "https://images.pexels.com/photos/2253847/pexels-photo-2253847.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 801,
+      "sha256": "3d9db958bfef19669d49ab97d05887aebb61a543754801c7c2ee21c3eb8ba851"
+    },
+    {
+      "photo_id": 2253848,
+      "filename": "WEDDING_2253848.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/table-setting-2253848/",
+      "download_url": "https://images.pexels.com/photos/2253848/pexels-photo-2253848.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 801,
+      "sha256": "11e418ed01bd9780d19b75fb4a1859960c0ac087e8064278167fa498b2d3e04e"
+    },
+    {
+      "photo_id": 2253849,
+      "filename": "WEDDING_2253849.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/woman-covering-man-s-eyes-2253849/",
+      "download_url": "https://images.pexels.com/photos/2253849/pexels-photo-2253849.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 801,
+      "sha256": "354b47ef238e732b6ff99c96de034945b89845f323a80869702505659e86ce97"
+    },
+    {
+      "photo_id": 2253850,
+      "filename": "WEDDING_2253850.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/man-carrying-black-and-gold-briefcase-2253850/",
+      "download_url": "https://images.pexels.com/photos/2253850/pexels-photo-2253850.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 1798,
+      "sha256": "86d8f417e7b6379926b1cc51ef79c3c41ff3bc7f540def022226d9917c2ca138"
+    },
+    {
+      "photo_id": 2253851,
+      "filename": "WEDDING_2253851.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/man-holding-collar-2253851/",
+      "download_url": "https://images.pexels.com/photos/2253851/pexels-photo-2253851.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 1798,
+      "sha256": "81644e1b6ebf68d1f35247d7428dbff1bdaa8223db44909800cc25fb55a42086"
+    },
+    {
+      "photo_id": 2253852,
+      "filename": "WEDDING_2253852.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/man-wearing-grey-pants-holding-axe-2253852/",
+      "download_url": "https://images.pexels.com/photos/2253852/pexels-photo-2253852.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 1798,
+      "sha256": "314bc9b5007b0c33775112e82ea3ffd638748bf642fb9bba6c43f85e7dcdae0e"
+    },
+    {
+      "photo_id": 2253853,
+      "filename": "WEDDING_2253853.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/woman-getting-macaroons-2253853/",
+      "download_url": "https://images.pexels.com/photos/2253853/pexels-photo-2253853.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 801,
+      "sha256": "c71b8c8824330719f565dd6fd9141f9612475c602997bae8d68c1095382a31dd"
+    },
+    {
+      "photo_id": 2253854,
+      "filename": "WEDDING_2253854.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/woman-wearing-black-dress-getting-a-macaroon-2253854/",
+      "download_url": "https://images.pexels.com/photos/2253854/pexels-photo-2253854.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 1798,
+      "sha256": "b3ec6fb2337af44947da7ab461530303fc9e6707afd9024a4357db8808d18a86"
+    },
+    {
+      "photo_id": 2253855,
+      "filename": "WEDDING_2253855.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/man-holding-clear-glass-bottle-2253855/",
+      "download_url": "https://images.pexels.com/photos/2253855/pexels-photo-2253855.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 801,
+      "sha256": "a555a96fd97457b2377ae4d66229fd6b313e4c8df8980a5aa523225ab36036a9"
+    },
+    {
+      "photo_id": 2253866,
+      "filename": "WEDDING_2253866.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/woman-wearing-white-wedding-dress-with-bouquet-of-flowers-2253866/",
+      "download_url": "https://images.pexels.com/photos/2253866/pexels-photo-2253866.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 801,
+      "sha256": "7958606401d6ba841f1c5d07d8e326e41989e6f4e71e65f2c4d56f217f1e777b"
+    },
+    {
+      "photo_id": 2253867,
+      "filename": "WEDDING_2253867.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/woman-wearing-white-wedding-gown-2253867/",
+      "download_url": "https://images.pexels.com/photos/2253867/pexels-photo-2253867.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 801,
+      "sha256": "12dc865e3581cc7caeb828b9c022295edce80fa91f3af8def27d949b9ce76159"
+    },
+    {
+      "photo_id": 2253868,
+      "filename": "WEDDING_2253868.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/black-and-white-bouquet-bride-flowers-2253868/",
+      "download_url": "https://images.pexels.com/photos/2253868/pexels-photo-2253868.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 801,
+      "sha256": "beb1552171e1d930d84fbd9935c8e072d3981190ca8b6a5706d39b7b5d2bf25f"
+    },
+    {
+      "photo_id": 2253869,
+      "filename": "WEDDING_2253869.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/man-and-woman-facing-a-painting-2253869/",
+      "download_url": "https://images.pexels.com/photos/2253869/pexels-photo-2253869.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 1798,
+      "sha256": "9809a5b8f6630143566949aebf5b25cbf3cb842f35317e256611e6ead6b85411"
+    },
+    {
+      "photo_id": 2253870,
+      "filename": "WEDDING_2253870.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/man-and-woman-kissing-2253870/",
+      "download_url": "https://images.pexels.com/photos/2253870/pexels-photo-2253870.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 801,
+      "sha256": "a3bbb4f986172890a035003727da158c4d044a44e56d990b4c371b64f796551d"
+    },
+    {
+      "photo_id": 2253871,
+      "filename": "WEDDING_2253871.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/wedding-bands-2253871/",
+      "download_url": "https://images.pexels.com/photos/2253871/pexels-photo-2253871.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 801,
+      "sha256": "3d13e6261c5d3f701008a05bb7f0ae9bc0a143acbbde538f4a2ab31cf2ea8ae8"
+    },
+    {
+      "photo_id": 3585798,
+      "filename": "WEDDING_3585798.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/two-persons-wearing-silver-colored-rings-3585798/",
+      "download_url": "https://images.pexels.com/photos/3585798/pexels-photo-3585798.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 801,
+      "sha256": "dbe1809b9e6efed8db92e0aa086afe03c70d4a8b0b8f4a3399812c48e7a7fc98"
+    },
+    {
+      "photo_id": 3585799,
+      "filename": "WEDDING_3585799.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/books-rings-wedding-3585799/",
+      "download_url": "https://images.pexels.com/photos/3585799/pexels-photo-3585799.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 801,
+      "sha256": "0a9fcea72faa8eb291b78f90e4edbddcc926638322ccd374b3f0f58b129a45d4"
+    },
+    {
+      "photo_id": 3585802,
+      "filename": "WEDDING_3585802.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/shallow-focus-photo-of-make-up-brushes-3585802/",
+      "download_url": "https://images.pexels.com/photos/3585802/pexels-photo-3585802.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 801,
+      "sha256": "1fe4fd3b5ebcad32e13a5871016a22c4ad80d8d1826cdc62ca75ea13b200b08d"
+    },
+    {
+      "photo_id": 3585805,
+      "filename": "WEDDING_3585805.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/woman-wearing-white-wedding-gown-3585805/",
+      "download_url": "https://images.pexels.com/photos/3585805/pexels-photo-3585805.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 1798,
+      "sha256": "556ad1a7ee7a7904f9af08c7fd069e4f1b2e0d93f0026e81ec87cfe7185907cf"
+    },
+    {
+      "photo_id": 3585806,
+      "filename": "WEDDING_3585806.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/selective-focus-photography-of-women-holding-wedding-flowers-3585806/",
+      "download_url": "https://images.pexels.com/photos/3585806/pexels-photo-3585806.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 801,
+      "sha256": "9275e50151a9d9b5455cad1a9b8c20bfaa8c90e126959c389551f0791ce31506"
+    },
+    {
+      "photo_id": 3585811,
+      "filename": "WEDDING_3585811.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/woman-holding-man-s-hand-3585811/",
+      "download_url": "https://images.pexels.com/photos/3585811/pexels-photo-3585811.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 801,
+      "sha256": "e171103e10a6327d7de5682d39f72b9763ffa52a1d0d27b1781b47df711a9a8e"
+    },
+    {
+      "photo_id": 3585812,
+      "filename": "WEDDING_3585812.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/man-and-woman-standing-on-green-grass-3585812/",
+      "download_url": "https://images.pexels.com/photos/3585812/pexels-photo-3585812.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 1798,
+      "sha256": "25af6e7b229c6d7bc9c3aaba2f6ca4361f572f48e9d0042a6d16ec38c1174296"
+    },
+    {
+      "photo_id": 3585817,
+      "filename": "WEDDING_3585817.jpg",
+      "photographer": "Emma Bauso",
+      "photographer_url": "https://www.pexels.com/@emma-bauso-1183828/",
+      "page_url": "https://www.pexels.com/photo/man-and-woman-sitting-on-stairs-3585817/",
+      "download_url": "https://images.pexels.com/photos/3585817/pexels-photo-3585817.jpeg?auto=compress&w=1200",
+      "width": 1200,
+      "height": 801,
+      "sha256": "60d08b78afa21c866a259803ed3cd982b8e6c9f78a84020553fd47137dade41e"
+    }
+  ]
+}

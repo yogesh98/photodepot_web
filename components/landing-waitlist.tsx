@@ -10,8 +10,10 @@ export function LandingWaitlist({ children }: { children: ReactNode }) {
 
 export function LandingWaitlistTrigger({
   appearance = "primary",
+  showArrow = true,
 }: {
   appearance?: "primary" | "quiet"
+  showArrow?: boolean
 }) {
   return (
     <WaitlistTrigger
@@ -20,7 +22,9 @@ export function LandingWaitlistTrigger({
       render={<button type="button" />}
     >
       Join the waitlist
-      <ArrowUpRight size={16} strokeWidth={1.5} aria-hidden="true" />
+      {showArrow && (
+        <ArrowUpRight size={16} strokeWidth={1.5} aria-hidden="true" />
+      )}
     </WaitlistTrigger>
   )
 }

@@ -1,0 +1,142 @@
+{
+  "version": 1,
+  "output_size": [
+    768,
+    504
+  ],
+  "frame_ms": 100,
+  "max_bytes": 4194304,
+  "palette_colors": [
+    256,
+    128
+  ],
+  "wide_hold_ms": 1500,
+  "zoom_ms": 1500,
+  "detail_hold_ms": 3000,
+  "return_ms": 1000,
+  "description": "Camera moves over unchanged actual app screenshots. GIF palette quantization and image resampling only; no interface, photo, or analysis-result synthesis.",
+  "features": {
+    "stacks": {
+      "source": "ai-stacks-wedding-full.png",
+      "detail_rect": [
+        0,
+        350,
+        700,
+        809.375
+      ],
+      "label": "Similar stacks",
+      "palette_source_samples": [
+        [
+          309,
+          440
+        ],
+        [
+          1000,
+          200
+        ]
+      ]
+    },
+    "ranking": {
+      "source": "ai-ranking-wedding-full.png",
+      "detail_rect": [
+        2040,
+        450,
+        2560,
+        791.25
+      ],
+      "label": "Face / Eye analysis",
+      "palette_source_samples": [
+        [
+          309,
+          440
+        ],
+        [
+          1000,
+          200
+        ]
+      ]
+    },
+    "local": {
+      "source": "ai-local-wedding-full.png",
+      "detail_rect": [
+        912,
+        532,
+        1944,
+        1209.25
+      ],
+      "second_detail_rect": [
+        912,
+        545,
+        1360,
+        839
+      ],
+      "detail_hold_ms": 1400,
+      "second_detail_hold_ms": 3000,
+      "pan_ms": 1200,
+      "label": "On your Mac",
+      "poster_stage": "second"
+    },
+    "decisions": {
+      "source": "ai-decisions-wedding-full.png",
+      "detail_rect": [
+        1800,
+        1050,
+        2560,
+        1548.75
+      ],
+      "second_detail_rect": [
+        200,
+        1095,
+        960,
+        1593.75
+      ],
+      "detail_hold_ms": 1800,
+      "second_detail_hold_ms": 2200,
+      "pan_ms": 1200,
+      "label": "Your decisions",
+      "palette_source_samples": [
+        [
+          309,
+          440
+        ],
+        [
+          1000,
+          200
+        ]
+      ]
+    }
+  },
+  "poster_size": [
+    960,
+    630
+  ],
+  "capture_context": {
+    "project": "Isolated Local AI walkthrough",
+    "card": "Wedding demo card",
+    "photos": 32,
+    "scenes": 31,
+    "automatic_stack": {
+      "name": "Scene20",
+      "photo_ids": [
+        2253867,
+        2253868
+      ],
+      "reason": "DINOv2 similarity \u00b7 neighboring original filenames",
+      "manually_protected": false
+    },
+    "face_result": {
+      "photo_id": 2253851,
+      "native_label": "Possible closed eyes",
+      "qualification": "App estimate, not a ground-truth eye classification."
+    },
+    "decisions": {
+      "photo_id": 2253867,
+      "native_pick": true,
+      "native_stars": 4,
+      "merge_disabled_reason": "Only one scene selected"
+    },
+    "view_zoom": "100% native View zoom",
+    "source_photography": "wedding-sources.json",
+    "processing": "Normal native ingest, copy verification and bundled analysis; no fabricated rankings, faces, stacks or timestamps."
+  }
+}

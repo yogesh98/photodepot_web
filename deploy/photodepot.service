@@ -1,5 +1,5 @@
 [Unit]
-Description=PhotoDepot production website
+Description=Photodepot production website
 Wants=network-online.target
 After=network-online.target
 StartLimitIntervalSec=60

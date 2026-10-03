@@ -1,98 +1,94 @@
 "use client"
 
 import Image from "next/image"
-import {
-  AnimatePresence,
-  motion,
-  useReducedMotion,
-  useScroll,
-  useTransform,
-} from "framer-motion"
-import {
-  ArrowDown,
-  ArrowLeft,
-  ArrowRight,
-  ArrowUpRight,
-  Wifi,
-} from "lucide-react"
-import { useRef, useState } from "react"
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion"
+import { ArrowDown, ArrowUpRight, UsersRound } from "lucide-react"
+import { useState } from "react"
 import { LandingWaitlistTrigger } from "@/components/landing-waitlist"
-import { photographs } from "./photography"
+import { collaborationPhotograph, photographs } from "./photography"
 import styles from "./daylight.module.css"
 
-const pairs = [
-  [0, 1],
-  [3, 4],
-  [5, 6],
+const aiFeatures = [
+  {
+    id: "stacks",
+    label: "Similar stacks",
+    title: "Related frames, together.",
+    text: "Photodepot compares how your photos look and when they were taken to group related frames into stacks. Review a burst or repeated composition together, instead of one file at a time.",
+    image: "/screenshots/ai-stacks.gif",
+    poster: "/screenshots/ai-stacks-poster.png",
+    width: 960,
+    height: 630,
+    alt: "Photodepot’s wedding photographs grouped into related stacks.",
+  },
+  {
+    id: "ranking",
+    label: "Face / Eye analysis",
+    title: "A little help finding the keepers.",
+    text: "Face analysis estimates whether eyes are open or closed. Together with sharpness and exposure checks, it helps rank the photos in each stack so you have a useful place to start.",
+    image: "/screenshots/ai-ranking.gif",
+    poster: "/screenshots/ai-ranking-poster.png",
+    width: 960,
+    height: 630,
+    alt: "Photodepot’s Close-ups panel highlighting possible closed eyes in a wedding photograph.",
+  },
+  {
+    id: "local",
+    label: "On your Mac",
+    title: "Your photos stay with you.",
+    text: "The AI model comes bundled with Photodepot and runs offline on your Mac. Analysis happens locally, without uploading your photographs to a cloud AI service.",
+    image: "/screenshots/ai-decisions.gif",
+    poster: "/screenshots/ai-decisions-poster.png",
+    width: 960,
+    height: 630,
+    alt: "Photodepot’s wedding photo library with pick, rating, and stack decision controls.",
+  },
 ]
+
 const workflow = [
   {
     name: "Ingest",
-    text: "Bring your photographs home on the host Mac. Copy from your cards, verify your files, and keep your originals intact.",
+    text: "easily ingest multiple cards throughout the day without missing a beat. Photodepot helps you keep track of ingests and transfers faster and more reliably than your file explorer",
     image: "ingest",
   },
   {
     name: "Cull",
-    text: "Follow your instincts, together. Compare frames and flag the keepers with approved reviewers on your local network.",
+    text: "Cull with AI assistance and review together with your team, seamlessly connect over your local network. Tag, Rate, and Flag your photos",
     image: "cull",
   },
   {
     name: "Organize",
-    text: "Give a shared project its shape. Use folders, tags, and ratings to bring your photographs into focus together.",
+    text: "Give your project its shape. Organize quickly, without waiting for your disk to catch up.",
     image: "organize",
   },
   {
     name: "Export",
-    text: "Take your selection forward. Export your chosen photographs and XMP sidecars from the host Mac for the next part of your process.",
+    text: "Take your project to the archives. Export your assets into your chosen structure and leave the clutter behind.",
     image: "organize",
   },
 ]
 
-export function DaylightLanding() {
-  const heroRef = useRef<HTMLElement>(null)
-  const imageRef = useRef<HTMLDivElement>(null)
+export function DaylightLanding({
+  heroPhotoIndices,
+}: {
+  heroPhotoIndices: number[]
+}) {
   const reducedMotion = useReducedMotion()
-  const [pair, setPair] = useState(0)
-  const [selectedPhoto, setSelectedPhoto] = useState(5)
-  const [stage, setStage] = useState(1)
-  const { scrollYProgress: heroProgress } = useScroll({
-    target: heroRef,
-    offset: ["start start", "end start"],
-  })
-  const { scrollYProgress: imageProgress } = useScroll({
-    target: imageRef,
-    offset: ["start end", "center center"],
-  })
-  const heroY = useTransform(heroProgress, [0, 1], [0, 110])
-  const photoMask = useTransform(
-    imageProgress,
-    [0, 1],
-    ["inset(10% 12% 10% 12%)", "inset(0% 0% 0% 0%)"]
-  )
-  const selected = photographs[selectedPhoto]
+  const [selectedFeature, setSelectedFeature] = useState(0)
+  const [stage, setStage] = useState(0)
+  const feature = aiFeatures[selectedFeature]
   const activeStage = workflow[stage]
 
   return (
     <div className={styles.page}>
       <section
-        ref={heroRef}
+        id="vision"
         className={styles.hero}
         aria-labelledby="daylight-title"
       >
-        <div className={styles.heroMeta}>
-          <span>
-            <i /> A workspace for you and your team
-          </span>
-          <span>In development / For Mac</span>
-        </div>
-        <motion.div
-          className={styles.heroPhotos}
-          style={{ y: reducedMotion ? 0 : heroY }}
-        >
+        <div className={styles.heroPhotos}>
           <AnimatePresence initial={false}>
             <motion.div
               className={styles.photoPair}
-              key={pair}
               initial={{
                 clipPath: reducedMotion
                   ? "inset(0 0 0 0)"
@@ -105,7 +101,7 @@ export function DaylightLanding() {
                 ease: [0.22, 1, 0.36, 1],
               }}
             >
-              {pairs[pair].map((photoIndex, index) => {
+              {heroPhotoIndices.map((photoIndex, index) => {
                 const photo = photographs[photoIndex]
                 return (
                   <div
@@ -117,161 +113,36 @@ export function DaylightLanding() {
                       src={photo.src}
                       alt={photo.alt}
                       fill
-                      sizes={
-                        photoIndex < 2
-                          ? "(max-width: 700px) 170vw, 70vw"
-                          : "(max-width: 700px) 75vw, 45vw"
-                      }
-                      preload={pair === 0}
+                      sizes={`(max-width: 760px) max(50vw, ${Math.ceil((photo.width / photo.height) * 100)}svh), max(30vw, ${Math.ceil((photo.width / photo.height) * 100)}svh)`}
+                      preload
                       style={{ objectPosition: photo.position }}
                     />
-                    <span className={styles.panelLabel}>
-                      {photo.label} / 0{photoIndex + 1}
-                    </span>
+                    <a
+                      className={styles.panelLabel}
+                      href={photo.source}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Photo by {photo.photographer}
+                    </a>
                   </div>
                 )
               })}
             </motion.div>
           </AnimatePresence>
-        </motion.div>
+        </div>
         <div className={styles.heroCopy}>
-          <p className={styles.sectionLabel}>Your vision. In focus.</p>
           <h1 id="daylight-title">
-            <span>TRUST</span>
+            <span>ALWAYS</span>
             <span>YOUR</span>
             <span>
-              EYE<span className={styles.orange}>.</span>
+              VISION<span className={styles.orange}>.</span>
             </span>
           </h1>
         </div>
-        <div className={styles.heroBottom}>
-          <div className={styles.heroIntro}>
-            <p>
-              Make the cut together, from your own Macs.
-              <br />
-              One project. The same local network.
-            </p>
-            <div className={styles.cta}>
-              <LandingWaitlistTrigger />
-            </div>
-          </div>
-          <div
-            className={styles.heroControls}
-            aria-label="Featured photography controls"
-          >
-            <span className={styles.counter} aria-live="polite">
-              0{pair + 1}
-              <span> / 03</span>
-            </span>
-            <button
-              type="button"
-              onClick={() => setPair((pair + pairs.length - 1) % pairs.length)}
-              aria-label="Previous photograph pair"
-            >
-              <ArrowLeft size={19} aria-hidden="true" />
-            </button>
-            <button
-              type="button"
-              onClick={() => setPair((pair + 1) % pairs.length)}
-              aria-label="Next photograph pair"
-            >
-              <ArrowRight size={19} aria-hidden="true" />
-            </button>
-            <a
-              href="#philosophy"
-              className={styles.exploreLink}
-              aria-label="Explore the collection"
-            >
-              <ArrowDown size={19} aria-hidden="true" />
-            </a>
-          </div>
-        </div>
-      </section>
-
-      <section
-        id="philosophy"
-        className={styles.collection}
-        aria-labelledby="daylight-philosophy-title"
-      >
-        <div className={styles.sectionTopline}>
-          <span>01 / A way of seeing</span>
-          <span>Every kind of photographer</span>
-        </div>
-        <div className={styles.collectionIntro}>
-          <h2 id="daylight-philosophy-title">
-            IT STARTS
-            <br />
-            WITH A FEELING.
-          </h2>
-          <p>
-            A face. A gesture. An unexpected shape in the everyday. You know
-            when a photograph has something. Bring trusted eyes into the
-            selection, and build a body of work together with PhotoDepot.
-          </p>
-        </div>
-        <div
-          className={styles.photoNavigation}
-          aria-label="Explore photography subjects"
-        >
-          {photographs.map((photo, index) => (
-            <button
-              key={photo.id}
-              type="button"
-              aria-pressed={selectedPhoto === index}
-              onClick={() => setSelectedPhoto(index)}
-            >
-              <span>0{index + 1}</span>
-              {photo.label}
-              <ArrowUpRight size={15} aria-hidden="true" />
-            </button>
-          ))}
-        </div>
-        <div ref={imageRef} className={styles.featuredOuter}>
-          <motion.div
-            className={styles.featuredPhoto}
-            style={{ clipPath: reducedMotion ? undefined : photoMask }}
-          >
-            <AnimatePresence initial={false}>
-              <motion.div
-                key={selected.id}
-                className={styles.featuredLayer}
-                initial={{
-                  clipPath: reducedMotion
-                    ? "inset(0 0 0 0)"
-                    : "inset(0 0 0 100%)",
-                }}
-                animate={{ clipPath: "inset(0 0 0 0%)" }}
-                exit={{ opacity: 0 }}
-                transition={{
-                  duration: reducedMotion ? 0 : 0.7,
-                  ease: [0.22, 1, 0.36, 1],
-                }}
-              >
-                <Image
-                  src={selected.src}
-                  alt={selected.alt}
-                  fill
-                  sizes="(max-width: 700px) 100vw, 92vw"
-                  style={{ objectPosition: selected.position }}
-                />
-              </motion.div>
-            </AnimatePresence>
-            <div className={styles.featuredOverlay} aria-hidden="true">
-              <span>
-                LOOK
-                <br />
-                CLOSER.
-              </span>
-              <ArrowUpRight />
-            </div>
-          </motion.div>
-        </div>
-        <div className={styles.featuredCaption} aria-live="polite">
-          <span>Selected study / {selected.label}</span>
-          <a href={selected.source} target="_blank" rel="noreferrer">
-            {selected.photographer} / Pexels ↗
-          </a>
-        </div>
+        <a href="#workflow" className={styles.scrollHint}>
+          Scroll to explore <ArrowDown size={16} aria-hidden="true" />
+        </a>
       </section>
 
       <section
@@ -279,25 +150,21 @@ export function DaylightLanding() {
         className={styles.workflow}
         aria-labelledby="daylight-workflow-title"
       >
-        <div className={styles.sectionTopline}>
-          <span>02 / Behind the photographs</span>
-          <span>PhotoDepot for Mac</span>
-        </div>
         <div className={styles.workflowHeading}>
           <h2 id="daylight-workflow-title">
-            THE WORK
+            MAKE ROOM FOR
             <br />
-            AFTER THE WORK.
+            YOUR BEST WORK.
           </h2>
           <p>
-            From the first import to the final selection. A considered workflow
-            with room for the people whose eye you trust.
+            Every shoot holds something worth finding. Bring in your photographs,
+            compare the possibilities, and carry your strongest selection forward.
           </p>
         </div>
         <div className={styles.workflowGrid}>
           <div
             className={styles.steps}
-            aria-label="Explore the PhotoDepot workflow"
+            aria-label="Explore the Photodepot workflow"
           >
             {workflow.map((item, index) => (
               <button
@@ -316,14 +183,11 @@ export function DaylightLanding() {
                 <ArrowUpRight size={22} aria-hidden="true" />
               </button>
             ))}
+            <p className={styles.mobileStepDescription} aria-live="polite">
+              {activeStage.text}
+            </p>
           </div>
           <div className={styles.product}>
-            <div className={styles.productTop}>
-              <span>
-                <i /> A look inside PhotoDepot
-              </span>
-              <span>{activeStage.name}</span>
-            </div>
             <div className={styles.productImage}>
               <AnimatePresence mode="wait" initial={false}>
                 <motion.div
@@ -335,7 +199,7 @@ export function DaylightLanding() {
                 >
                   <Image
                     src={`/screenshots/${activeStage.image}.png`}
-                    alt={`PhotoDepot ${activeStage.image} workspace showing photo thumbnails and selection tools`}
+                    alt={`Photodepot ${activeStage.image} workspace showing photo thumbnails and selection tools`}
                     width={2560}
                     height={1600}
                     sizes="(max-width: 850px) 92vw, 54vw"
@@ -344,13 +208,87 @@ export function DaylightLanding() {
               </AnimatePresence>
             </div>
             <div className={styles.reviewNote}>
-              <Wifi size={19} aria-hidden="true" />
+              <UsersRound size={19} aria-hidden="true" />
               <p>
-                <strong>Your own Macs. A shared project.</strong> Cull and
-                organize together on the same local network.
+                <strong>Collaborate with your team.</strong> Cull and organize
+                the same project from separate Macs on your local network.
               </p>
             </div>
           </div>
+        </div>
+      </section>
+
+      <section
+        id="philosophy"
+        className={styles.collection}
+        aria-labelledby="daylight-philosophy-title"
+      >
+        <div className={styles.collectionIntro}>
+          <h2 id="daylight-philosophy-title">
+            POWERED <br />
+            QUIETLY WITH <br />
+            LOCAL AI.
+          </h2>
+          <p>
+            Your photos are never sent to the cloud. Photodepot’s local AI
+            supports your vision and saves you time, while keeping you in
+            control of your craft.
+          </p>
+        </div>
+        <div
+          className={styles.aiNavigation}
+          aria-label="Explore Photodepot’s local AI features"
+        >
+          {aiFeatures.map((item, index) => (
+            <button
+              key={item.id}
+              type="button"
+              aria-pressed={selectedFeature === index}
+              aria-controls="local-ai-feature"
+              onClick={() => setSelectedFeature(index)}
+            >
+              <span className={styles.aiFeatureNumber}>0{index + 1}</span>
+              <span className={styles.aiFeatureLabel}>{item.label}</span>
+              <ArrowUpRight size={15} aria-hidden="true" />
+            </button>
+          ))}
+        </div>
+        <div id="local-ai-feature" aria-live="polite">
+          <AnimatePresence mode="wait" initial={false}>
+            <motion.div
+              key={feature.id}
+              className={styles.aiFeature}
+              initial={{ opacity: reducedMotion ? 1 : 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: reducedMotion ? 1 : 0 }}
+              transition={{ duration: reducedMotion ? 0 : 0.15 }}
+            >
+              <div className={styles.aiScreenshot} data-feature={feature.id}>
+                <picture>
+                  <source
+                    media="(prefers-reduced-motion: reduce)"
+                    srcSet={feature.poster}
+                  />
+                  <Image
+                    id="local-ai-animation"
+                    src={feature.image}
+                    alt={feature.alt}
+                    width={feature.width}
+                    height={feature.height}
+                    sizes="(max-width: 850px) 92vw, 58vw"
+                    unoptimized
+                  />
+                </picture>
+              </div>
+              <div className={styles.aiFeatureCopy}>
+                <span className={styles.sectionLabel}>
+                  0{selectedFeature + 1} / {feature.label}
+                </span>
+                <h3>{feature.title}</h3>
+                <p>{feature.text}</p>
+              </div>
+            </motion.div>
+          </AnimatePresence>
         </div>
       </section>
 
@@ -359,83 +297,95 @@ export function DaylightLanding() {
         className={styles.collaboration}
         aria-labelledby="daylight-collaboration-title"
       >
-        <div className={styles.sectionTopline}>
-          <span>03 / A shared perspective</span>
-          <span>Same local network</span>
-        </div>
-        <div className={styles.collaborationHeading}>
-          <h2 id="daylight-collaboration-title">
-            MORE EYES.
-            <br />
-            ONE VISION.
-          </h2>
-          <p>
-            The edit gets better with people you trust. Invite your team to cull
-            and organize the same project, each from their own Mac.
-          </p>
+        <div className={styles.collaborationFeature}>
+          <div className={styles.collaborationHeading}>
+            <h2 id="daylight-collaboration-title">
+              Made with
+              <br />
+              teams in mind
+            </h2>
+            <p>
+              Culling has traditionally been a solo task, even when the shoot
+              takes a team. Photodepot brings everyone into the process, so you
+              can review together, share decisions, and keep the work moving with
+              less time spent passing photos around or coordinating access to a
+              server.
+            </p>
+          </div>
+          <figure className={styles.collaborationVisual}>
+            <Image
+              src={collaborationPhotograph.src}
+              alt={collaborationPhotograph.alt}
+              fill
+              sizes="(max-width: 900px) 90vw, 40vw"
+              style={{ objectPosition: collaborationPhotograph.position }}
+            />
+            <figcaption>
+              <a
+                className={styles.panelLabel}
+                href={collaborationPhotograph.source}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Photo by {collaborationPhotograph.photographer}
+              </a>
+            </figcaption>
+          </figure>
         </div>
         <ol className={styles.collaborationSteps}>
           <li>
             <span className={styles.collaborationNumber}>01</span>
-            <h3>One Mac hosts.</h3>
+            <h3>Connect your team.</h3>
             <p>
-              Open the project on a host Mac. Ingest and export stay with the
-              host.
+              Bring your teammates into a shared project from their own Macs.
+              Keep everyone connected to the same work, with less friction
+              around sharing photos and coordinating access.
             </p>
           </li>
           <li>
             <span className={styles.collaborationNumber}>02</span>
-            <h3>Bring your team in.</h3>
+            <h3>Cull together.</h3>
             <p>
-              Reviewers join from their own Macs on the same local network. The
-              host approves access.
+              Review, rate, and flag photos alongside your teammates. Everyone
+              can contribute without stepping on each other’s toes.
             </p>
           </li>
           <li>
             <span className={styles.collaborationNumber}>03</span>
-            <h3>Make the cut together.</h3>
+            <h3>See every choice.</h3>
             <p>
-              Cull and organize with a shared view of the work. Changes are
-              shared across the project.
+              Use a shared knowledge base to keep the team’s picks, ratings,
+              and flags in view. See what’s been decided and build on each
+              other’s work.
             </p>
           </li>
         </ol>
       </section>
 
       <section
+        id="waitlist"
         className={styles.closing}
         aria-labelledby="daylight-closing-title"
       >
-        <div className={styles.closingTop}>
-          <span>04 / Make room for your next collaboration</span>
-          <span>In development</span>
-        </div>
         <div className={styles.closingBody}>
-          <h2 id="daylight-closing-title">
-            GOOD WORK.
-            <br />
-            WHAT&apos;S NEXT?
-          </h2>
-          <ArrowUpRight
-            className={styles.closingArrow}
-            strokeWidth={0.8}
-            aria-hidden="true"
-          />
-        </div>
-        <div className={styles.closingBottom}>
-          <p>
-            Bring your next body of work together.
-            <br />
-            Join the waitlist for news and early access.
-          </p>
+          <blockquote className={styles.closingQuote}>
+            <h2 id="daylight-closing-title">
+              Photography
+              <br />
+              is about
+              <br />
+              finding things
+            </h2>
+            <p className={styles.closingCredit}>
+              — <cite>Saul Leiter</cite>
+            </p>
+          </blockquote>
           <div className={styles.closingCta}>
-            <LandingWaitlistTrigger />
+            <LandingWaitlistTrigger showArrow={false} />
+            <p className={styles.closingTagline}>
+              <em>built for creatives</em>
+            </p>
           </div>
-          <span>
-            Made for your eye.
-            <br />
-            Built for your Mac.
-          </span>
         </div>
       </section>
     </div>

@@ -106,7 +106,7 @@ html {
   }
 }
 
-/* PhotoDepot's stone palette, square controls, and locally bundled Inter. */
+/* Photodepot's stone palette, square controls, and locally bundled Inter. */
 .preview-page {
   --page-surface: #faf9f6;
   --quiet-text: #78716c;
@@ -220,6 +220,7 @@ html {
   padding: 4px 0;
   color: var(--quiet-text, var(--muted-foreground));
   font-size: 12px;
+  font-weight: 700;
   text-decoration: underline;
   text-underline-offset: 3px;
   cursor: pointer;
@@ -398,6 +399,9 @@ html {
   flex-direction: column;
   margin-top: 24px;
 }
+.waitlist-form .dialog-submit {
+  font-weight: 700;
+}
 .waitlist-required-note {
   margin-bottom: 16px;
   color: var(--muted-foreground);
@@ -548,7 +552,7 @@ html {
   color: #fcfbf8;
   font-family: inherit;
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 700;
   line-height: 1.4;
   text-decoration: none;
   white-space: nowrap;

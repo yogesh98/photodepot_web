@@ -1,21 +1,44 @@
 .page {
+  --header-height: 88px;
+  --section-height: calc(100svh - var(--header-height));
+  --section-height: calc(100dvh - var(--header-height));
   --art-paper: #f5f4ef;
   --art-ink: #171717;
   --art-line: #17171724;
-  min-height: 100svh;
+  height: 100svh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   background: var(--art-paper);
   color: var(--art-ink);
 }
+.sections {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scroll-snap-type: y mandatory;
+  scroll-behavior: smooth;
+}
+.sections[data-wheel-navigation] {
+  scroll-snap-type: none;
+}
+.sections:focus-visible {
+  outline: 2px solid var(--art-ink);
+  outline-offset: -2px;
+}
 .header {
+  flex-shrink: 0;
   display: flex;
   position: relative;
   z-index: 10;
   align-items: center;
   justify-content: space-between;
   gap: 24px;
-  height: 88px;
+  height: var(--header-height);
   padding: 0 4%;
-  border-bottom: 1px solid var(--art-line);
+  background: var(--header-background, var(--art-paper));
 }
 .wordmark {
   display: inline-flex;
@@ -32,46 +55,34 @@
 .period {
   color: #9b9287;
 }
-.navigation {
-  display: flex;
-  align-items: center;
-  gap: 36px;
-  font-size: 12px;
-}
-.navigation a {
-  position: relative;
-  padding: 10px 0;
-}
-.navigation a::after {
-  content: "";
-  position: absolute;
-  bottom: 3px;
-  left: 0;
-  width: 100%;
-  height: 1px;
-  background: currentColor;
-  transform: scaleX(0);
-  transform-origin: left;
-  transition: transform 0.3s;
-}
-.navigation a:hover::after {
-  transform: scaleX(1);
-}
 .waitlist {
   display: inline-flex;
   align-items: center;
   gap: 22px;
   padding: 13px 18px;
-  border: 1px solid var(--art-line);
+  border: 1px solid #ff512e;
+  background: #ff512e;
+  color: var(--art-ink);
   font-size: 12px;
+  font-weight: 700;
   cursor: pointer;
   transition:
     background 0.2s,
+    border-color 0.2s,
     color 0.2s;
 }
 .waitlist:hover {
+  background: #ff6e50;
+  border-color: #ff6e50;
+}
+.page[data-header-section="waitlist"] .waitlist {
   background: var(--art-ink);
+  border-color: var(--art-ink);
   color: var(--art-paper);
+}
+.page[data-header-section="waitlist"] .waitlist:hover {
+  background: #35332e;
+  border-color: #35332e;
 }
 .page a:focus-visible,
 .page button:focus-visible {
@@ -91,13 +102,12 @@
   transform: translateY(0);
 }
 @media (max-width: 760px) {
+  .page {
+    --header-height: 76px;
+  }
   .header {
     padding: 0 20px;
-    height: 76px;
     gap: 16px;
-  }
-  .navigation {
-    display: none;
   }
   .wordmark {
     font-size: 19px;
@@ -114,6 +124,9 @@
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .sections {
+    scroll-behavior: auto;
+  }
   .page a,
   .page button {
     transition: none;

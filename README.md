@@ -1,10 +1,14 @@
 # photodepot website
 
 The homepage at `/` uses the **Daylight** design: warm white backgrounds, dark
-type, changing photograph pairs, photo selectors, and scroll-driven reveals.
-It retains PhotoDepot’s original app icon, wordmark, and locally hosted Inter.
-Seven curated Pexels photographs cover portraiture, dance, human detail,
-architecture, street scenes, and sculptural still life. Framer Motion and CSS
+type, curated photograph pairs, and full-screen sections that snap vertically
+as you scroll. The header stays visible while each section fills the remaining
+viewport; shorter screens can scroll through content that needs extra room.
+Wheel and trackpad gestures advance one section at a time; touch and keyboard
+navigation use native scroll snapping.
+It retains Photodepot’s original app icon, wordmark, and locally hosted Inter.
+Seven curated Pexels photographs cover portraiture, bridal detail, architecture,
+aerial and underwater photography, sculptural still life, and teams. Framer Motion and CSS
 transitions respect reduced-motion preferences. Previous concept preview URLs
 redirect to the homepage.
 
@@ -16,7 +20,7 @@ Export workflow is also explained. Joining the waitlist
 is its only call to action. The original download page lives at `/tester`, with
 its password-protected Apple Silicon and Intel downloads.
 
-Screenshots show the actual PhotoDepot desktop app in light mode with demo
+Screenshots show the actual Photodepot desktop app in light mode with demo
 media. Capture and media provenance are documented in
 `public/screenshots/README.md`.
 
@@ -42,7 +46,7 @@ Copy the installers into `public/downloads/` using these exact names:
 - Apple Silicon: `photodepot-0.1.0-arm64.dmg`
 - Intel Mac: `photodepot-0.1.0-x64.dmg`
 
-Both current releases have been copied from the sibling PhotoDepot repository.
+Both current releases have been copied from the sibling Photodepot repository.
 DMGs are ignored by Git; upload them manually on deployment. To use different
 filenames, update `DOWNLOAD_FILES` in `lib/download-files.ts`.
 
@@ -69,7 +73,7 @@ ensure the proxy overwrites untrusted `X-Forwarded-For` headers.
 ## Waitlist
 
 The landing page's Join waitlist buttons and the link on `/tester` open an
-interest form. First name, email, and how the visitor heard about PhotoDepot
+interest form. First name, email, and how the visitor heard about Photodepot
 are required; last name is optional.
 `POST /api/waitlist` validates and saves submissions to a server-side SQLite
 `waitlist` table, including a UTC creation timestamp. Emails are normalized to
@@ -89,6 +93,25 @@ ephemeral serverless filesystems will not retain the waitlist. Back up the
 database using SQLite's backup tools.
 
 ## Ubuntu VM deployment
+
+To copy the codebase to the server, run this from a local Mac terminal outside
+the SSH session:
+
+```sh
+rsync -av --exclude='node_modules' --exclude='.next' --exclude='.git' --exclude='data' /Users/yogeshpatel/Developer/photodepot_web/ photodepot@192.168.1.152:/home/photodepot/photodepot_web/
+```
+
+This copies into `/home/photodepot/photodepot_web` and overwrites matching files,
+excluding local dependencies, build output, Git history, and waitlist data.
+It includes `.env` and installers if present. Files that exist only on the
+server are preserved.
+
+Then reinstall dependencies on the server:
+
+```sh
+cd ~/photodepot_web
+pnpm install
+```
 
 `deploy/install-vm.sh` installs Node 22 LTS and pnpm, installs Linux dependencies,
 and runs `pnpm build` **on the VM**. It then runs

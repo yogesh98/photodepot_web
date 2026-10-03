@@ -34,7 +34,7 @@ try {
       console.log(`\n#${row.id} — ${row.created_at}`);
       console.log(`Name: ${[row.first_name, row.last_name].filter(Boolean).join(' ')}`);
       console.log(`Email: ${row.email}`);
-      console.log(`Heard about PhotoDepot: ${row.heard_about_us}`);
+      console.log(`Heard about Photodepot: ${row.heard_about_us}`);
     }
   } finally {
     database.close();
