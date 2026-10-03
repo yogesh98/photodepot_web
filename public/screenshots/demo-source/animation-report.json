@@ -1,0 +1,186 @@
+{
+  "ai-ranking": {
+    "source": "22-cull-closed-eyes-light.png",
+    "source_sha256": "560c76343d3f68914b8f97db035447c35ffae994730c2c5065aa01dee33765f0",
+    "output": "ai-ranking.gif",
+    "poster": "ai-ranking-poster.png",
+    "palette_colors": 256,
+    "lossy": 40,
+    "poster_dimensions": [
+      960,
+      600
+    ],
+    "frames": 231,
+    "duration_ms": 7200,
+    "loop": 0,
+    "motion_frame_ms": 20,
+    "motion_fps": 50,
+    "dimensions": [
+      768,
+      480
+    ],
+    "bytes": 8394904,
+    "loop_boundary_identical": true
+  },
+  "workflow-ingest": {
+    "source": "09a-ingest-queue-light.png",
+    "source_sha256": "70c5e5b49e2c197dc476ebec90aba5add74631f0f57a6d0ab3336ad5c4893237",
+    "output": "workflow-ingest.gif",
+    "poster": "workflow-ingest-poster.png",
+    "palette_colors": 256,
+    "lossy": 40,
+    "poster_dimensions": [
+      960,
+      600
+    ],
+    "frames": 191,
+    "duration_ms": 6800,
+    "loop": 0,
+    "motion_frame_ms": 20,
+    "motion_fps": 50,
+    "dimensions": [
+      768,
+      480
+    ],
+    "bytes": 11859748,
+    "loop_boundary_identical": true
+  },
+  "workflow-cull": {
+    "source": "16-cull-compare-light.png",
+    "source_sha256": "03c1844d0d8d83f480ccdef7b13a34f6eee24d90f2becbe0b59b350497532a33",
+    "output": "workflow-cull.gif",
+    "poster": "workflow-cull-poster.png",
+    "palette_colors": 256,
+    "lossy": 40,
+    "poster_dimensions": [
+      960,
+      600
+    ],
+    "frames": 191,
+    "duration_ms": 6800,
+    "loop": 0,
+    "motion_frame_ms": 20,
+    "motion_fps": 50,
+    "dimensions": [
+      768,
+      480
+    ],
+    "bytes": 14354460,
+    "loop_boundary_identical": true
+  },
+  "workflow-organize": {
+    "source": "33-organize-tag-picker-light.png",
+    "source_sha256": "0e8be7f0b1d92a51a9c60cbcc36e47592b2e2c8881b3279583a36fdefc61c5bc",
+    "output": "workflow-organize.gif",
+    "poster": "workflow-organize-poster.png",
+    "palette_colors": 256,
+    "lossy": 40,
+    "poster_dimensions": [
+      960,
+      600
+    ],
+    "frames": 191,
+    "duration_ms": 6800,
+    "loop": 0,
+    "motion_frame_ms": 20,
+    "motion_fps": 50,
+    "dimensions": [
+      768,
+      480
+    ],
+    "bytes": 18505116,
+    "loop_boundary_identical": true
+  },
+  "workflow-export": {
+    "source": "51-export-summary-light.png",
+    "source_sha256": "3425b1750d66d3a514bf4d4b3c7e5afa1ddbb65732ea293f6c6a815e705d85bc",
+    "output": "workflow-export.gif",
+    "poster": "workflow-export-poster.png",
+    "palette_colors": 256,
+    "lossy": 40,
+    "poster_dimensions": [
+      960,
+      600
+    ],
+    "frames": 291,
+    "duration_ms": 9400,
+    "loop": 0,
+    "motion_frame_ms": 20,
+    "motion_fps": 50,
+    "dimensions": [
+      768,
+      480
+    ],
+    "bytes": 4585852,
+    "loop_boundary_identical": true
+  },
+  "ai-stacks": {
+    "source": "20-cull-stack-actions-light.png",
+    "source_sha256": "b1e7c85a5e4bbd7dd5fdb4255f03b2639188ee3def17f682a68fc81c65244d1c",
+    "output": "ai-stacks.gif",
+    "poster": "ai-stacks-poster.png",
+    "palette_colors": 256,
+    "lossy": 40,
+    "poster_dimensions": [
+      960,
+      600
+    ],
+    "frames": 211,
+    "duration_ms": 6800,
+    "loop": 0,
+    "motion_frame_ms": 20,
+    "motion_fps": 50,
+    "dimensions": [
+      768,
+      480
+    ],
+    "bytes": 13457054,
+    "loop_boundary_identical": true
+  },
+  "ai-local": {
+    "source": "42-settings-cull-tuning-light.png",
+    "source_sha256": "a96053e5f24cc028d08091463778191601880133a33cf61ad6d9bdf20e8ce555",
+    "output": "ai-local.gif",
+    "poster": "ai-local-poster.png",
+    "palette_colors": 256,
+    "lossy": 40,
+    "poster_dimensions": [
+      960,
+      600
+    ],
+    "frames": 271,
+    "duration_ms": 9000,
+    "loop": 0,
+    "motion_frame_ms": 20,
+    "motion_fps": 50,
+    "dimensions": [
+      768,
+      480
+    ],
+    "bytes": 8515375,
+    "loop_boundary_identical": true
+  },
+  "ai-decisions": {
+    "source": "20-cull-stack-actions-light.png",
+    "source_sha256": "b1e7c85a5e4bbd7dd5fdb4255f03b2639188ee3def17f682a68fc81c65244d1c",
+    "output": "ai-decisions.gif",
+    "poster": "ai-decisions-poster.png",
+    "palette_colors": 256,
+    "lossy": 40,
+    "poster_dimensions": [
+      960,
+      600
+    ],
+    "frames": 311,
+    "duration_ms": 10000,
+    "loop": 0,
+    "motion_frame_ms": 20,
+    "motion_fps": 50,
+    "dimensions": [
+      768,
+      480
+    ],
+    "bytes": 17382444,
+    "loop_boundary_identical": true
+  }
+}

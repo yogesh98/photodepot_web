@@ -1,12 +1,53 @@
 "use client"
 
 import Image from "next/image"
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion"
+import {
+  AnimatePresence,
+  motion,
+  useInView,
+  useReducedMotion,
+} from "framer-motion"
 import { ArrowDown, ArrowUpRight, UsersRound } from "lucide-react"
-import { useState } from "react"
+import { useRef, useState } from "react"
 import { LandingWaitlistTrigger } from "@/components/landing-waitlist"
 import { collaborationPhotograph, photographs } from "./photography"
 import styles from "./daylight.module.css"
+
+type ProductDemo = {
+  image: string
+  poster: string
+  alt: string
+}
+
+function DemoImage({
+  demo,
+  sizes,
+  id,
+}: {
+  demo: ProductDemo
+  sizes: string
+  id?: string
+}) {
+  const imageRef = useRef<HTMLImageElement>(null)
+  const visible = useInView(imageRef, { amount: 0.1 })
+
+  return (
+    <picture>
+      <source media="(prefers-reduced-motion: reduce)" srcSet={demo.poster} />
+      <Image
+        ref={imageRef}
+        id={id}
+        src={visible ? demo.image : demo.poster}
+        alt={demo.alt}
+        width={960}
+        height={600}
+        sizes={sizes}
+        loading="lazy"
+        unoptimized
+      />
+    </picture>
+  )
+}
 
 const aiFeatures = [
   {
@@ -16,8 +57,6 @@ const aiFeatures = [
     text: "Photodepot compares how your photos look and when they were taken to group related frames into stacks. Review a burst or repeated composition together, instead of one file at a time.",
     image: "/screenshots/ai-stacks.gif",
     poster: "/screenshots/ai-stacks-poster.png",
-    width: 960,
-    height: 630,
     alt: "Photodepot’s wedding photographs grouped into related stacks.",
   },
   {
@@ -27,8 +66,6 @@ const aiFeatures = [
     text: "Face analysis estimates whether eyes are open or closed. Together with sharpness and exposure checks, it helps rank the photos in each stack so you have a useful place to start.",
     image: "/screenshots/ai-ranking.gif",
     poster: "/screenshots/ai-ranking-poster.png",
-    width: 960,
-    height: 630,
     alt: "Photodepot’s Close-ups panel highlighting possible closed eyes in a wedding photograph.",
   },
   {
@@ -36,11 +73,9 @@ const aiFeatures = [
     label: "On your Mac",
     title: "Your photos stay with you.",
     text: "The AI model comes bundled with Photodepot and runs offline on your Mac. Analysis happens locally, without uploading your photographs to a cloud AI service.",
-    image: "/screenshots/ai-decisions.gif",
-    poster: "/screenshots/ai-decisions-poster.png",
-    width: 960,
-    height: 630,
-    alt: "Photodepot’s wedding photo library with pick, rating, and stack decision controls.",
+    image: "/screenshots/ai-local.gif",
+    poster: "/screenshots/ai-local-poster.png",
+    alt: "Photodepot’s local Cull settings showing settings saved on this Mac and cached analysis.",
   },
 ]
 
@@ -48,22 +83,30 @@ const workflow = [
   {
     name: "Ingest",
     text: "easily ingest multiple cards throughout the day without missing a beat. Photodepot helps you keep track of ingests and transfers faster and more reliably than your file explorer",
-    image: "ingest",
+    image: "/screenshots/workflow-ingest.gif",
+    poster: "/screenshots/workflow-ingest-poster.png",
+    alt: "Photodepot’s light-mode ingest workspace showing a connected wedding card, selected photos, and the transfer queue.",
   },
   {
     name: "Cull",
     text: "Cull with AI assistance and review together with your team, seamlessly connect over your local network. Tag, Rate, and Flag your photos",
-    image: "cull",
+    image: "/screenshots/workflow-cull.gif",
+    poster: "/screenshots/workflow-cull-poster.png",
+    alt: "Photodepot’s light-mode culling workspace showing photo comparisons, face close-ups, and rating controls.",
   },
   {
     name: "Organize",
     text: "Give your project its shape. Organize quickly, without waiting for your disk to catch up.",
-    image: "organize",
+    image: "/screenshots/workflow-organize.gif",
+    poster: "/screenshots/workflow-organize-poster.png",
+    alt: "Photodepot’s light-mode organize workspace showing selected photos, tags, and the project’s folder structure.",
   },
   {
     name: "Export",
     text: "Take your project to the archives. Export your assets into your chosen structure and leave the clutter behind.",
-    image: "organize",
+    image: "/screenshots/workflow-export.gif",
+    poster: "/screenshots/workflow-export-poster.png",
+    alt: "Photodepot’s light-mode export workspace showing the destination, organized photo counts, and Export copy action.",
   },
 ]
 
@@ -157,8 +200,9 @@ export function DaylightLanding({
             YOUR BEST WORK.
           </h2>
           <p>
-            Every shoot holds something worth finding. Bring in your photographs,
-            compare the possibilities, and carry your strongest selection forward.
+            Every shoot holds something worth finding. Bring in your
+            photographs, compare the possibilities, and carry your strongest
+            selection forward.
           </p>
         </div>
         <div className={styles.workflowGrid}>
@@ -197,11 +241,8 @@ export function DaylightLanding({
                   exit={{ opacity: reducedMotion ? 1 : 0 }}
                   transition={{ duration: reducedMotion ? 0 : 0.18 }}
                 >
-                  <Image
-                    src={`/screenshots/${activeStage.image}.png`}
-                    alt={`Photodepot ${activeStage.image} workspace showing photo thumbnails and selection tools`}
-                    width={2560}
-                    height={1600}
+                  <DemoImage
+                    demo={activeStage}
                     sizes="(max-width: 850px) 92vw, 54vw"
                   />
                 </motion.div>
@@ -264,21 +305,11 @@ export function DaylightLanding({
               transition={{ duration: reducedMotion ? 0 : 0.15 }}
             >
               <div className={styles.aiScreenshot} data-feature={feature.id}>
-                <picture>
-                  <source
-                    media="(prefers-reduced-motion: reduce)"
-                    srcSet={feature.poster}
-                  />
-                  <Image
-                    id="local-ai-animation"
-                    src={feature.image}
-                    alt={feature.alt}
-                    width={feature.width}
-                    height={feature.height}
-                    sizes="(max-width: 850px) 92vw, 58vw"
-                    unoptimized
-                  />
-                </picture>
+                <DemoImage
+                  id="local-ai-animation"
+                  demo={feature}
+                  sizes="(max-width: 850px) 92vw, 58vw"
+                />
               </div>
               <div className={styles.aiFeatureCopy}>
                 <span className={styles.sectionLabel}>
@@ -307,9 +338,9 @@ export function DaylightLanding({
             <p>
               Culling has traditionally been a solo task, even when the shoot
               takes a team. Photodepot brings everyone into the process, so you
-              can review together, share decisions, and keep the work moving with
-              less time spent passing photos around or coordinating access to a
-              server.
+              can review together, share decisions, and keep the work moving
+              with less time spent passing photos around or coordinating access
+              to a server.
             </p>
           </div>
           <figure className={styles.collaborationVisual}>
@@ -354,9 +385,9 @@ export function DaylightLanding({
             <span className={styles.collaborationNumber}>03</span>
             <h3>See every choice.</h3>
             <p>
-              Use a shared knowledge base to keep the team’s picks, ratings,
-              and flags in view. See what’s been decided and build on each
-              other’s work.
+              Use a shared knowledge base to keep the team’s picks, ratings, and
+              flags in view. See what’s been decided and build on each other’s
+              work.
             </p>
           </li>
         </ol>

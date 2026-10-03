@@ -25,6 +25,10 @@ its password-protected Apple Silicon and Intel downloads.
 Screenshots show the actual Photodepot desktop app in light mode with demo
 media. Capture and media provenance are documented in
 `public/screenshots/README.md`.
+All seven homepage product demos use GIF camera tours with smooth 50fps motion,
+clean loops, and static posters for reduced-motion preferences. Only visible
+demos play. Regenerate them with `scripts/generate-demo-gifs.py`; source images,
+camera paths, and encoding reports are retained in `public/screenshots/demo-source/`.
 
 ## Run
 

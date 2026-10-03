@@ -1,0 +1,357 @@
+{
+  "version": 2,
+  "output_size": [
+    768,
+    480
+  ],
+  "poster_size": [
+    960,
+    600
+  ],
+  "lossy": 40,
+  "frame_ms": 20,
+  "description": "50fps camera tours over the supplied native light-mode screenshots. Fractional crops, quintic easing, one stable 256-color palette per GIF, identical opening/closing frames. No UI or photo synthesis.",
+  "features": {
+    "workflow-ingest": {
+      "source": "09a-ingest-queue-light.png",
+      "poster_view": 1,
+      "views": [
+        {
+          "label": "Ingest workspace",
+          "rect": [
+            44.8,
+            0,
+            2979.2,
+            1834
+          ],
+          "hold_ms": 1000
+        },
+        {
+          "label": "Transfer queue",
+          "rect": [
+            1488,
+            0,
+            3024,
+            960
+          ],
+          "move_ms": 1800,
+          "hold_ms": 1800
+        },
+        {
+          "label": "Return to workspace",
+          "rect": [
+            44.8,
+            0,
+            2979.2,
+            1834
+          ],
+          "move_ms": 2000,
+          "hold_ms": 200
+        }
+      ]
+    },
+    "workflow-cull": {
+      "source": "16-cull-compare-light.png",
+      "poster_view": 1,
+      "views": [
+        {
+          "label": "Compare workspace",
+          "rect": [
+            44.8,
+            0,
+            2979.2,
+            1834
+          ],
+          "hold_ms": 1000
+        },
+        {
+          "label": "Compare reference and candidate",
+          "rect": [
+            300,
+            225,
+            2500,
+            1600
+          ],
+          "move_ms": 1800,
+          "hold_ms": 1800
+        },
+        {
+          "label": "Return to workspace",
+          "rect": [
+            44.8,
+            0,
+            2979.2,
+            1834
+          ],
+          "move_ms": 2000,
+          "hold_ms": 200
+        }
+      ]
+    },
+    "workflow-organize": {
+      "source": "33-organize-tag-picker-light.png",
+      "poster_view": 1,
+      "views": [
+        {
+          "label": "Organize workspace",
+          "rect": [
+            44.8,
+            0,
+            2979.2,
+            1834
+          ],
+          "hold_ms": 1000
+        },
+        {
+          "label": "Apply shared tags",
+          "rect": [
+            1920,
+            780,
+            3024,
+            1470
+          ],
+          "move_ms": 1800,
+          "hold_ms": 1800
+        },
+        {
+          "label": "Return to workspace",
+          "rect": [
+            44.8,
+            0,
+            2979.2,
+            1834
+          ],
+          "move_ms": 2000,
+          "hold_ms": 200
+        }
+      ]
+    },
+    "workflow-export": {
+      "source": "51-export-summary-light.png",
+      "poster_view": 1,
+      "views": [
+        {
+          "label": "Export project",
+          "rect": [
+            44.8,
+            0,
+            2979.2,
+            1834
+          ],
+          "hold_ms": 600
+        },
+        {
+          "label": "Destination and review summary",
+          "rect": [
+            400,
+            160,
+            2416,
+            1420
+          ],
+          "move_ms": 1800,
+          "hold_ms": 1600
+        },
+        {
+          "label": "Export your organized selection",
+          "rect": [
+            1488,
+            874,
+            3024,
+            1834
+          ],
+          "move_ms": 2000,
+          "hold_ms": 1200
+        },
+        {
+          "label": "Return to project",
+          "rect": [
+            44.8,
+            0,
+            2979.2,
+            1834
+          ],
+          "move_ms": 2000,
+          "hold_ms": 200
+        }
+      ]
+    },
+    "ai-stacks": {
+      "source": "20-cull-stack-actions-light.png",
+      "poster_view": 1,
+      "caveat": "The selected native scene has two photos and is marked edited. This illustrates grouping and rank review after manual curation, not a claim that this pair is an untouched automatic AI result.",
+      "views": [
+        {
+          "label": "Cull workspace",
+          "rect": [
+            44.8,
+            0,
+            2979.2,
+            1834
+          ],
+          "hold_ms": 600
+        },
+        {
+          "label": "Related frames and rank",
+          "rect": [
+            0,
+            120,
+            1536,
+            1080
+          ],
+          "move_ms": 2000,
+          "hold_ms": 1800
+        },
+        {
+          "label": "Return to photograph",
+          "rect": [
+            44.8,
+            0,
+            2979.2,
+            1834
+          ],
+          "move_ms": 2200,
+          "hold_ms": 200
+        }
+      ]
+    },
+    "ai-ranking": {
+      "source": "22-cull-closed-eyes-light.png",
+      "poster_view": 1,
+      "caveat": "Possible closed eyes is the actual qualified app estimate, not a definite classification.",
+      "views": [
+        {
+          "label": "Cull workspace",
+          "rect": [
+            44.8,
+            0,
+            2979.2,
+            1834
+          ],
+          "hold_ms": 600
+        },
+        {
+          "label": "Native face and eye assessment",
+          "rect": [
+            2210,
+            245,
+            3024,
+            753.75
+          ],
+          "move_ms": 2200,
+          "hold_ms": 1800
+        },
+        {
+          "label": "Return to photograph",
+          "rect": [
+            44.8,
+            0,
+            2979.2,
+            1834
+          ],
+          "move_ms": 2400,
+          "hold_ms": 200
+        }
+      ]
+    },
+    "ai-local": {
+      "source": "42-settings-cull-tuning-light.png",
+      "poster_view": 2,
+      "caveat": "Saved on this Mac describes settings and cached analysis. Offline bundled-model behavior is explained by the page copy; this is not a fabricated offline status indicator.",
+      "views": [
+        {
+          "label": "Local Cull settings",
+          "rect": [
+            730,
+            210,
+            2294,
+            1187.5
+          ],
+          "hold_ms": 600
+        },
+        {
+          "label": "Settings saved on this Mac",
+          "rect": [
+            930,
+            525,
+            2210,
+            1325
+          ],
+          "move_ms": 1800,
+          "hold_ms": 1200
+        },
+        {
+          "label": "Cached analysis and preserved choices",
+          "rect": [
+            1150,
+            520,
+            2214,
+            1185
+          ],
+          "move_ms": 1600,
+          "hold_ms": 1600
+        },
+        {
+          "label": "Return to local settings",
+          "rect": [
+            730,
+            210,
+            2294,
+            1187.5
+          ],
+          "move_ms": 2000,
+          "hold_ms": 200
+        }
+      ]
+    },
+    "ai-decisions": {
+      "source": "20-cull-stack-actions-light.png",
+      "poster_view": 1,
+      "caveat": "Retained as an alternate demo. Merge is disabled because only one scene is selected.",
+      "views": [
+        {
+          "label": "Cull workspace",
+          "rect": [
+            44.8,
+            0,
+            2979.2,
+            1834
+          ],
+          "hold_ms": 600
+        },
+        {
+          "label": "Pick, reject, and rate",
+          "rect": [
+            0,
+            874,
+            1536,
+            1834
+          ],
+          "move_ms": 1800,
+          "hold_ms": 1400
+        },
+        {
+          "label": "Curate your stacks",
+          "rect": [
+            1488,
+            874,
+            3024,
+            1834
+          ],
+          "move_ms": 2400,
+          "hold_ms": 1600
+        },
+        {
+          "label": "Return to photograph",
+          "rect": [
+            44.8,
+            0,
+            2979.2,
+            1834
+          ],
+          "move_ms": 2000,
+          "hold_ms": 200
+        }
+      ]
+    }
+  }
+}

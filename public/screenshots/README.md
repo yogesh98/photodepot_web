@@ -1,5 +1,62 @@
 # Photodepot screenshots
 
+## Current website demos — October 3, 2026
+
+Every product demo displayed on the homepage is an animated GIF made from the
+user-supplied promotional collection's **light-mode** app screenshots. The four
+workflow demos replace the former static coastal captures, and Export now shows
+its own export review. The three AI tabs show grouped frames, the native eye
+assessment, and local Cull settings. The retained alternate decisions GIF has
+also been rebuilt with the same smooth motion.
+
+- `workflow-ingest.gif`: connected card, selected photos, and the transfer queue.
+- `workflow-cull.gif`: reference/candidate comparison, picks, and star ratings.
+- `workflow-organize.gif`: project folders, bulk selection, and the tag picker.
+- `workflow-export.gif`: export destination, review counts, and Export copy.
+- `ai-stacks.gif`: the two-photo scene and its Rank column. The native scene is
+  marked edited; this illustrates review after curation, rather than claiming
+  this pair is an untouched automatic AI result.
+- `ai-ranking.gif`: the actual qualified **Possible closed eyes** estimate.
+- `ai-local.gif`: native Cull settings, **Saved on this Mac**, and cached analysis.
+  The message describes settings; offline bundled-model behavior is described
+  by the page copy, rather than a fabricated status indicator.
+- `ai-decisions.gif`: an alternate tour of picks, ratings, and stack actions.
+
+The original supplied screenshot bytes are retained in `demo-source/`. Source
+photographs are by Emma Bauso and Jonathan Borba on Pexels; the supplied credit,
+license, photo-page, and checksum manifest is retained as
+`demo-source/photography-sources.json`. These stock photos show multiple sessions
+and are not claimed to be one confirmed wedding. No interface text, photos,
+analysis estimates, or decisions were synthesized or retouched.
+
+Motion uses **50 frames per second** (constant 20 ms moving-frame delays),
+fractional camera coordinates, Lanczos resampling, and quintic easing with zero
+velocity and acceleration at each endpoint. The 768 × 480 GIFs preserve one
+stable 256-color palette across each loop and use modest gifsicle lossy40
+compression. Static holds are coalesced without dropping moving frames. The
+decoded final hold is replaced with the exact opening pixels, guaranteeing a
+clean loop. Full-color 960 × 600 posters serve reduced-motion preferences.
+Offscreen demos show their posters so only visible GIFs load and decode.
+
+`demo-source/animation-manifest.json` records every camera rectangle and timing;
+`animation-report.json` records encoded dimensions, source checksums, sizes,
+frame cadence, and verified loop boundaries. To regenerate with Pillow, ffmpeg,
+and gifsicle available:
+
+```sh
+python3 scripts/generate-demo-gifs.py
+# Or pass an explicit gifsicle executable:
+python3 scripts/generate-demo-gifs.py --gifsicle /path/to/gifsicle
+```
+
+Use `--features workflow-ingest ai-ranking` to regenerate selected demos. The
+generator also saves contact sheets from the **decoded GIFs** to
+`/private/tmp/photodepot-demo-qa` by default. The capture notes below document the
+historical assets and are retained for provenance; their older generator and
+timings do not describe the current homepage animations.
+
+## Historical captures
+
 Captured on October 1, 2026 from the actual Photodepot desktop app built from
 `/Users/yogeshpatel/Developer/photodepot`. The compiled renderer, main process,
 and preload were unchanged. Matching ARM native binaries were staged in a
