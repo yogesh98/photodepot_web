@@ -21,7 +21,7 @@
   scroll-snap-type: y mandatory;
   scroll-behavior: smooth;
 }
-.sections[data-section-navigation] {
+.sections[data-wheel-navigation] {
   scroll-snap-type: none;
 }
 .sections:focus-visible {
