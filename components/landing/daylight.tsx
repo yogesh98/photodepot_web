@@ -10,6 +10,7 @@ import {
 import { ArrowDown, ArrowUpRight, UsersRound } from "lucide-react"
 import { useRef, useState } from "react"
 import { LandingWaitlistTrigger } from "@/components/landing-waitlist"
+import { LandingSections } from "./sections"
 import { collaborationPhotograph, photographs } from "./photography"
 import demoAssets from "./demo-assets.json"
 import styles from "./daylight.module.css"
@@ -116,7 +117,7 @@ export function DaylightLanding({
   const activeStage = workflow[stage]
 
   return (
-    <div className={styles.page}>
+    <LandingSections className={styles.page}>
       <section
         id="vision"
         className={styles.hero}
@@ -413,6 +414,6 @@ export function DaylightLanding({
           </div>
         </div>
       </section>
-    </div>
+    </LandingSections>
   )
 }
