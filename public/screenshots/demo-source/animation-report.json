@@ -2,8 +2,8 @@
   "ai-ranking": {
     "source": "22-cull-closed-eyes-light.png",
     "source_sha256": "560c76343d3f68914b8f97db035447c35ffae994730c2c5065aa01dee33765f0",
-    "output": "ai-ranking.gif",
-    "poster": "ai-ranking-poster.png",
+    "output": "ai-ranking.b4ba71688ee1.gif",
+    "poster": "ai-ranking-poster.6c6b869aa2e7.png",
     "palette_colors": 256,
     "lossy": 40,
     "poster_dimensions": [
@@ -20,13 +20,15 @@
       480
     ],
     "bytes": 8394904,
-    "loop_boundary_identical": true
+    "loop_boundary_identical": true,
+    "output_sha256": "b4ba71688ee1458c16ca461ee2b24d93e1faa2fc916bb06bc6ab37ea2254e2c8",
+    "poster_sha256": "6c6b869aa2e7b7e716b8cbc8d274ba66bbc185eba142df0ddcb5e0bbf9eec94b"
   },
   "workflow-ingest": {
     "source": "09a-ingest-queue-light.png",
     "source_sha256": "70c5e5b49e2c197dc476ebec90aba5add74631f0f57a6d0ab3336ad5c4893237",
-    "output": "workflow-ingest.gif",
-    "poster": "workflow-ingest-poster.png",
+    "output": "workflow-ingest.a071eddda589.gif",
+    "poster": "workflow-ingest-poster.65cdec68611f.png",
     "palette_colors": 256,
     "lossy": 40,
     "poster_dimensions": [
@@ -43,13 +45,15 @@
       480
     ],
     "bytes": 11859748,
-    "loop_boundary_identical": true
+    "loop_boundary_identical": true,
+    "output_sha256": "a071eddda58904be31f40aedeb44fdfc54322d1f4132401c0665422071596d6b",
+    "poster_sha256": "65cdec68611f7e7bc4e433dc3adb3a0107810cd86b1760b2e6220f65950471e1"
   },
   "workflow-cull": {
     "source": "16-cull-compare-light.png",
     "source_sha256": "03c1844d0d8d83f480ccdef7b13a34f6eee24d90f2becbe0b59b350497532a33",
-    "output": "workflow-cull.gif",
-    "poster": "workflow-cull-poster.png",
+    "output": "workflow-cull.141772d3fc11.gif",
+    "poster": "workflow-cull-poster.4d8c86d1be1c.png",
     "palette_colors": 256,
     "lossy": 40,
     "poster_dimensions": [
@@ -66,13 +70,15 @@
       480
     ],
     "bytes": 14354460,
-    "loop_boundary_identical": true
+    "loop_boundary_identical": true,
+    "output_sha256": "141772d3fc118fb6bab3c307e34c3af54330feeba7391c3cc9c3341331322a40",
+    "poster_sha256": "4d8c86d1be1c4d8135f06df3a3bb14e19691787112fee058fe4bacf306d7509a"
   },
   "workflow-organize": {
     "source": "33-organize-tag-picker-light.png",
     "source_sha256": "0e8be7f0b1d92a51a9c60cbcc36e47592b2e2c8881b3279583a36fdefc61c5bc",
-    "output": "workflow-organize.gif",
-    "poster": "workflow-organize-poster.png",
+    "output": "workflow-organize.5aa7e21f1bb8.gif",
+    "poster": "workflow-organize-poster.552e5fa8dc97.png",
     "palette_colors": 256,
     "lossy": 40,
     "poster_dimensions": [
@@ -89,13 +95,15 @@
       480
     ],
     "bytes": 18505116,
-    "loop_boundary_identical": true
+    "loop_boundary_identical": true,
+    "output_sha256": "5aa7e21f1bb8fb8e7ead020534ea2074c8813ea473b8dd0f2200454460171b0d",
+    "poster_sha256": "552e5fa8dc97599a7e2d1ad148d752bcb6b554d1679fa135aed1d64719ff4a9e"
   },
   "workflow-export": {
     "source": "51-export-summary-light.png",
     "source_sha256": "3425b1750d66d3a514bf4d4b3c7e5afa1ddbb65732ea293f6c6a815e705d85bc",
-    "output": "workflow-export.gif",
-    "poster": "workflow-export-poster.png",
+    "output": "workflow-export.da031290f1fa.gif",
+    "poster": "workflow-export-poster.d5f3444d32d4.png",
     "palette_colors": 256,
     "lossy": 40,
     "poster_dimensions": [
@@ -112,13 +120,15 @@
       480
     ],
     "bytes": 4585852,
-    "loop_boundary_identical": true
+    "loop_boundary_identical": true,
+    "output_sha256": "da031290f1fa2074cdfdf29dd029ed680f7c03f6df6f03c53a1f18e4266b8b4c",
+    "poster_sha256": "d5f3444d32d4fcff2d161bade05c2d84824e31468625a299db0ee1f7fd791b8b"
   },
   "ai-stacks": {
     "source": "20-cull-stack-actions-light.png",
     "source_sha256": "b1e7c85a5e4bbd7dd5fdb4255f03b2639188ee3def17f682a68fc81c65244d1c",
-    "output": "ai-stacks.gif",
-    "poster": "ai-stacks-poster.png",
+    "output": "ai-stacks.96ec244968f3.gif",
+    "poster": "ai-stacks-poster.60a84b6f60ba.png",
     "palette_colors": 256,
     "lossy": 40,
     "poster_dimensions": [
@@ -135,13 +145,15 @@
       480
     ],
     "bytes": 13457054,
-    "loop_boundary_identical": true
+    "loop_boundary_identical": true,
+    "output_sha256": "96ec244968f396eb79c1a9caba9f0c5d889ed8f39cef59535992db4b05d06700",
+    "poster_sha256": "60a84b6f60ba59e5626494ebee43c78dfbb9f360e7f67a03bd04bd4a5aa4cc7b"
   },
   "ai-local": {
     "source": "42-settings-cull-tuning-light.png",
     "source_sha256": "a96053e5f24cc028d08091463778191601880133a33cf61ad6d9bdf20e8ce555",
-    "output": "ai-local.gif",
-    "poster": "ai-local-poster.png",
+    "output": "ai-local.6426ac2555a6.gif",
+    "poster": "ai-local-poster.b0bf34e2571b.png",
     "palette_colors": 256,
     "lossy": 40,
     "poster_dimensions": [
@@ -158,13 +170,15 @@
       480
     ],
     "bytes": 8515375,
-    "loop_boundary_identical": true
+    "loop_boundary_identical": true,
+    "output_sha256": "6426ac2555a6599efced4948f8d7aeaa4491948e9e4ab6ae94b49d1c9604d7b2",
+    "poster_sha256": "b0bf34e2571bc8ceee1e4c6b5de58b581de4bae19f922ebbece2527c0f9bc0d3"
   },
   "ai-decisions": {
     "source": "20-cull-stack-actions-light.png",
     "source_sha256": "b1e7c85a5e4bbd7dd5fdb4255f03b2639188ee3def17f682a68fc81c65244d1c",
-    "output": "ai-decisions.gif",
-    "poster": "ai-decisions-poster.png",
+    "output": "ai-decisions.2bfe88e0f2b5.gif",
+    "poster": "ai-decisions-poster.baff51adf56e.png",
     "palette_colors": 256,
     "lossy": 40,
     "poster_dimensions": [
@@ -181,6 +195,8 @@
       480
     ],
     "bytes": 17382444,
-    "loop_boundary_identical": true
+    "loop_boundary_identical": true,
+    "output_sha256": "2bfe88e0f2b54c4345aea29129198241fc64a43eb06a09d16177676e5636c00c",
+    "poster_sha256": "baff51adf56e0833cb4d19eaec89c13c829a23e43238415a5fdf9f167094462d"
   }
 }

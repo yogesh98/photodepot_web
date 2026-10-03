@@ -9,18 +9,24 @@ its own export review. The three AI tabs show grouped frames, the native eye
 assessment, and local Cull settings. The retained alternate decisions GIF has
 also been rebuilt with the same smooth motion.
 
-- `workflow-ingest.gif`: connected card, selected photos, and the transfer queue.
-- `workflow-cull.gif`: reference/candidate comparison, picks, and star ratings.
-- `workflow-organize.gif`: project folders, bulk selection, and the tag picker.
-- `workflow-export.gif`: export destination, review counts, and Export copy.
-- `ai-stacks.gif`: the two-photo scene and its Rank column. The native scene is
+- `workflow-ingest.<hash>.gif`: connected card, selected photos, and the transfer queue.
+- `workflow-cull.<hash>.gif`: reference/candidate comparison, picks, and star ratings.
+- `workflow-organize.<hash>.gif`: project folders, bulk selection, and the tag picker.
+- `workflow-export.<hash>.gif`: export destination, review counts, and Export copy.
+- `ai-stacks.<hash>.gif`: the two-photo scene and its Rank column. The native scene is
   marked edited; this illustrates review after curation, rather than claiming
   this pair is an untouched automatic AI result.
-- `ai-ranking.gif`: the actual qualified **Possible closed eyes** estimate.
-- `ai-local.gif`: native Cull settings, **Saved on this Mac**, and cached analysis.
+- `ai-ranking.<hash>.gif`: the actual qualified **Possible closed eyes** estimate.
+- `ai-local.<hash>.gif`: native Cull settings, **Saved on this Mac**, and cached analysis.
   The message describes settings; offline bundled-model behavior is described
   by the page copy, rather than a fabricated status indicator.
-- `ai-decisions.gif`: an alternate tour of picks, ratings, and stack actions.
+- `ai-decisions.<hash>.gif`: an alternate tour of picks, ratings, and stack actions.
+
+Both GIF and poster filenames include the first 12 characters of their SHA-256
+content hash. The generated `components/landing/demo-assets.json` supplies the
+homepage URLs. Replacing media bytes produces new filenames and URLs, so the
+updated page requests the new files instead of reusing the browser's old image
+cache. The versioning migration preserves every encoded frame and poster pixel.
 
 The original supplied screenshot bytes are retained in `demo-source/`. Source
 photographs are by Emma Bauso and Jonathan Borba on Pexels; the supplied credit,
@@ -40,13 +46,16 @@ Offscreen demos show their posters so only visible GIFs load and decode.
 
 `demo-source/animation-manifest.json` records every camera rectangle and timing;
 `animation-report.json` records encoded dimensions, source checksums, sizes,
-frame cadence, and verified loop boundaries. To regenerate with Pillow, ffmpeg,
+frame cadence, verified loop boundaries, versioned output names, and output
+checksums. To regenerate with Pillow, ffmpeg,
 and gifsicle available:
 
 ```sh
 python3 scripts/generate-demo-gifs.py
 # Or pass an explicit gifsicle executable:
 python3 scripts/generate-demo-gifs.py --gifsicle /path/to/gifsicle
+# Update versioned names and URL references without re-encoding existing media:
+python3 scripts/generate-demo-gifs.py --version-existing
 ```
 
 Use `--features workflow-ingest ai-ranking` to regenerate selected demos. The

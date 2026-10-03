@@ -29,6 +29,8 @@ All seven homepage product demos use GIF camera tours with smooth 50fps motion,
 clean loops, and static posters for reduced-motion preferences. Only visible
 demos play. Regenerate them with `scripts/generate-demo-gifs.py`; source images,
 camera paths, and encoding reports are retained in `public/screenshots/demo-source/`.
+GIF and poster URLs use content-hashed filenames through the generated
+`components/landing/demo-assets.json`, so replacements receive new cache keys.
 
 ## Run
 

@@ -1,0 +1,34 @@
+{
+  "ai-decisions": {
+    "image": "/screenshots/ai-decisions.2bfe88e0f2b5.gif",
+    "poster": "/screenshots/ai-decisions-poster.baff51adf56e.png"
+  },
+  "ai-local": {
+    "image": "/screenshots/ai-local.6426ac2555a6.gif",
+    "poster": "/screenshots/ai-local-poster.b0bf34e2571b.png"
+  },
+  "ai-ranking": {
+    "image": "/screenshots/ai-ranking.b4ba71688ee1.gif",
+    "poster": "/screenshots/ai-ranking-poster.6c6b869aa2e7.png"
+  },
+  "ai-stacks": {
+    "image": "/screenshots/ai-stacks.96ec244968f3.gif",
+    "poster": "/screenshots/ai-stacks-poster.60a84b6f60ba.png"
+  },
+  "workflow-cull": {
+    "image": "/screenshots/workflow-cull.141772d3fc11.gif",
+    "poster": "/screenshots/workflow-cull-poster.4d8c86d1be1c.png"
+  },
+  "workflow-export": {
+    "image": "/screenshots/workflow-export.da031290f1fa.gif",
+    "poster": "/screenshots/workflow-export-poster.d5f3444d32d4.png"
+  },
+  "workflow-ingest": {
+    "image": "/screenshots/workflow-ingest.a071eddda589.gif",
+    "poster": "/screenshots/workflow-ingest-poster.65cdec68611f.png"
+  },
+  "workflow-organize": {
+    "image": "/screenshots/workflow-organize.5aa7e21f1bb8.gif",
+    "poster": "/screenshots/workflow-organize-poster.552e5fa8dc97.png"
+  }
+}

@@ -11,6 +11,7 @@ import { ArrowDown, ArrowUpRight, UsersRound } from "lucide-react"
 import { useRef, useState } from "react"
 import { LandingWaitlistTrigger } from "@/components/landing-waitlist"
 import { collaborationPhotograph, photographs } from "./photography"
+import demoAssets from "./demo-assets.json"
 import styles from "./daylight.module.css"
 
 type ProductDemo = {
@@ -55,8 +56,7 @@ const aiFeatures = [
     label: "Similar stacks",
     title: "Related frames, together.",
     text: "Photodepot compares how your photos look and when they were taken to group related frames into stacks. Review a burst or repeated composition together, instead of one file at a time.",
-    image: "/screenshots/ai-stacks.gif",
-    poster: "/screenshots/ai-stacks-poster.png",
+    ...demoAssets["ai-stacks"],
     alt: "Photodepot’s wedding photographs grouped into related stacks.",
   },
   {
@@ -64,8 +64,7 @@ const aiFeatures = [
     label: "Face / Eye analysis",
     title: "A little help finding the keepers.",
     text: "Face analysis estimates whether eyes are open or closed. Together with sharpness and exposure checks, it helps rank the photos in each stack so you have a useful place to start.",
-    image: "/screenshots/ai-ranking.gif",
-    poster: "/screenshots/ai-ranking-poster.png",
+    ...demoAssets["ai-ranking"],
     alt: "Photodepot’s Close-ups panel highlighting possible closed eyes in a wedding photograph.",
   },
   {
@@ -73,8 +72,7 @@ const aiFeatures = [
     label: "On your Mac",
     title: "Your photos stay with you.",
     text: "The AI model comes bundled with Photodepot and runs offline on your Mac. Analysis happens locally, without uploading your photographs to a cloud AI service.",
-    image: "/screenshots/ai-local.gif",
-    poster: "/screenshots/ai-local-poster.png",
+    ...demoAssets["ai-local"],
     alt: "Photodepot’s local Cull settings showing settings saved on this Mac and cached analysis.",
   },
 ]
@@ -83,29 +81,25 @@ const workflow = [
   {
     name: "Ingest",
     text: "easily ingest multiple cards throughout the day without missing a beat. Photodepot helps you keep track of ingests and transfers faster and more reliably than your file explorer",
-    image: "/screenshots/workflow-ingest.gif",
-    poster: "/screenshots/workflow-ingest-poster.png",
+    ...demoAssets["workflow-ingest"],
     alt: "Photodepot’s light-mode ingest workspace showing a connected wedding card, selected photos, and the transfer queue.",
   },
   {
     name: "Cull",
     text: "Cull with AI assistance and review together with your team, seamlessly connect over your local network. Tag, Rate, and Flag your photos",
-    image: "/screenshots/workflow-cull.gif",
-    poster: "/screenshots/workflow-cull-poster.png",
+    ...demoAssets["workflow-cull"],
     alt: "Photodepot’s light-mode culling workspace showing photo comparisons, face close-ups, and rating controls.",
   },
   {
     name: "Organize",
     text: "Give your project its shape. Organize quickly, without waiting for your disk to catch up.",
-    image: "/screenshots/workflow-organize.gif",
-    poster: "/screenshots/workflow-organize-poster.png",
+    ...demoAssets["workflow-organize"],
     alt: "Photodepot’s light-mode organize workspace showing selected photos, tags, and the project’s folder structure.",
   },
   {
     name: "Export",
     text: "Take your project to the archives. Export your assets into your chosen structure and leave the clutter behind.",
-    image: "/screenshots/workflow-export.gif",
-    poster: "/screenshots/workflow-export-poster.png",
+    ...demoAssets["workflow-export"],
     alt: "Photodepot’s light-mode export workspace showing the destination, organized photo counts, and Export copy action.",
   },
 ]

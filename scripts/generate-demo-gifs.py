@@ -23,6 +23,32 @@ from PIL import Image, ImageChops, ImageDraw
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE_DIR = ROOT / "public/screenshots/demo-source"
 OUTPUT_DIR = ROOT / "public/screenshots"
+ASSET_MANIFEST = ROOT / "components/landing/demo-assets.json"
+
+
+def publish_assets(name, output, poster, entry):
+    # The URL changes whenever the encoded bytes change, so a browser cannot
+    # reuse media from an earlier release under the new filename.
+    output_hash = hashlib.sha256(output.read_bytes()).hexdigest()
+    poster_hash = hashlib.sha256(poster.read_bytes()).hexdigest()
+    versioned_output = output.with_name(f"{name}.{output_hash[:12]}.gif")
+    versioned_poster = poster.with_name(f"{name}-poster.{poster_hash[:12]}.png")
+    if output != versioned_output:
+        output.replace(versioned_output)
+    if poster != versioned_poster:
+        poster.replace(versioned_poster)
+    return {**entry, "output": versioned_output.name, "poster": versioned_poster.name,
+            "output_sha256": output_hash, "poster_sha256": poster_hash}
+
+
+def save_report_and_assets(report, report_path):
+    # Publish references only after their files exist. Partial regeneration
+    # retains the report and URL entries for every untouched demo.
+    assets = {name: {"image": f"/screenshots/{entry['output']}",
+                     "poster": f"/screenshots/{entry['poster']}"}
+              for name, entry in report.items()}
+    report_path.write_text(json.dumps(report, indent=2) + "\n")
+    ASSET_MANIFEST.write_text(json.dumps(assets, indent=2, sort_keys=True) + "\n")
 
 
 def ease(t):
@@ -176,7 +202,22 @@ def main():
     parser.add_argument("--features", nargs="*", help="Generate only these demo names")
     parser.add_argument("--qa-dir", type=Path, default=Path("/private/tmp/photodepot-demo-qa"))
     parser.add_argument("--gifsicle", default=shutil.which("gifsicle"), help="Path to gifsicle if not on PATH")
+    parser.add_argument("--version-existing", action="store_true",
+                        help="Version retained GIFs and posters without re-encoding their bytes")
     args = parser.parse_args()
+    report_path = args.manifest.with_name("animation-report.json")
+    report = json.loads(report_path.read_text()) if report_path.exists() else {}
+    if args.version_existing:
+        if not report:
+            parser.error("--version-existing requires an existing animation report")
+        for name, entry in list(report.items()):
+            if args.features and name not in args.features:
+                continue
+            report[name] = publish_assets(name, OUTPUT_DIR / entry["output"],
+                                          OUTPUT_DIR / entry["poster"], entry)
+        save_report_and_assets(report, report_path)
+        print(json.dumps({"versioned_features": list(report), "assets": str(ASSET_MANIFEST)}), flush=True)
+        return
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         parser.error("ffmpeg must be on PATH")
@@ -185,8 +226,6 @@ def main():
     spec = json.loads(args.manifest.read_text())
     size, frame_ms = tuple(spec["output_size"]), spec["frame_ms"]
     args.qa_dir.mkdir(parents=True, exist_ok=True)
-    report_path = args.manifest.with_name("animation-report.json")
-    report = json.loads(report_path.read_text()) if report_path.exists() else {}
     for name, feature in spec["features"].items():
         if args.features and name not in args.features:
             continue
@@ -202,15 +241,16 @@ def main():
         compress_gif(output, args.gifsicle, spec["lossy"])
         poster_view = feature["views"][feature["poster_view"]]
         poster_size = tuple(spec["poster_size"])
-        render(source, poster_view["rect"], poster_size).save(OUTPUT_DIR / f"{name}-poster.png", optimize=True)
+        poster = OUTPUT_DIR / f"{name}-poster.png"
+        render(source, poster_view["rect"], poster_size).save(poster, optimize=True)
         contact_sheet(output, feature, frame_ms, args.qa_dir / f"{name}-contact.png")
-        report[name] = {"source": feature["source"],
-                        "source_sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
-                        "output": f"{name}.gif", "poster": f"{name}-poster.png",
-                        "palette_colors": 256, "lossy": spec["lossy"],
-                        "poster_dimensions": list(poster_size),
-                        **inspect_gif(output, frame_ms, len(cameras))}
-        report_path.write_text(json.dumps(report, indent=2) + "\n")
+        entry = {"source": feature["source"],
+                 "source_sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+                 "palette_colors": 256, "lossy": spec["lossy"],
+                 "poster_dimensions": list(poster_size),
+                 **inspect_gif(output, frame_ms, len(cameras))}
+        report[name] = publish_assets(name, output, poster, entry)
+        save_report_and_assets(report, report_path)
         print(json.dumps({"feature": name, **report[name]}), flush=True)
 
 
