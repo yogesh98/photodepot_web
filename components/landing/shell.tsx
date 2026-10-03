@@ -4,7 +4,6 @@ import { ArrowUpRight } from "lucide-react"
 import type { ReactNode } from "react"
 import { LandingWaitlist } from "@/components/landing-waitlist"
 import { WaitlistTrigger } from "@/components/waitlist-button"
-import { LandingSections } from "./sections"
 import styles from "./shell.module.css"
 
 export function LandingShell({ children }: { children: ReactNode }) {
@@ -32,7 +31,7 @@ export function LandingShell({ children }: { children: ReactNode }) {
             Join the waitlist <ArrowUpRight size={15} aria-hidden="true" />
           </WaitlistTrigger>
         </header>
-        <LandingSections>{children}</LandingSections>
+        {children}
       </div>
     </LandingWaitlist>
   )

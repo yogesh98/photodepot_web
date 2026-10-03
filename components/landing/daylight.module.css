@@ -7,10 +7,8 @@
   overflow: clip;
   font-family: var(--font-inter, Arial, Helvetica, sans-serif);
 }
-.page > section {
+.page :global(:where([data-section-scroll])) > :where(section) {
   min-height: var(--section-height);
-  scroll-snap-align: start;
-  scroll-snap-stop: always;
   background: var(--paper);
 }
 .page h1,
@@ -41,7 +39,7 @@
   position: relative;
   display: flex;
   align-items: flex-start;
-  height: var(--section-height);
+  min-height: max(var(--section-height), 360px);
   padding: 29px 4% 32px;
   isolation: isolate;
   overflow: clip;
@@ -876,7 +874,7 @@
 @media (max-width: 760px) {
   .hero {
     align-items: flex-start;
-    height: var(--section-height);
+    min-height: max(var(--section-height), 360px);
     padding: 24px 5% 28px;
   }
   .heroCopy {

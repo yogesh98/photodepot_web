@@ -13,20 +13,131 @@
   background: var(--art-paper);
   color: var(--art-ink);
 }
-.sections {
+.sectionsFrame {
+  position: relative;
   flex: 1;
   min-height: 0;
+  height: var(--section-height);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+}
+.sections {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+.sections > :global([data-slot="carousel-content"]) {
+  height: 100%;
+  touch-action: pan-y pinch-zoom;
+}
+.sectionTrack {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+.sectionSlide {
+  flex: 0 0 100%;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  padding: 0;
+}
+.sectionScroll {
+  height: 100%;
+  overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior-y: contain;
-  scroll-snap-type: y proximity;
+  touch-action: pan-y pinch-zoom;
   scroll-behavior: smooth;
+  scrollbar-width: none;
 }
-.sections[data-wheel-navigation] {
-  scroll-snap-type: none;
+.sectionScroll::-webkit-scrollbar {
+  display: none;
 }
-.sections:focus-visible {
+.sectionsFrame:focus-visible,
+.sectionScroll:focus-visible {
   outline: 2px solid var(--art-ink);
   outline-offset: -2px;
+}
+.sectionNavigation {
+  position: absolute;
+  top: 50%;
+  right: 12px;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 40px;
+  isolation: isolate;
+  color: var(--art-ink);
+  opacity: 0;
+  transform: translateY(-50%);
+  pointer-events: none;
+  transition: opacity 0.18s;
+}
+.sectionNavigation::before {
+  content: "";
+  position: absolute;
+  inset: -12px;
+  z-index: -1;
+  background: linear-gradient(90deg, transparent, #fff9 50%, #fffc);
+  mask-image: linear-gradient(transparent, #000 8%, #000 92%, transparent);
+  pointer-events: none;
+}
+.sectionNavigation[data-scrolling="true"],
+.sectionNavigation:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
+.sectionCount {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 3px;
+  margin: 0 0 5px;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+}
+.sectionCount > span:first-child {
+  font-weight: 600;
+}
+.sectionCount > span:not(:first-child) {
+  opacity: 0.8;
+}
+.sectionLinks {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+.sectionLink {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  color: inherit;
+  text-decoration: none;
+  touch-action: manipulation;
+}
+.sectionDot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.65;
+  transition: opacity 0.2s;
+}
+.sectionLink[aria-current="location"] .sectionDot {
+  width: 5px;
+  height: 5px;
+  opacity: 1;
 }
 .header {
   flex-shrink: 0;
@@ -89,6 +200,9 @@
   outline: 2px solid currentColor;
   outline-offset: 4px;
 }
+.page .sectionLink:focus-visible {
+  outline-offset: -4px;
+}
 .skip {
   position: fixed;
   top: 8px;
@@ -101,37 +215,17 @@
 .skip:focus {
   transform: translateY(0);
 }
-@media (min-width: 761px) and (pointer: fine) {
-  .sections {
-    --scrollbar-thumb: color-mix(in srgb, var(--art-ink) 65%, transparent);
-    /* Paint the reserved scrollbar area with the visible section's surface. */
-    background: var(--header-background, var(--art-paper));
-    scrollbar-width: thin;
-    scrollbar-color: var(--scrollbar-thumb) transparent;
-  }
-  @supports not (scrollbar-color: #171717 transparent) {
-    .sections::-webkit-scrollbar {
-      width: 10px;
-    }
-    .sections::-webkit-scrollbar-track {
-      background: transparent;
-    }
-    .sections::-webkit-scrollbar-thumb {
-      border: 2px solid transparent;
-      border-radius: 10px;
-      background: var(--scrollbar-thumb);
-      background-clip: padding-box;
-    }
-  }
-}
-@media (max-width: 760px), (pointer: coarse) {
-  .sections {
-    scroll-snap-type: none;
+@media (hover: hover) {
+  .sectionLink:hover .sectionDot {
+    opacity: 1;
   }
 }
 @media (max-width: 760px) {
   .page {
     --header-height: 76px;
+  }
+  .sectionNavigation {
+    right: 8px;
   }
   .header {
     padding: 0 20px;
@@ -152,11 +246,13 @@
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .sections {
+  .sectionScroll {
     scroll-behavior: auto;
   }
   .page a,
-  .page button {
+  .page button,
+  .sectionDot,
+  .sectionNavigation {
     transition: none;
   }
 }
