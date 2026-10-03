@@ -18,10 +18,10 @@ import {
 } from "@/components/ui/carousel"
 import { cn } from "@/lib/utils"
 import {
+  createCarouselTouchController,
   createCarouselWheelController,
   getCarouselEntryScrollTop,
   getCarouselScrollAction,
-  getCarouselSwipeAction,
 } from "./carousel-scroll"
 import styles from "./shell.module.css"
 
@@ -38,8 +38,8 @@ const carouselOptions = {
   containScroll: false,
   duration: 20,
   loop: false,
-  // Native scrolling owns touch gestures within a section. Completed swipes
-  // that began at a reading boundary hand off to the carousel.
+  // Native scrolling owns reading within sections. Continued touch movement
+  // beyond a content boundary hands off to the carousel.
   watchDrag: false,
   watchFocus: false,
 } as const
@@ -96,19 +96,20 @@ export function LandingSections({
     const root = main.current
     const indicator = indicators.current
     const page = root.parentElement
+    function getSection() {
+      const index = api!.selectedScrollSnap()
+      const area = scrollAreas.current[index]
+      return area
+        ? {
+            index,
+            scrollTop: area.scrollTop,
+            scrollHeight: area.scrollHeight,
+            viewportHeight: area.clientHeight,
+          }
+        : null
+    }
     const wheel = createCarouselWheelController({
-      getSection() {
-        const index = api.selectedScrollSnap()
-        const area = scrollAreas.current[index]
-        return area
-          ? {
-              index,
-              scrollTop: area.scrollTop,
-              scrollHeight: area.scrollHeight,
-              viewportHeight: area.clientHeight,
-            }
-          : null
-      },
+      getSection,
       onScroll(delta) {
         scrollAreas.current[api.selectedScrollSnap()]?.scrollBy({
           top: delta,
@@ -119,14 +120,14 @@ export function LandingSections({
         navigate(api.selectedScrollSnap() + direction, direction)
       },
     })
+    const touch = createCarouselTouchController({
+      getSection,
+      onNavigate(direction) {
+        navigate(api.selectedScrollSnap() + direction, direction)
+      },
+      onActivity: showIndicators,
+    })
     let hideIndicators: ReturnType<typeof setTimeout> | undefined
-    let touch: {
-      startX: number
-      startY: number
-      scrollTop: number
-      scrollHeight: number
-      viewportHeight: number
-    } | null = null
 
     function showIndicators() {
       if (!indicator) return
@@ -216,47 +217,32 @@ export function LandingSections({
     }
 
     function handleTouchStart(event: TouchEvent) {
-      touch = null
+      touch.cancel()
       if (event.touches.length !== 1) return
-      const area = scrollAreas.current[api!.selectedScrollSnap()]
-      if (!area) return
       const point = event.touches[0]
-      touch = {
-        startX: point.clientX,
-        startY: point.clientY,
-        scrollTop: area.scrollTop,
-        scrollHeight: area.scrollHeight,
-        viewportHeight: area.clientHeight,
-      }
+      touch.start({ x: point.clientX, y: point.clientY })
     }
 
     function handleTouchEnd(event: TouchEvent) {
-      const start = touch
-      touch = null
-      if (!start || event.touches.length || event.changedTouches.length !== 1)
+      if (event.touches.length || event.changedTouches.length !== 1) {
+        touch.cancel()
         return
+      }
       const point = event.changedTouches[0]
-      const action = getCarouselSwipeAction({
-        ...start,
-        endX: point.clientX,
-        endY: point.clientY,
-      })
-      if (action === "native") return
-      const direction = action === "next" ? 1 : -1
-      navigate(api!.selectedScrollSnap() + direction, direction)
+      touch.end({ x: point.clientX, y: point.clientY })
     }
 
     function handleTouchMove(event: TouchEvent) {
-      if (!touch || event.touches.length !== 1) return
-      const point = event.touches[0]
-      const vertical = Math.abs(point.clientY - touch.startY)
-      if (vertical > 8 && vertical > Math.abs(point.clientX - touch.startX)) {
-        showIndicators()
+      if (event.touches.length !== 1) {
+        touch.cancel()
+        return
       }
+      const point = event.touches[0]
+      touch.move({ x: point.clientX, y: point.clientY })
     }
 
     function handleTouchCancel() {
-      touch = null
+      touch.cancel()
     }
 
     function handleKeyDown(event: KeyboardEvent) {
@@ -342,6 +328,7 @@ export function LandingSections({
       root.removeEventListener("click", handleClick)
       window.removeEventListener("wheel", handleWheel, true)
       wheel.destroy()
+      touch.cancel()
       root.removeEventListener("touchstart", handleTouchStart)
       root.removeEventListener("touchmove", handleTouchMove)
       root.removeEventListener("touchend", handleTouchEnd)

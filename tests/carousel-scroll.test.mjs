@@ -92,11 +92,11 @@ test("browser overscroll positions still identify the appropriate boundary", () 
   )
 })
 
-test("only vertical swipes of at least 48 pixels navigate", () => {
+test("only vertical swipes of at least 24 pixels navigate", () => {
   for (const [endX, endY, expected] of [
-    [100, 53, "native"],
-    [100, 52, "next"],
-    [100, 148, "previous"],
+    [100, 77, "native"],
+    [100, 76, "next"],
+    [100, 124, "previous"],
     [20, 40, "native"],
     [40, 40, "native"],
     [100, 100, "native"],
@@ -116,7 +116,7 @@ test("only vertical swipes of at least 48 pixels navigate", () => {
   }
 })
 
-test("a native swipe that reaches the bottom waits for a swipe beginning at the bottom", () => {
+test("a large swipe stays native until its anchor is at the bottom boundary", () => {
   const swipe = {
     ...overflowingSection,
     startX: 100,
@@ -128,7 +128,7 @@ test("a native swipe that reaches the bottom waits for a swipe beginning at the 
   assert.equal(getCarouselSwipeAction({ ...swipe, scrollTop: 600 }), "next")
 })
 
-test("an upward swipe navigates only when it begins at the top", () => {
+test("a reverse swipe navigates only with an anchor at the top boundary", () => {
   const swipe = {
     ...overflowingSection,
     startX: 100,

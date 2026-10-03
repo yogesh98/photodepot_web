@@ -1,7 +1,7 @@
 import { WheelGestures, type WheelEventState } from "wheel-gestures"
 
 const EDGE_TOLERANCE = 2
-const SWIPE_THRESHOLD = 48
+const SWIPE_THRESHOLD = 24
 const WHEEL_THRESHOLD = 12
 const WHEEL_IDLE_INTERVAL = 160
 
@@ -11,6 +11,99 @@ type ScrollMetrics = {
   scrollTop: number
   scrollHeight: number
   viewportHeight: number
+}
+
+type TouchPoint = { x: number; y: number }
+
+export function createCarouselTouchController({
+  getSection,
+  onNavigate,
+  onActivity,
+}: {
+  getSection: () => (ScrollMetrics & { index: number }) | null
+  onNavigate: (direction: number) => void
+  onActivity?: () => void
+}) {
+  let touch: {
+    section: ScrollMetrics & { index: number }
+    start: TouchPoint
+    previous: TouchPoint
+    hasRead: boolean
+    edgeOrigin: TouchPoint | null
+    edgeDirection: number
+  } | null = null
+
+  function cancel() {
+    touch = null
+  }
+
+  function move(point: TouchPoint) {
+    const gesture = touch
+    if (!gesture) return
+    const section = getSection()
+    if (!section || section.index !== gesture.section.index) {
+      cancel()
+      return
+    }
+    const step = gesture.previous.y - point.y
+    gesture.previous = point
+    const vertical = gesture.start.y - point.y
+    if (Math.abs(vertical) <= Math.abs(gesture.start.x - point.x)) return
+    if (Math.abs(vertical) > 8) onActivity?.()
+    const direction =
+      Math.sign(step) || gesture.edgeDirection || Math.sign(vertical)
+    const action = getCarouselScrollAction({ ...section, delta: direction })
+    if (action === "native") {
+      gesture.hasRead = true
+      gesture.edgeOrigin = null
+      gesture.edgeDirection = 0
+      return
+    }
+    if (!gesture.edgeOrigin || direction !== gesture.edgeDirection) {
+      const startedAtEdge =
+        !gesture.hasRead &&
+        gesture.edgeDirection === 0 &&
+        getCarouselScrollAction({ ...gesture.section, delta: direction }) !==
+          "native"
+      // Reading remains native. Count only movement beyond the observed edge,
+      // so revealing the bottom alone cannot skip the section's final content.
+      gesture.edgeOrigin = startedAtEdge ? gesture.start : point
+      gesture.edgeDirection = direction
+    }
+    const swipe = getCarouselSwipeAction({
+      ...section,
+      startX: gesture.edgeOrigin.x,
+      startY: gesture.edgeOrigin.y,
+      endX: point.x,
+      endY: point.y,
+    })
+    if (swipe === "native") return
+    // Commit while the finger is moving, once per physical gesture.
+    cancel()
+    onNavigate(swipe === "next" ? 1 : -1)
+  }
+
+  return {
+    start(point: TouchPoint) {
+      const section = getSection()
+      touch = section
+        ? {
+            section,
+            start: point,
+            previous: point,
+            hasRead: false,
+            edgeOrigin: null,
+            edgeDirection: 0,
+          }
+        : null
+    },
+    move,
+    end(point: TouchPoint) {
+      move(point)
+      cancel()
+    },
+    cancel,
+  }
 }
 
 export function createCarouselWheelController({
@@ -105,7 +198,7 @@ export function getCarouselSwipeAction({
   startY,
   endX,
   endY,
-  ...startScrollMetrics
+  ...scrollMetrics
 }: ScrollMetrics & {
   startX: number
   startY: number
@@ -122,9 +215,7 @@ export function getCarouselSwipeAction({
     return "native"
   }
 
-  // Use the position at touch start so a swipe can finish reading a section
-  // without also advancing past it in the same gesture.
-  return getCarouselScrollAction({ ...startScrollMetrics, delta })
+  return getCarouselScrollAction({ ...scrollMetrics, delta })
 }
 
 export function getCarouselEntryScrollTop({
