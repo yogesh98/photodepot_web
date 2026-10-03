@@ -2,6 +2,10 @@
 
 import { useEffect, useRef, type ReactNode } from "react"
 import { createScrollGesture } from "./scroll-gesture"
+import {
+  getSectionEntryPosition,
+  getSectionWheelAction,
+} from "./section-scroll"
 import styles from "./shell.module.css"
 
 export function LandingSections({ children }: { children: ReactNode }) {
@@ -122,7 +126,8 @@ export function LandingSections({ children }: { children: ReactNode }) {
           : event.deltaMode === 2
             ? scroller.clientHeight
             : 1
-      const input = gesture.update(event.deltaY * deltaUnit, performance.now())
+      const delta = event.deltaY * deltaUnit
+      const input = gesture.update(delta, performance.now())
 
       if (transitionTarget !== null) {
         // Keep a fresh swipe available for wheel input after the animation.
@@ -151,16 +156,24 @@ export function LandingSections({ children }: { children: ReactNode }) {
       const sectionEnd =
         sectionStart + currentSection.getBoundingClientRect().height
 
-      // Let visitors read a taller section before advancing past its edge.
-      if (
-        (direction > 0 &&
-          scroller.scrollTop + scroller.clientHeight < sectionEnd - 2) ||
-        (direction < 0 && scroller.scrollTop > sectionStart + 2)
-      ) {
+      const action = getSectionWheelAction({
+        scrollTop: scroller.scrollTop,
+        delta,
+        viewportHeight: scroller.clientHeight,
+        sectionStart,
+        sectionEnd,
+      })
+      if (action.type === "native") return
+
+      event.preventDefault()
+      if (action.type === "edge") {
+        // Stop at the end of the readable content. The rest of this gesture's
+        // momentum must not immediately carry the visitor to another section.
+        scroller.scrollTo({ top: action.top, behavior: "instant" })
+        gesture.consume()
         return
       }
 
-      event.preventDefault()
       if (input.direction === 0) return
 
       const nextIndex = Math.max(
@@ -171,7 +184,14 @@ export function LandingSections({ children }: { children: ReactNode }) {
       if (nextIndex === currentIndex) return
 
       const target = Math.min(
-        positions[nextIndex],
+        getSectionEntryPosition({
+          sectionStart: positions[nextIndex],
+          sectionEnd:
+            positions[nextIndex] +
+            sections[nextIndex].getBoundingClientRect().height,
+          viewportHeight: scroller.clientHeight,
+          direction,
+        }),
         scroller.scrollHeight - scroller.clientHeight
       )
       transitionTarget = target

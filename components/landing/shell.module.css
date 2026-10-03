@@ -18,7 +18,8 @@
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior-y: contain;
-  scroll-snap-type: y mandatory;
+  /* Let touch scrolling settle within tall content without forcing a page turn. */
+  scroll-snap-type: y proximity;
   scroll-behavior: smooth;
 }
 .sections[data-wheel-navigation] {
