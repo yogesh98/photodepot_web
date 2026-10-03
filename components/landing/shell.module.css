@@ -101,6 +101,29 @@
 .skip:focus {
   transform: translateY(0);
 }
+@media (min-width: 761px) and (pointer: fine) {
+  .sections {
+    --scrollbar-thumb: color-mix(in srgb, var(--art-ink) 65%, transparent);
+    /* Paint the reserved scrollbar area with the visible section's surface. */
+    background: var(--header-background, var(--art-paper));
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) transparent;
+  }
+  @supports not (scrollbar-color: #171717 transparent) {
+    .sections::-webkit-scrollbar {
+      width: 10px;
+    }
+    .sections::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    .sections::-webkit-scrollbar-thumb {
+      border: 2px solid transparent;
+      border-radius: 10px;
+      background: var(--scrollbar-thumb);
+      background-clip: padding-box;
+    }
+  }
+}
 @media (max-width: 760px), (pointer: coarse) {
   .sections {
     scroll-snap-type: none;
