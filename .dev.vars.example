@@ -1,0 +1,2 @@
+# Local Pages Functions secrets. Keep the real .dev.vars file out of Git.
+PHOTODEPOT_DOWNLOAD_PASSWORD="replace-with-your-local-test-password"

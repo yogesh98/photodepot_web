@@ -32,132 +32,142 @@ source images, camera paths, GIF masters, and encoding reports are retained.
 Video and poster URLs use content-hashed filenames through the generated
 `components/landing/demo-assets.json`, so replacements receive new cache keys.
 
-## Run
+## Cloudflare hosting
+
+The frontend is a Next.js static export hosted on Cloudflare Pages. Pages
+Functions handle `/api/waitlist` and `/api/download/arm64` or `/api/download/x64`.
+Installers live in a **private R2 Standard bucket**; the waitlist lives in D1.
+Only `/api/*` invokes Functions, so website assets use free static hosting.
+The canonical production domain is **photodepot.app**.
+
+The homepage uses a deterministic photo pair in the static HTML, then selects a
+pair in the browser after hydration. Images are served from their existing local
+assets without a runtime image optimizer. Content-hashed demo assets have
+one-year immutable cache headers. Legacy concept URLs redirect to `/`.
+
+The production build uses Webpack because Turbopack's CSS subprocess cannot bind
+its internal port in this managed workspace. Both build paths support the static
+export; this choice does not change the hosting architecture.
+
+### Local development
 
 ```sh
 pnpm install
-cp .env.example .env.local
-pnpm dev
+cp .dev.vars.example .dev.vars
+pnpm db:migrate:local
+pnpm downloads:upload:local
+pnpm preview
 ```
 
-## Configure downloads
+Set `PHOTODEPOT_DOWNLOAD_PASSWORD` in the ignored `.dev.vars` file. Local secrets
+are server-only; never prefix them with `NEXT_PUBLIC_`. Wrangler keeps local D1
+and R2 data in ignored `.wrangler/state/`. Local preview normally runs at
+`http://localhost:8788`. Rebuild and restart it after source changes.
 
-Set one shared password in `.env.local`, or `.env` / your hosting provider's
-runtime environment when deploying:
+`pnpm dev` retains Next.js's fast frontend development server. The live APIs run
+in Wrangler's full-stack preview, rather than inside Next.js.
 
-```dotenv
-PHOTODEPOT_DOWNLOAD_PASSWORD="your-long-private-password"
-```
+### Account setup
 
-Copy the installers into `public/downloads/` using these exact names:
-
-- Apple Silicon: `photodepot-0.1.0-arm64.dmg`
-- Intel Mac: `photodepot-0.1.0-x64.dmg`
-
-Both current releases have been copied from the sibling Photodepot repository.
-DMGs are ignored by Git; upload them manually on deployment. To use different
-filenames, update `DOWNLOAD_FILES` in `lib/download-files.ts`.
-
-The server checks the password and issues a signed, HttpOnly cookie granting
-access to the selected build for five minutes. Files are streamed from disk
-without buffering the whole installer. Direct `/downloads/` URLs are blocked by
-`proxy.ts`, including encoded paths. Both API routes require authentication.
-Missing passwords or files keep downloads closed. Changing the password
-invalidates existing access cookies; restart after changing environment values.
-Next.js expands `$` in `.env` values; escape it as `\$` if your password contains it.
-
-Deploy with a Node.js runtime (`pnpm build`, then `pnpm start`), not a
-static export. HTTPS can terminate at your external reverse proxy while the VM
-serves HTTP. Download cookies use the browser's protocol, passed through
-`X-Forwarded-Proto`. All requests to `public/downloads` must pass through Next.js and
-its proxy; do not expose that folder separately through a static server or CDN.
-Upload installers before starting the server. For standalone deployments, copy
-`public/` alongside the standalone server. Choose hosting that supports streaming
-these approximately 250 MB files within its response-size and timeout limits.
-Password attempts are limited to eight per IP per ten minutes in each server
-process. For multiple instances, configure a shared hosting-edge rate limit and
-ensure the proxy overwrites untrusted `X-Forwarded-For` headers.
-
-## Waitlist
-
-The landing page's Join waitlist buttons and the link on `/tester` open an
-interest form. First name, email, and how the visitor heard about Photodepot
-are required; last name is optional.
-`POST /api/waitlist` validates and saves submissions to a server-side SQLite
-`waitlist` table, including a UTC creation timestamp. Emails are normalized to
-lowercase and unique; repeat submissions succeed without replacing the original.
-
-The database and its parent directory are created automatically on the first
-submission at `data/waitlist.sqlite` and ignored by Git. To change the location:
-
-```dotenv
-PHOTODEPOT_WAITLIST_DB_PATH="/var/lib/photodepot/waitlist.sqlite"
-```
-
-Use Node.js 22.18+ for the built-in SQLite API and the test runner. Deploy on a
-server with a writable persistent disk, and keep the database outside `public/`.
-Mount that disk at the configured path so signups survive restarts and redeploys;
-ephemeral serverless filesystems will not retain the waitlist. Back up the
-database using SQLite's backup tools.
-
-## Ubuntu VM deployment
-
-To copy the codebase to the server, run this from a local Mac terminal outside
-the SSH session:
+Sign in to the Cloudflare account managing photodepot.app, with Pages, Workers/R2,
+D1, and DNS permissions. If R2 is not enabled, complete its subscription checkout
+in the dashboard first. Authorize the official Cloudflare CLI:
 
 ```sh
-rsync -av --exclude='node_modules' --exclude='.next' --exclude='.git' --exclude='data' /Users/yogeshpatel/Developer/photodepot_web/ photodepot@192.168.1.152:/home/photodepot/photodepot_web/
+pnpm cf:login
+pnpm cf:setup
+pnpm cf:password
+pnpm downloads:upload
+pnpm run deploy
 ```
 
-This copies into `/home/photodepot/photodepot_web` and overwrites matching files,
-excluding local dependencies, build output, Git history, and waitlist data.
-It includes `.env` and installers if present. Files that exist only on the
-server are preserved.
+`cf:setup` creates or reuses `photodepot-downloads`, `photodepot-waitlist`, and the
+Direct Upload project `photodepot-web`, saves the real D1 ID in `wrangler.jsonc`,
+and applies migrations. The setup/upload/deploy script defaults to this project's
+Cloudflare account; set `CLOUDFLARE_ACCOUNT_ID` to override it for another account.
+Secret values stay in local files or Cloudflare Pages Secrets, outside Git and
+the static build. Changing a password requires deploying again for the changed
+secret to reach the running Functions.
 
-Then reinstall dependencies on the server:
+For a new installation, enter the production download password at the
+`cf:password` prompt. During this migration, the existing local password is
+reused without printing its value. In `.dev.vars`, dollar signs are literal;
+there is no Next.js-style variable expansion.
+
+### Downloads and releases
+
+Keep DMGs in the ignored `downloads/` folder, **outside `public/`**:
+
+- `photodepot-0.1.0-arm64.dmg`
+- `photodepot-0.1.0-x64.dmg`
+
+Update the versioned keys in `lib/download-files.ts` for a new release, upload
+both installers, then deploy. Upload commands validate both files before writing
+and print their SHA-256 checksums. Wrangler handles the current installers;
+future files over 300 MiB require an S3 multipart upload tool.
+
+Keep the R2 development URL and custom-domain access **disabled**. R2 is accessed
+through the `DOWNLOADS` binding, so no S3 credentials are needed in the website.
+The Functions issue an architecture-scoped, signed, HttpOnly cookie for five
+minutes after password verification. HTTPS cookies are Secure and SameSite
+Strict. Password rotation invalidates existing tokens. R2 responses stream
+without buffering the installer and support authenticated HEAD and single-byte
+ranges. Restarting a download after access expires requires unlocking it again.
+
+D1 atomically enforces eight password attempts per client IP per ten minutes
+across Function instances. Cloudflare's `CF-Connecting-IP` supplies the client
+address; only a password-keyed HMAC of it is stored. Expired limiter rows are
+cleaned up in bounded batches. Missing secrets, files, or storage keep downloads
+closed. Builds and deploys reject installers, SQLite databases, environment
+files, and assets over Pages' 25 MiB file limit.
+
+### Waitlist
+
+The existing form and validation remain: first name, email, and referral answer
+are required; last name is optional. D1 normalizes email addresses, keeps each
+email unique, and retains the original answer on repeat submissions.
+The database starts fresh; existing VM signups are not imported.
 
 ```sh
-cd ~/photodepot_web
-pnpm install
+pnpm --silent waitlist:export > waitlist-export.json
 ```
 
-`deploy/install-vm.sh` installs Node 22 LTS and pnpm, installs Linux dependencies,
-and runs `pnpm build` **on the VM**. It then runs
-`next start` under `photodepot.service`, enabled at boot and restarted on failure.
-The homepage is pre-rendered as static HTML; downloads and waitlist remain live
-Node.js APIs. This deployment does not use the development server.
+Exports contain personal information; keep them private and out of the
+repository. `pnpm db:migrate` applies future remote migrations. No database
+schema changes happen during signup requests.
 
-Upload this repository, `.env`, and both installers to the VM (exclude local
-`node_modules`, `.next`, `.git`, and `data`). On the VM, run:
+### Deployment and domain
 
-```sh
-sudo bash ~/photodepot_web/deploy/install-vm.sh
-```
+Future website updates use `pnpm run deploy`. Installer uploads and schema migrations
+run separately when needed. This is a Direct Upload Pages project; Git integration
+would require creating a new Pages project.
 
-The installer targets the `photodepot` Linux user and LAN IP `192.168.1.152`:
+The migration was deployed and verified on October 8, 2026. The production site
+is `https://photodepot.app`, backed by `photodepot-web.pages.dev`. Its apex DNS
+record points to the Pages project. Both R2 installers passed complete SHA-256
+checks, and live signup persistence and duplicate handling were verified. The
+disposable signup was removed after verification; VM signups were not imported.
 
-- App: `/srv/photodepot/app`
-- Private environment: `/srv/photodepot/.env` (mode `0600`, preserved on reinstall)
-- Persistent waitlist: `/var/lib/photodepot/waitlist.sqlite`
-- URL / reverse proxy upstream: `http://192.168.1.152:80`
-- Logs: `sudo journalctl -u photodepot -f`
-- Restart after changing the password: `sudo systemctl restart photodepot`
+The previous apex record is saved in ignored `cloudflare-dns-backup.json`:
+an A record for `photodepot.app` pointing to `69.121.238.220`, DNS only, TTL Auto.
+To roll back, restore that record in Cloudflare DNS and verify the VM site.
+Leave the existing VM running until rollback is no longer needed.
+The legacy files under `deploy/` describe the old Node/SQLite server and must not
+be used to install this static-export version on the VM.
 
-Run `~/waitlist.sh` on the VM to print every waitlist signup, including the
-name, email, referral answer, and UTC signup time. The script reads the database
-path from the production `.env` and opens SQLite read-only.
+### Free allowances
 
-Nginx serves HTTP on port 80 and forwards every request to Next.js, whose port
-3000 only listens on loopback. It accepts the public domain in the `Host` header
-and preserves `X-Forwarded-Proto` from your external reverse proxy. Configure
-that proxy to preserve the original `Host` (including a nonstandard port) and
-set `X-Forwarded-Proto` to the browser's scheme; this keeps same-origin forms,
-redirects, and secure cookies working. There is no VM TLS certificate or HTTPS
-redirect. Do not configure a separate static alias for installers.
+Use Pages/Workers Free and D1 Free, and R2 **Standard** storage. The current
+installers total about 493 MiB. Pages static requests are free and unlimited;
+Functions share the Workers Free allowance of 100,000 requests/day. R2 includes
+10 GB-month of storage, 1 million Class A and 10 million Class B operations per
+month, with free egress. R2 charges usage beyond its free allowances; this setup
+does not guarantee a permanent zero bill. Review account-wide usage in the
+Cloudflare dashboard and avoid retaining unused release binaries indefinitely.
 
-Nginx overwrites forwarded client IP headers. To apply per-client rate limits
-behind the external proxy, configure nginx's real-IP module with that proxy's
-exact trusted IP so `$remote_addr` reflects the browser's IP.
+- [Pages Functions pricing](https://developers.cloudflare.com/pages/functions/pricing/)
+- [R2 pricing](https://developers.cloudflare.com/r2/pricing/)
+- [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/)
 
 ## Verify
 
@@ -166,9 +176,13 @@ pnpm lint
 pnpm typecheck
 pnpm test
 pnpm build
+pnpm functions:build
 ```
 
-Tests use Node's built-in runner and TypeScript support (Node 22.18+).
+Tests use Node's built-in runner and Cloudflare's local D1/R2 runtime. API test
+bindings are isolated and do not access production storage. Tests cover cookie
+scope, expiration and rotation; concurrent rate limits; R2 streaming and ranges;
+D1 persistence and duplicates; and static asset leakage prevention.
 Brand assets are copied from the sibling `photodepot` repository. Photography
-provenance and photographer credits are in `public/photography/pexels/README.md`. The Inter font
-license is in `app/fonts/OFL.txt`.
+credits are in `public/photography/pexels/README.md`; the Inter font license is in
+`app/fonts/OFL.txt`.

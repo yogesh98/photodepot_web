@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "photodepot-web",
+  "pages_build_output_dir": "./out",
+  "compatibility_date": "2026-10-08",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "r2_buckets": [
+    {
+      "binding": "DOWNLOADS",
+      "bucket_name": "photodepot-downloads"
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "photodepot-waitlist",
+      "database_id": "390f7a3c-b683-431f-b493-fc13667298ae",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

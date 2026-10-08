@@ -2,7 +2,6 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import {
   ACCESS_SECONDS,
-  allowPasswordAttempt,
   createAccessToken,
   hasDownloadAccess,
   isArchitecture,
@@ -47,11 +46,4 @@ test("forged, malformed, or extended tokens cannot grant access", () => {
   ]) {
     assert.equal(hasDownloadAccess(forged, "arm64", password, now), false)
   }
-})
-test("password attempts are limited and the window resets", () => {
-  for (let i = 0; i < 8; i++)
-    assert.equal(allowPasswordAttempt("test-ip", now), true)
-  assert.equal(allowPasswordAttempt("test-ip", now), false)
-  assert.equal(allowPasswordAttempt("other-ip", now), true)
-  assert.equal(allowPasswordAttempt("test-ip", now + 600_000), true)
 })

@@ -56,21 +56,3 @@ export function hasDownloadAccess(
     Buffer.from(signature(`${build}.${expiration}`, password), "hex")
   )
 }
-
-// Per-process protection. Use a shared hosting-edge limit for multiple instances;
-// forwarded IP headers must come from a trusted proxy.
-const attempts = new Map<string, { count: number; expires: number }>()
-export function allowPasswordAttempt(key: string, now = Date.now()) {
-  for (const [ip, record] of attempts) {
-    if (record.expires <= now) attempts.delete(ip)
-  }
-  const record = attempts.get(key)
-  if (record) {
-    if (record.count >= 8) return false
-    record.count += 1
-  } else {
-    if (attempts.size >= 10_000) return false
-    attempts.set(key, { count: 1, expires: now + 10 * 60 * 1000 })
-  }
-  return true
-}

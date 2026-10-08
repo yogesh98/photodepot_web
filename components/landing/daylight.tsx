@@ -8,7 +8,7 @@ import {
   useReducedMotion,
 } from "framer-motion"
 import { ArrowDown, ArrowUpRight, UsersRound } from "lucide-react"
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState, useSyncExternalStore } from "react"
 import { LandingWaitlistTrigger } from "@/components/landing-waitlist"
 import { LandingSections } from "./sections"
 import { collaborationPhotograph, photographs } from "./photography"
@@ -159,11 +159,27 @@ const workflow = [
   },
 ]
 
-export function DaylightLanding({
-  heroPhotoIndices,
-}: {
-  heroPhotoIndices: number[]
-}) {
+const heroPhotoSets = [
+  [0, 3],
+  [2, 5],
+  [1, 4],
+]
+let browserHeroPhotos: number[] | undefined
+const subscribeToHero = () => () => {}
+const initialHeroPhotos = () => heroPhotoSets[0]
+const getHeroPhotos = () => {
+  browserHeroPhotos ??=
+    heroPhotoSets[Math.floor(Math.random() * heroPhotoSets.length)]
+  return browserHeroPhotos
+}
+
+export function DaylightLanding() {
+  // The static HTML and hydration agree; each browser visit then selects a pair.
+  const heroPhotoIndices = useSyncExternalStore(
+    subscribeToHero,
+    getHeroPhotos,
+    initialHeroPhotos
+  )
   const reducedMotion = useReducedMotion()
   const [selectedFeature, setSelectedFeature] = useState(0)
   const [stage, setStage] = useState(0)

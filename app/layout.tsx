@@ -19,6 +19,7 @@ const shareImage = {
 }
 
 export const metadata: Metadata = {
+  metadataBase: new URL("https://photodepot.app"),
   title: "photodepot",
   description,
   openGraph: {

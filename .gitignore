@@ -26,6 +26,12 @@
 
 # Manually uploaded installers
 /public/downloads/*.dmg
+/downloads/*.dmg
+/.wrangler/
+.dev.vars*
+!.dev.vars.example
+/cloudflare-dns-backup.json
+/waitlist-export*.json
 
 # misc
 .DS_Store
