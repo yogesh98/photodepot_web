@@ -116,7 +116,7 @@ const aiFeatures = [
   },
   {
     id: "ranking",
-    label: "Face / Eye analysis",
+    label: "Face and eye analysis",
     title: "A little help finding the keepers.",
     text: "Face analysis estimates whether eyes are open or closed. Together with sharpness and exposure checks, it helps rank the photos in each stack so you have a useful place to start.",
     ...demoAssets["ai-ranking"],
@@ -135,13 +135,13 @@ const aiFeatures = [
 const workflow = [
   {
     name: "Ingest",
-    text: "easily ingest multiple cards throughout the day without missing a beat. Photodepot helps you keep track of ingests and transfers faster and more reliably than your file explorer",
+    text: "Easily ingest multiple cards throughout the day without missing a beat. Photodepot helps you keep track of ingests and transfers faster and more reliably than your file explorer.",
     ...demoAssets["workflow-ingest"],
     alt: "Photodepot’s light-mode ingest workspace showing a connected wedding card, selected photos, and the transfer queue.",
   },
   {
     name: "Cull",
-    text: "Cull with AI assistance and review together with your team, seamlessly connect over your local network. Tag, Rate, and Flag your photos",
+    text: "Cull with AI assistance and review together with your team. Connect seamlessly over your local network. Tag, rate, and flag your photos.",
     ...demoAssets["workflow-cull"],
     alt: "Photodepot’s light-mode culling workspace showing photo comparisons, face close-ups, and rating controls.",
   },
@@ -485,7 +485,7 @@ export function DaylightLanding({
           <div className={styles.closingCta}>
             <LandingWaitlistTrigger showArrow={false} />
             <p className={styles.closingTagline}>
-              <em>built for creatives</em>
+              <em>BUILT FOR CREATIVES</em>
             </p>
           </div>
         </div>

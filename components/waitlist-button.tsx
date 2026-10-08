@@ -108,8 +108,8 @@ export function WaitlistProvider({
             </Dialog.Title>
             <Dialog.Description className="dialog-description">
               {joined
-                ? "Thanks for your interest in photodepot. We'll be in touch when there's more to share."
-                : "Join the photodepot waitlist and hear when we're ready for you."}
+                ? "Thanks for your interest in Photodepot. We'll be in touch when there's more to share."
+                : "Join the Photodepot waitlist and hear when we're ready for you."}
             </Dialog.Description>
             {joined ? (
               <div role="status">
