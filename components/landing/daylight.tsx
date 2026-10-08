@@ -170,7 +170,19 @@ export function DaylightLanding({
   const feature = aiFeatures[selectedFeature]
   const activeStage = workflow[stage]
   const workflowRef = useRef<HTMLElement>(null)
+  const visionRef = useRef<HTMLSpanElement>(null)
+  const [visionWidth, setVisionWidth] = useState<number>()
   const workflowVisible = useInView(workflowRef, { amount: 0.1 })
+
+  useEffect(() => {
+    const vision = visionRef.current
+    if (!vision) return
+    const observer = new ResizeObserver(() => {
+      setVisionWidth(vision.getBoundingClientRect().width)
+    })
+    observer.observe(vision)
+    return () => observer.disconnect()
+  }, [])
 
   useEffect(() => {
     // Hidden carousel slides are clipped, so viewport margins cannot warm them.
@@ -242,10 +254,13 @@ export function DaylightLanding({
           <h1 id="daylight-title">
             <span>ALWAYS</span>
             <span>YOUR</span>
-            <span>
+            <span ref={visionRef} className={styles.visionLine}>
               VISION<span className={styles.orange}>.</span>
             </span>
           </h1>
+          <p className={styles.heroSubtext} style={{ width: visionWidth }}>
+            But twice as fast<span className={styles.orange}>.</span>
+          </p>
         </div>
         <a href="#workflow" className={styles.scrollHint}>
           Scroll to explore <ArrowDown size={16} aria-hidden="true" />
@@ -264,41 +279,31 @@ export function DaylightLanding({
             <br />
             YOUR BEST WORK.
           </h2>
-          <p>
-            Every shoot holds something worth finding. Bring in your
-            photographs, compare the possibilities, and carry your strongest
-            selection forward.
-          </p>
+        </div>
+        <div
+          className={`${styles.aiNavigation} ${styles.workflowNavigation}`}
+          aria-label="Explore the Photodepot workflow"
+        >
+          {workflow.map((item, index) => (
+            <button
+              type="button"
+              key={item.name}
+              aria-pressed={stage === index}
+              onPointerEnter={() => warmDemoVideo(item.video)}
+              onFocus={() => warmDemoVideo(item.video)}
+              onPointerDown={() => warmDemoVideo(item.video)}
+              onClick={() => setStage(index)}
+            >
+              <span className={styles.aiFeatureNumber}>0{index + 1}</span>
+              <span className={styles.aiFeatureLabel}>{item.name}</span>
+              <ArrowUpRight size={15} aria-hidden="true" />
+            </button>
+          ))}
         </div>
         <div className={styles.workflowGrid}>
-          <div
-            className={styles.steps}
-            aria-label="Explore the Photodepot workflow"
-          >
-            {workflow.map((item, index) => (
-              <button
-                type="button"
-                key={item.name}
-                aria-pressed={stage === index}
-                onPointerEnter={() => warmDemoVideo(item.video)}
-                onFocus={() => warmDemoVideo(item.video)}
-                onPointerDown={() => warmDemoVideo(item.video)}
-                onClick={() => setStage(index)}
-              >
-                <span className={styles.stepNumber}>0{index + 1}</span>
-                <span className={styles.stepContent}>
-                  <span className={styles.stepName}>{item.name}</span>
-                  {stage === index && (
-                    <span className={styles.stepDescription}>{item.text}</span>
-                  )}
-                </span>
-                <ArrowUpRight size={22} aria-hidden="true" />
-              </button>
-            ))}
-            <p className={styles.mobileStepDescription} aria-live="polite">
-              {activeStage.text}
-            </p>
-          </div>
+          <p className={styles.workflowDescription} aria-live="polite">
+            {activeStage.text}
+          </p>
           <div className={styles.product}>
             <div className={styles.productImage}>
               <AnimatePresence mode="wait" initial={false}>
