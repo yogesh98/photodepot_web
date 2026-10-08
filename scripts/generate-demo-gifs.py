@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Render smooth, reproducible camera tours over native light-mode screenshots.
+"""Render reproducible GIF masters over native light-mode screenshots.
 
 Requires Pillow, ffmpeg, and gifsicle. Source pixels, UI results, and photographs are never
 retouched. All camera coordinates remain fractional until Lanczos resampling.
 Usage: python3 scripts/generate-demo-gifs.py [--features workflow-ingest ...]
+Publish the website's compressed media with scripts/compress-demo-assets.py.
 """
 
 from __future__ import annotations
@@ -23,7 +24,6 @@ from PIL import Image, ImageChops, ImageDraw
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE_DIR = ROOT / "public/screenshots/demo-source"
 OUTPUT_DIR = ROOT / "public/screenshots"
-ASSET_MANIFEST = ROOT / "components/landing/demo-assets.json"
 
 
 def publish_assets(name, output, poster, entry):
@@ -41,14 +41,9 @@ def publish_assets(name, output, poster, entry):
             "output_sha256": output_hash, "poster_sha256": poster_hash}
 
 
-def save_report_and_assets(report, report_path):
-    # Publish references only after their files exist. Partial regeneration
-    # retains the report and URL entries for every untouched demo.
-    assets = {name: {"image": f"/screenshots/{entry['output']}",
-                     "poster": f"/screenshots/{entry['poster']}"}
-              for name, entry in report.items()}
+def save_report(report, report_path):
+    # Keep GIF masters separate from the website's compressed media manifest.
     report_path.write_text(json.dumps(report, indent=2) + "\n")
-    ASSET_MANIFEST.write_text(json.dumps(assets, indent=2, sort_keys=True) + "\n")
 
 
 def ease(t):
@@ -215,8 +210,8 @@ def main():
                 continue
             report[name] = publish_assets(name, OUTPUT_DIR / entry["output"],
                                           OUTPUT_DIR / entry["poster"], entry)
-        save_report_and_assets(report, report_path)
-        print(json.dumps({"versioned_features": list(report), "assets": str(ASSET_MANIFEST)}), flush=True)
+        save_report(report, report_path)
+        print(json.dumps({"versioned_features": list(report), "report": str(report_path)}), flush=True)
         return
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
@@ -250,7 +245,7 @@ def main():
                  "poster_dimensions": list(poster_size),
                  **inspect_gif(output, frame_ms, len(cameras))}
         report[name] = publish_assets(name, output, poster, entry)
-        save_report_and_assets(report, report_path)
+        save_report(report, report_path)
         print(json.dumps({"feature": name, **report[name]}), flush=True)
 
 

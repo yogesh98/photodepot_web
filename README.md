@@ -25,11 +25,11 @@ its password-protected Apple Silicon and Intel downloads.
 Screenshots show the actual Photodepot desktop app in light mode with demo
 media. Capture and media provenance are documented in
 `public/screenshots/README.md`.
-All seven homepage product demos use GIF camera tours with smooth 50fps motion,
-clean loops, and static posters for reduced-motion preferences. Only visible
-demos play. Regenerate them with `scripts/generate-demo-gifs.py`; source images,
-camera paths, and encoding reports are retained in `public/screenshots/demo-source/`.
-GIF and poster URLs use content-hashed filenames through the generated
+All seven homepage product demos use compressed, silent MP4 camera tours with
+smooth 50fps motion and lossless WebP posters for reduced-motion preferences.
+Only visible demos play. Regenerate them with `scripts/compress-demo-assets.py`;
+source images, camera paths, GIF masters, and encoding reports are retained.
+Video and poster URLs use content-hashed filenames through the generated
 `components/landing/demo-assets.json`, so replacements receive new cache keys.
 
 ## Run

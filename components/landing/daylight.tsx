@@ -8,20 +8,26 @@ import {
   useReducedMotion,
 } from "framer-motion"
 import { ArrowDown, ArrowUpRight, UsersRound } from "lucide-react"
-import { useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { LandingWaitlistTrigger } from "@/components/landing-waitlist"
 import { LandingSections } from "./sections"
 import { collaborationPhotograph, photographs } from "./photography"
 import demoAssets from "./demo-assets.json"
+import {
+  preloadDemoVideo,
+  prefersSaveData,
+  useDemoReducedMotion,
+  warmDemoVideo,
+} from "./demo-media-loading"
 import styles from "./daylight.module.css"
 
 type ProductDemo = {
-  image: string
+  video: string
   poster: string
   alt: string
 }
 
-function DemoImage({
+function DemoMedia({
   demo,
   sizes,
   id,
@@ -30,24 +36,72 @@ function DemoImage({
   sizes: string
   id?: string
 }) {
-  const imageRef = useRef<HTMLImageElement>(null)
-  const visible = useInView(imageRef, { amount: 0.1 })
+  const mediaRef = useRef<HTMLDivElement>(null)
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const visible = useInView(mediaRef, { amount: 0.1 })
+  const nearby = useInView(mediaRef, { margin: "800px 0px", once: true })
+  const reducedMotion = useDemoReducedMotion()
+  const [loadedVideo, setLoadedVideo] = useState<{
+    source: string
+    url: string
+  } | null>(null)
+  const videoUrl =
+    loadedVideo?.source === demo.video ? loadedVideo.url : undefined
+  const playVideo = visible && !reducedMotion && Boolean(videoUrl)
+
+  useEffect(() => {
+    if (!nearby || reducedMotion || (!visible && prefersSaveData())) return
+
+    let cancelled = false
+    void preloadDemoVideo(demo.video, visible ? "auto" : "low").then((url) => {
+      if (url && !cancelled) setLoadedVideo({ source: demo.video, url })
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [demo.video, nearby, reducedMotion, visible])
+
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video) return
+    if (playVideo) void video.play().catch(() => {})
+    else video.pause()
+  }, [playVideo, videoUrl])
 
   return (
-    <picture>
-      <source media="(prefers-reduced-motion: reduce)" srcSet={demo.poster} />
-      <Image
-        ref={imageRef}
-        id={id}
-        src={visible ? demo.image : demo.poster}
-        alt={demo.alt}
-        width={960}
-        height={600}
-        sizes={sizes}
-        loading="lazy"
-        unoptimized
+    <div
+      ref={mediaRef}
+      id={id}
+      className={styles.demoMedia}
+      role="img"
+      aria-label={demo.alt}
+    >
+      <picture>
+        <Image
+          src={demo.poster}
+          alt=""
+          width={960}
+          height={600}
+          sizes={sizes}
+          loading="lazy"
+          unoptimized
+        />
+      </picture>
+      <video
+        key={demo.video}
+        ref={videoRef}
+        className={styles.demoVideo}
+        src={videoUrl}
+        poster={demo.poster}
+        muted
+        loop
+        playsInline
+        autoPlay={playVideo}
+        preload="auto"
+        aria-hidden="true"
+        style={{ visibility: playVideo ? "visible" : "hidden" }}
       />
-    </picture>
+    </div>
   )
 }
 
@@ -115,6 +169,21 @@ export function DaylightLanding({
   const [stage, setStage] = useState(0)
   const feature = aiFeatures[selectedFeature]
   const activeStage = workflow[stage]
+  const workflowRef = useRef<HTMLElement>(null)
+  const workflowVisible = useInView(workflowRef, { amount: 0.1 })
+
+  useEffect(() => {
+    // Hidden carousel slides are clipped, so viewport margins cannot warm them.
+    // Give the first demo a head start after the hero has finished loading.
+    const warmFirstDemo = () => warmDemoVideo(workflow[0].video)
+    if (document.readyState === "complete") warmFirstDemo()
+    else window.addEventListener("load", warmFirstDemo, { once: true })
+    return () => window.removeEventListener("load", warmFirstDemo)
+  }, [])
+
+  useEffect(() => {
+    if (workflowVisible) warmDemoVideo(aiFeatures[0].video)
+  }, [workflowVisible])
 
   return (
     <LandingSections className={styles.page}>
@@ -184,6 +253,7 @@ export function DaylightLanding({
       </section>
 
       <section
+        ref={workflowRef}
         id="workflow"
         className={styles.workflow}
         aria-labelledby="daylight-workflow-title"
@@ -210,6 +280,9 @@ export function DaylightLanding({
                 type="button"
                 key={item.name}
                 aria-pressed={stage === index}
+                onPointerEnter={() => warmDemoVideo(item.video)}
+                onFocus={() => warmDemoVideo(item.video)}
+                onPointerDown={() => warmDemoVideo(item.video)}
                 onClick={() => setStage(index)}
               >
                 <span className={styles.stepNumber}>0{index + 1}</span>
@@ -236,7 +309,7 @@ export function DaylightLanding({
                   exit={{ opacity: reducedMotion ? 1 : 0 }}
                   transition={{ duration: reducedMotion ? 0 : 0.18 }}
                 >
-                  <DemoImage
+                  <DemoMedia
                     demo={activeStage}
                     sizes="(max-width: 850px) 92vw, 54vw"
                   />
@@ -281,6 +354,9 @@ export function DaylightLanding({
               type="button"
               aria-pressed={selectedFeature === index}
               aria-controls="local-ai-feature"
+              onPointerEnter={() => warmDemoVideo(item.video)}
+              onFocus={() => warmDemoVideo(item.video)}
+              onPointerDown={() => warmDemoVideo(item.video)}
               onClick={() => setSelectedFeature(index)}
             >
               <span className={styles.aiFeatureNumber}>0{index + 1}</span>
@@ -300,7 +376,7 @@ export function DaylightLanding({
               transition={{ duration: reducedMotion ? 0 : 0.15 }}
             >
               <div className={styles.aiScreenshot} data-feature={feature.id}>
-                <DemoImage
+                <DemoMedia
                   id="local-ai-animation"
                   demo={feature}
                   sizes="(max-width: 850px) 92vw, 58vw"
