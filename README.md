@@ -8,7 +8,8 @@ Desktop wheel and trackpad gestures advance one section at a time, pausing at
 the edge of taller content until a fresh gesture. Small screens (760px wide or
 less) and devices with a coarse pointer use normal scrolling without section
 snapping or automatic section navigation.
-It retains Photodepot’s original app icon, wordmark, and locally hosted Inter.
+It uses Photodepot’s gallery mark and outlined wordmark, orange (`#ff5a22`),
+ink (`#151613`), warm paper (`#f7f6f2`), and locally hosted Inter.
 Seven curated Pexels photographs cover portraiture, bridal detail, architecture,
 aerial and underwater photography, sculptural still life, and teams. Framer Motion and CSS
 transitions respect reduced-motion preferences. Previous concept preview URLs
@@ -98,8 +99,8 @@ there is no Next.js-style variable expansion.
 
 Keep DMGs in the ignored `downloads/` folder, **outside `public/`**:
 
-- `photodepot-0.1.0-arm64.dmg`
-- `photodepot-0.1.0-x64.dmg`
+- `photodepot-0.1.6-arm64.dmg`
+- `photodepot-0.1.6-x64.dmg`
 
 Update the versioned keys in `lib/download-files.ts` for a new release, upload
 both installers, then deploy. Upload commands validate both files before writing
@@ -183,6 +184,10 @@ Tests use Node's built-in runner and Cloudflare's local D1/R2 runtime. API test
 bindings are isolated and do not access production storage. Tests cover cookie
 scope, expiration and rotation; concurrent rate limits; R2 streaming and ranges;
 D1 persistence and duplicates; and static asset leakage prevention.
-Brand assets are copied from the sibling `photodepot` repository. Photography
-credits are in `public/photography/pexels/README.md`; the Inter font license is in
+Brand assets are copied from the sibling `photodepot/build/brand` directory:
+the canonical SVG lockup is used in both headers, the 1024-pixel app icon is used
+on `/tester` and in social previews, and the ICO and simplified SVG supply browser
+icons. The app icon also supplies the Apple touch icon. Regenerate the sibling
+media kit with `pnpm brand:generate` before copying updated exports here.
+Photography credits are in `public/photography/pexels/README.md`; the Inter font license is in
 `app/fonts/OFL.txt`.

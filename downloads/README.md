@@ -2,8 +2,8 @@
 
 Keep the installers here, outside the public website:
 
-- `photodepot-0.1.0-arm64.dmg`
-- `photodepot-0.1.0-x64.dmg`
+- `photodepot-0.1.6-arm64.dmg`
+- `photodepot-0.1.6-x64.dmg`
 
 DMGs are ignored by Git. `pnpm downloads:upload` uploads them to the private R2
 bucket, and `pnpm downloads:upload:local` seeds local development storage.

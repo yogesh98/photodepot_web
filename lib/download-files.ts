@@ -2,8 +2,8 @@ import type { Architecture } from "./download-auth.ts"
 
 // Versioned R2 object keys, shared by the API and release upload script.
 export const DOWNLOAD_FILES: Record<Architecture, string> = {
-  arm64: "photodepot-0.1.0-arm64.dmg",
-  x64: "photodepot-0.1.0-x64.dmg",
+  arm64: "photodepot-0.1.6-arm64.dmg",
+  x64: "photodepot-0.1.6-x64.dmg",
 }
 
 export function downloadRange(header: string | null, size: number) {

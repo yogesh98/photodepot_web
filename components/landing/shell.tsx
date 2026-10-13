@@ -19,10 +19,13 @@ export function LandingShell({ children }: { children: ReactNode }) {
             className={styles.wordmark}
             aria-label="Photodepot home"
           >
-            <Image src="/brand/photodepot.png" alt="" width={36} height={36} />
-            <span>
-              photodepot<span className={styles.period}>.</span>
-            </span>
+            <Image
+              src="/brand/photodepot-lockup.svg"
+              alt=""
+              width={625}
+              height={169}
+              loading="eager"
+            />
           </Link>
           <WaitlistTrigger
             className={styles.waitlist}

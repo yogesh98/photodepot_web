@@ -1,7 +1,7 @@
 .page {
-  --ink: #171717;
-  --paper: #f5f4ef;
-  --accent: #ff512e;
+  --ink: var(--brand-ink);
+  --paper: var(--brand-paper);
+  --accent: var(--brand-orange);
   color: var(--ink);
   background: var(--paper);
   overflow: clip;
@@ -224,8 +224,7 @@
     transform 0.25s;
 }
 .cta :global(.landing-waitlist-button):hover {
-  background: #ff6e50;
-  border-color: #ff6e50;
+  border-color: var(--ink);
   transform: translateY(-3px);
 }
 .heroControls {
@@ -358,7 +357,7 @@
   border-bottom-color: var(--accent);
 }
 .aiNavigation button[aria-pressed="true"] > .aiFeatureNumber {
-  color: #b83b23;
+  color: var(--ink);
 }
 .aiNavigation button[aria-pressed="true"] > svg,
 .aiNavigation button:hover > svg {
@@ -1240,7 +1239,7 @@
 .page .photoNavigation button[aria-pressed="true"] > span,
 .page .steps button[aria-pressed="true"] .stepNumber,
 .page .collaborationNumber {
-  color: #b83b23;
+  color: var(--ink);
 }
 .page .workflow,
 .page .collaboration {
@@ -1269,7 +1268,7 @@
 }
 .page button:focus-visible,
 .page a:focus-visible {
-  outline-color: #b83b23;
+  outline-color: var(--ink);
 }
 .page .closing button:focus-visible,
 .page .closing a:focus-visible {

@@ -12,10 +12,10 @@ const inter = localFont({
 const description =
   "Cull and organize photographs together in Photodepot. One Mac hosts; approved reviewers join from their own Macs on the same local network, with changes shared across the project."
 const shareImage = {
-  url: "/brand/photodepot.png",
+  url: "/brand/photodepot-app-icon.png",
   width: 1024,
   height: 1024,
-  alt: "Photodepot app logo",
+  alt: "Photodepot app icon",
 }
 
 export const metadata: Metadata = {

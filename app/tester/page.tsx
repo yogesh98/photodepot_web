@@ -6,22 +6,25 @@ export default function Page() {
   return (
     <div className="preview-page">
       <header className="site-header">
-        <Link href="/" className="wordmark" aria-label="photodepot home">
-          <Image src="/brand/photodepot.png" alt="" width={38} height={38} />
-          <span>
-            photodepot<span className="wordmark-period">.</span>
-          </span>
+        <Link href="/" className="wordmark" aria-label="Photodepot home">
+          <Image
+            src="/brand/photodepot-lockup.svg"
+            alt=""
+            width={625}
+            height={169}
+            loading="eager"
+          />
         </Link>
       </header>
       <main className="preview-main">
         <section className="hero" aria-labelledby="hero-title">
           <div className="hero-icon">
             <Image
-              src="/brand/photodepot.png"
-              alt="photodepot app icon"
+              src="/brand/photodepot-app-icon.png"
+              alt="Photodepot app icon"
               width={144}
               height={144}
-              priority
+              preload
             />
           </div>
           <p className="workflow-eyebrow">ingest · cull · organize · deliver</p>

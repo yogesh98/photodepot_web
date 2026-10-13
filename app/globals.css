@@ -60,6 +60,9 @@ html {
 
 :root {
   color-scheme: light;
+  --brand-paper: #f7f6f2;
+  --brand-ink: #151613;
+  --brand-orange: #ff5a22;
   --background: oklch(1 0 0);
   --foreground: oklch(0.147 0.004 49.25);
   --card: oklch(1 0 0);
@@ -106,9 +109,9 @@ html {
   }
 }
 
-/* Photodepot's stone palette, square controls, and locally bundled Inter. */
+/* Photodepot's warm paper, gallery mark, and locally bundled Inter. */
 .preview-page {
-  --page-surface: #faf9f6;
+  --page-surface: var(--brand-paper);
   --quiet-text: #78716c;
   position: relative;
   display: flex;
@@ -116,6 +119,7 @@ html {
   flex-direction: column;
   overflow: clip;
   background: var(--page-surface);
+  color: var(--brand-ink);
 }
 .preview-page::before {
   position: absolute;
@@ -138,8 +142,16 @@ html {
   pointer-events: none;
   content: "";
   background:
-    radial-gradient(ellipse at 25% 40%, #ffb93d12, transparent 50%),
-    radial-gradient(ellipse at 75% 40%, #0abbed12, transparent 50%);
+    radial-gradient(
+      ellipse at 25% 40%,
+      color-mix(in srgb, var(--brand-orange) 7%, transparent),
+      transparent 50%
+    ),
+    radial-gradient(
+      ellipse at 75% 40%,
+      color-mix(in srgb, var(--brand-orange) 4%, transparent),
+      transparent 50%
+    );
 }
 .site-header,
 .preview-main {
@@ -158,13 +170,12 @@ html {
 .wordmark {
   display: inline-flex;
   align-items: center;
-  gap: 9px;
-  font-size: 21px;
-  font-weight: 600;
-  letter-spacing: -1px;
+  flex-shrink: 0;
 }
-.wordmark-period {
-  color: #9b9287;
+.wordmark img {
+  display: block;
+  width: 180px;
+  height: auto;
 }
 .preview-main {
   display: flex;
@@ -441,12 +452,8 @@ html {
   .site-header {
     padding: 22px 20px;
   }
-  .wordmark {
-    font-size: 19px;
-  }
   .wordmark img {
-    width: 32px;
-    height: 32px;
+    width: 166px;
   }
   .preview-main {
     padding: 38px 24px 138px;
@@ -503,7 +510,7 @@ html {
   --landing-ink: #24231f;
   --landing-muted: #77726a;
   --landing-line: #e3e0d9;
-  --landing-amber: #f7be45;
+  --landing-orange: var(--brand-orange);
   --landing-blue: #43afe3;
   --landing-cyan: #65cbc2;
   min-height: 100svh;
@@ -624,7 +631,7 @@ html {
   display: block;
   width: 7px;
   height: 7px;
-  background: var(--landing-amber);
+  background: var(--landing-orange);
 }
 
 .color-registration i:nth-child(2),
@@ -659,7 +666,7 @@ html {
   z-index: -1;
   height: 0.17em;
   transform: skewX(-8deg);
-  background: #f4b64045;
+  background: color-mix(in srgb, var(--brand-orange) 27%, transparent);
   content: "";
 }
 
@@ -706,7 +713,7 @@ html {
   width: 490px;
   height: 380px;
   transform: rotate(-22deg);
-  background: var(--landing-amber);
+  background: var(--landing-orange);
 }
 
 .mat-colors span:nth-child(2) {
@@ -759,7 +766,7 @@ html {
 .caption-dot {
   width: 5px;
   height: 5px;
-  background: var(--landing-amber);
+  background: var(--landing-orange);
 }
 
 .workflow-section {
@@ -789,7 +796,7 @@ html {
 }
 
 .step-amber {
-  --step-color: #d79b28;
+  --step-color: var(--brand-orange);
 }
 
 .step-blue {

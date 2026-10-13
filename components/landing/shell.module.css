@@ -2,9 +2,9 @@
   --header-height: 88px;
   --section-height: calc(100svh - var(--header-height));
   --section-height: calc(100dvh - var(--header-height));
-  --art-paper: #f5f4ef;
-  --art-ink: #171717;
-  --art-line: #17171724;
+  --art-paper: var(--brand-paper);
+  --art-ink: var(--brand-ink);
+  --art-line: color-mix(in srgb, var(--brand-ink) 14%, transparent);
   min-height: 100svh;
   min-height: 100dvh;
   display: flex;
@@ -35,28 +35,24 @@
 .wordmark {
   display: inline-flex;
   align-items: center;
-  gap: 9px;
-  font-size: 21px;
-  font-weight: 600;
-  letter-spacing: -1px;
+  flex-shrink: 0;
 }
 .wordmark img {
-  width: 36px;
-  height: 36px;
-}
-.period {
-  color: #9b9287;
+  display: block;
+  width: 180px;
+  height: auto;
 }
 .waitlist {
   display: inline-flex;
   align-items: center;
   gap: 22px;
   padding: 13px 18px;
-  border: 1px solid #ff512e;
-  background: #ff512e;
+  border: 1px solid var(--brand-orange);
+  background: var(--brand-orange);
   color: var(--art-ink);
   font-size: 12px;
   font-weight: 700;
+  white-space: nowrap;
   cursor: pointer;
   transition:
     background 0.2s,
@@ -64,13 +60,15 @@
     color 0.2s;
 }
 .waitlist:hover {
-  background: #ff6e50;
-  border-color: #ff6e50;
+  border-color: var(--art-ink);
 }
 .page[data-header-section="waitlist"] .waitlist {
   background: var(--art-ink);
   border-color: var(--art-ink);
   color: var(--art-paper);
+}
+.page[data-header-section="waitlist"] .header {
+  background: var(--art-paper);
 }
 .page[data-header-section="waitlist"] .waitlist:hover {
   background: #35332e;
@@ -101,13 +99,8 @@
     padding: 0 20px;
     gap: 16px;
   }
-  .wordmark {
-    font-size: 19px;
-    gap: 7px;
-  }
   .wordmark img {
-    width: 32px;
-    height: 32px;
+    width: clamp(132px, 40vw, 166px);
   }
   .waitlist {
     padding: 10px 12px;
