@@ -1,7 +1,7 @@
 export type Architecture = "arm64" | "x64"
 
-// Pause both the website buttons and the API until a licensed build is ready.
-export const DOWNLOADS_ENABLED = false
+// Publish both architectures together after their signed release is uploaded.
+export const DOWNLOADS_ENABLED = true
 
 export function isArchitecture(value: string): value is Architecture {
   return value === "arm64" || value === "x64"
@@ -9,8 +9,8 @@ export function isArchitecture(value: string): value is Architecture {
 
 // Versioned R2 object keys, shared by the API and release upload script.
 export const DOWNLOAD_FILES: Record<Architecture, string> = {
-  arm64: "photodepot-0.1.6-arm64.dmg",
-  x64: "photodepot-0.1.6-x64.dmg",
+  arm64: "photodepot-0.2.0-arm64.dmg",
+  x64: "photodepot-0.2.0-x64.dmg",
 }
 
 export function downloadRange(header: string | null, size: number) {

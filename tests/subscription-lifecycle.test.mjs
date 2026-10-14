@@ -165,6 +165,7 @@ function request(path, body, cookie) {
       ...(body === undefined ? {} : { "content-type": "application/json" }),
       ...(cookie ? { cookie } : {}),
       "cf-connecting-ip": `local-lifecycle-${sequence++}`,
+      "Photodepot-Receipt-Version": "2",
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   })

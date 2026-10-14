@@ -25,6 +25,7 @@ interface ReminderRow {
     | "uncertain"
   attempts: number
   updated_at: number
+  lease_until: number
   lease_token: string | null
   first_attempt_at: number | null
   recipient: string | null
@@ -251,9 +252,13 @@ export async function runSubscriptionReminders(
       const attempt = await env.DB.prepare(
         `UPDATE subscription_reminders SET attempts=attempts+1,first_attempt_at=COALESCE(first_attempt_at,?),credential_fingerprint=COALESCE(credential_fingerprint,?)
          WHERE id=? AND status='sending' AND lease_token=? AND lease_until>?
-         AND (first_attempt_at IS NULL OR first_attempt_at>?)
+         AND lease_until>CAST(unixepoch('subsec') * 1000 AS INTEGER)
+         AND (first_attempt_at IS NULL OR (first_attempt_at>?
+           AND first_attempt_at>CAST(unixepoch('subsec') * 1000 AS INTEGER)-?))
          AND EXISTS (SELECT 1 FROM subscriptions s WHERE s.id=subscription_reminders.subscription_id
-           AND s.status='active' AND s.type='trial' AND s.started_at<=? AND s.end_at=subscription_reminders.end_at AND s.end_at>?) RETURNING id`
+           AND s.status='active' AND s.type='trial' AND s.started_at<=? AND s.end_at=subscription_reminders.end_at AND s.end_at>?
+           AND s.end_at>CAST(unixepoch('subsec') * 1000 AS INTEGER))
+         RETURNING first_attempt_at,lease_until,end_at`
       )
         .bind(
           deliveryNow,
@@ -262,11 +267,54 @@ export async function runSubscriptionReminders(
           row.lease_token,
           deliveryNow,
           deliveryNow - providerWindow,
+          providerWindow,
           deliveryNow,
           deliveryNow
         )
-        .first()
+        .first<
+          Pick<ReminderRow, "first_attempt_at" | "lease_until" | "end_at">
+        >()
       if (!attempt) {
+        result.deferred++
+        continue
+      }
+      // D1 may execute in time but return after the delivery boundary. Recheck
+      // the returned lease and term immediately before starting the transport.
+      const transmissionNow = options.now ?? Date.now()
+      if (transmissionNow >= attempt.end_at) {
+        await finish(
+          env,
+          row,
+          "cancelled",
+          transmissionNow,
+          "Subscription term expired before delivery"
+        )
+        result.cancelled++
+        continue
+      }
+      if (
+        attempt.first_attempt_at !== null &&
+        transmissionNow >= attempt.first_attempt_at + providerWindow
+      ) {
+        await finish(
+          env,
+          row,
+          "uncertain",
+          transmissionNow,
+          "Delivery outcome needs review; automatic retry window ended"
+        )
+        result.uncertain++
+        continue
+      }
+      if (transmissionNow >= attempt.lease_until) {
+        await finish(
+          env,
+          row,
+          "pending",
+          transmissionNow,
+          "Delivery lease expired before transmission",
+          transmissionNow + 900_000
+        )
         result.deferred++
         continue
       }
@@ -367,7 +415,10 @@ export async function subscriptionReminderQueue(env: Env, now = Date.now()) {
             ? {
                 id: user.id,
                 email: user.email,
-                name: [user.firstName, user.lastName].filter(Boolean).join(" "),
+                firstName: user.firstName,
+                lastName: user.lastName,
+                emailVerified: user.emailVerified,
+                createdAt: Date.parse(user.createdAt),
               }
             : null,
         }

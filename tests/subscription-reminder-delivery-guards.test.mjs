@@ -91,6 +91,175 @@ const row = () =>
     .bind(customerId)
     .first()
 
+function pauseFinalAttempt(stage) {
+  let signalEntered, resume
+  const entered = new Promise((resolve) => {
+    signalEntered = resolve
+  })
+  const released = new Promise((resolve) => {
+    resume = resolve
+  })
+  const wrap = (statement) =>
+    new Proxy(statement, {
+      get(target, property) {
+        if (property === "bind")
+          return (...values) => wrap(target.bind(...values))
+        if (property === "first")
+          return async (...values) => {
+            if (stage === "execution") {
+              signalEntered()
+              await released
+            }
+            const result = await target.first(...values)
+            if (stage === "response") {
+              signalEntered()
+              await released
+            }
+            return result
+          }
+        const value = Reflect.get(target, property)
+        return typeof value === "function" ? value.bind(target) : value
+      },
+    })
+  const database = new Proxy(env.DB, {
+    get(target, property) {
+      if (property === "prepare")
+        return (sql) => {
+          const statement = target.prepare(sql)
+          return sql.includes("SET attempts=attempts+1")
+            ? wrap(statement)
+            : statement
+        }
+      const value = Reflect.get(target, property)
+      return typeof value === "function" ? value.bind(target) : value
+    },
+  })
+  return { database, entered, resume }
+}
+
+for (const boundary of ["lease", "term", "retry window"]) {
+  test(
+    `a queued final attempt cannot transmit after its ${boundary} expires on the database clock`,
+    { timeout: 5000 },
+    async () => {
+      if (boundary === "retry window")
+        await runSubscriptionReminders(env, {
+          now,
+          fetch: async () => {
+            throw new Error("Previous response lost")
+          },
+        })
+      const capturedNow = Date.now()
+      let expiresAt
+      if (boundary === "term") {
+        expiresAt = capturedNow + 500
+        await env.DB.prepare(
+          "UPDATE subscriptions SET end_at=? WHERE user_id=?"
+        )
+          .bind(expiresAt, customerId)
+          .run()
+      }
+      if (boundary === "retry window")
+        await env.DB.prepare(
+          "UPDATE subscription_reminders SET first_attempt_at=?,retry_at=? WHERE user_id=?"
+        )
+          .bind(capturedNow - day + 1, capturedNow, customerId)
+          .run()
+      const gate = pauseFinalAttempt("execution")
+      let transmissions = 0
+      const running = runSubscriptionReminders(
+        { ...env, DB: gate.database },
+        {
+          now: capturedNow,
+          fetch: async () => {
+            transmissions++
+            return Response.json({ id: "expired-attempt" })
+          },
+        }
+      )
+      await gate.entered
+      try {
+        if (boundary === "lease")
+          await env.DB.prepare(
+            "UPDATE subscription_reminders SET lease_until=? WHERE user_id=?"
+          )
+            .bind(capturedNow + 1, customerId)
+            .run()
+        if (boundary === "term")
+          await new Promise((resolve) =>
+            setTimeout(resolve, Math.max(0, expiresAt - Date.now() + 20))
+          )
+        else await new Promise((resolve) => setTimeout(resolve, 5))
+      } finally {
+        gate.resume()
+      }
+      const result = await running
+      assert.equal(transmissions, 0)
+      assert.equal(result.deferred, 1)
+      assert.equal((await row()).attempts, boundary === "retry window" ? 1 : 0)
+    }
+  )
+}
+
+for (const boundary of ["lease", "term", "retry window"]) {
+  test(
+    `a delayed final-attempt response cannot transmit after its ${boundary} expires`,
+    { timeout: 5000 },
+    async (t) => {
+      if (boundary === "retry window")
+        await runSubscriptionReminders(env, {
+          now,
+          fetch: async () => {
+            throw new Error("Previous response lost")
+          },
+        })
+      const capturedNow = Date.now()
+      let currentTime = capturedNow
+      t.mock.method(Date, "now", () => currentTime)
+      const expiresAt = capturedNow + (boundary === "lease" ? 120_000 : 1_000)
+      if (boundary === "term")
+        await env.DB.prepare(
+          "UPDATE subscriptions SET end_at=? WHERE user_id=?"
+        )
+          .bind(expiresAt, customerId)
+          .run()
+      if (boundary === "retry window")
+        await env.DB.prepare(
+          "UPDATE subscription_reminders SET first_attempt_at=?,retry_at=? WHERE user_id=?"
+        )
+          .bind(expiresAt - day, capturedNow, customerId)
+          .run()
+      const gate = pauseFinalAttempt("response")
+      let transmissions = 0
+      const running = runSubscriptionReminders(
+        { ...env, DB: gate.database },
+        {
+          fetch: async () => {
+            transmissions++
+            return Response.json({ id: "expired-response" })
+          },
+        }
+      )
+      await gate.entered
+      currentTime = expiresAt
+      gate.resume()
+      const result = await running
+      assert.equal(transmissions, 0)
+      const expectedStatus =
+        boundary === "lease"
+          ? "pending"
+          : boundary === "term"
+            ? "cancelled"
+            : "uncertain"
+      assert.equal((await row()).status, expectedStatus)
+      assert.equal(
+        result[boundary === "lease" ? "deferred" : expectedStatus],
+        1
+      )
+    }
+  )
+}
+
 test("a worker that loses its lease during WorkOS lookup cannot transmit after the replacement worker sends", async () => {
   let enterLookup,
     releaseLookup,

@@ -109,6 +109,12 @@ function fixtures() {
     reviewFailNext: null,
     reminderOutbox: [],
     reminderRuns: 0,
+    reminderFailure: null,
+    reminderDeletedUser: false,
+    requestHistoryDelay: 0,
+    requestHistoryFailure: null,
+    requestHistoryStarted: [],
+    requestHistoryResponses: [],
   }
 }
 
@@ -345,6 +351,17 @@ async function requestsApi(request, response, url) {
       const item = state.accountRequests.find(
         (item) => item.id === url.searchParams.get("requestId")
       )
+      const delay = state.requestHistoryDelay
+      const failure = state.requestHistoryFailure
+      state.requestHistoryDelay = 0
+      state.requestHistoryFailure = null
+      state.requestHistoryStarted.push(item.id)
+      if (delay) await new Promise((resolve) => setTimeout(resolve, delay))
+      state.requestHistoryResponses.push(item.id)
+      if (failure)
+        return respond(response, failure, {
+          error: "Test request history unavailable",
+        })
       return respond(response, 200, {
         request: item,
         audit: [
@@ -368,6 +385,12 @@ async function requestsApi(request, response, url) {
         )
         .map((item) => ({
           ...item,
+          user: (() => {
+            const user = state.users.find((user) => user.id === item.userId)
+            if (!user) return null
+            const { subscription, ...account } = user
+            return account
+          })(),
           subscription:
             state.users.find((user) => user.id === item.userId)?.subscription ??
             null,
@@ -403,6 +426,10 @@ async function requestsApi(request, response, url) {
   respond(response, 200, { request: item })
 }
 async function remindersApi(request, response) {
+  if (state.reminderFailure)
+    return respond(response, state.reminderFailure, {
+      error: "Reminder session expired",
+    })
   if (request.method === "POST") {
     const body = await bodyOf(request)
     assert.equal(body.action, "run")
@@ -428,11 +455,26 @@ async function remindersApi(request, response) {
       {
         subscription: state.users[0].subscription,
         user: {
-          id: "user_alice",
-          email: "alice@example.test",
-          name: "Alice Example",
+          id: state.users[0].id,
+          email: state.users[0].email,
+          firstName: state.users[0].firstName,
+          lastName: state.users[0].lastName,
+          emailVerified: state.users[0].emailVerified,
+          createdAt: state.users[0].createdAt,
         },
       },
+      ...(state.reminderDeletedUser
+        ? [
+            {
+              subscription: {
+                ...state.users[0].subscription,
+                id: "subscription_deleted",
+                userId: "user_deleted",
+              },
+              user: null,
+            },
+          ]
+        : []),
     ],
     outbox: state.reminderOutbox,
     asOf: Date.now(),
@@ -948,6 +990,11 @@ test("customer request forms preserve keyboard focus and handle rate and session
   await expect(
     dialog.getByRole("link", { name: "Sign in", exact: true })
   ).toHaveAttribute("target", "_blank")
+  await dialog.getByLabel(/Message to the administrator/).focus()
+  await page.keyboard.press("Shift+Tab")
+  await expect(
+    dialog.getByRole("link", { name: "Sign in", exact: true })
+  ).toBeFocused()
   await page.keyboard.press("Escape")
   await expect(dialog).toHaveCount(0)
 })
@@ -1074,4 +1121,173 @@ test("request conflicts require refresh and daily reminder checks show previews"
   ).toBeVisible()
   await expect(page.getByText("preview", { exact: true })).toBeVisible()
   assert.equal(state.reminderRuns, 1)
+})
+
+test("queue account details preserve verification and signup metadata", async () => {
+  state.users[0].emailVerified = false
+  state.users[0].createdAt = Date.now() - 20 * day
+  state.reminderDeletedUser = true
+  await page.getByRole("button", { name: "Refresh renewal queue" }).click()
+  const reminders = page.getByRole("region", { name: "Daily renewal queue" })
+  await expect(
+    reminders.getByText("user_deleted", { exact: true })
+  ).toBeVisible()
+  await expect(
+    reminders.getByRole("button", { name: "Review access", exact: true })
+  ).toHaveCount(1)
+  await page.getByRole("button", { name: "Review access", exact: true }).click()
+  const dialog = page.getByRole("dialog")
+  await expect(dialog.getByText("Not verified", { exact: true })).toBeVisible()
+  await expect(
+    dialog
+      .locator("dl > div")
+      .filter({ has: page.getByText("Joined", { exact: true }) })
+      .locator("time")
+  ).toHaveAttribute(
+    "datetime",
+    new Date(state.users[0].createdAt).toISOString()
+  )
+  await dialog.getByRole("button", { name: "Close account dialog" }).click()
+  state.accountRequests = [
+    {
+      id: "request_00000000-0000-4000-8000-000000000003",
+      userId: "user_alice",
+      email: "alice@example.test",
+      action: "renewal",
+      deviceId: null,
+      message: "",
+      status: "pending",
+      revision: 1,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      adminNote: "",
+      handledBy: "",
+    },
+    {
+      id: "request_00000000-0000-4000-8000-000000000004",
+      userId: "user_deleted",
+      email: "deleted@example.test",
+      action: "renewal",
+      deviceId: null,
+      message: "",
+      status: "pending",
+      revision: 1,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      adminNote: "",
+      handledBy: "",
+    },
+  ]
+  await page
+    .getByRole("button", { name: "Refresh requests", exact: true })
+    .click()
+  const queue = page.getByRole("region", { name: /Customer requests/ })
+  await expect(
+    queue
+      .locator("li")
+      .filter({ hasText: "deleted@example.test" })
+      .getByRole("button", { name: "Open account", exact: true })
+  ).toBeDisabled()
+  await queue
+    .locator("li")
+    .filter({ hasText: "alice@example.test" })
+    .getByRole("button", { name: "Open account", exact: true })
+    .click()
+  await expect(dialog.getByText("Not verified", { exact: true })).toBeVisible()
+  await expect(
+    dialog
+      .locator("dl > div")
+      .filter({ has: page.getByText("Joined", { exact: true }) })
+      .locator("time")
+  ).toHaveAttribute(
+    "datetime",
+    new Date(state.users[0].createdAt).toISOString()
+  )
+})
+
+test("request review retries transient failures and ignores history from a closed review", async () => {
+  state.accountRequests = [
+    {
+      id: "request_00000000-0000-4000-8000-000000000005",
+      userId: "user_alice",
+      email: "alice@example.test",
+      action: "renewal",
+      deviceId: null,
+      message: "",
+      status: "pending",
+      revision: 1,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      adminNote: "",
+      handledBy: "",
+    },
+  ]
+  await page
+    .getByRole("button", { name: "Refresh requests", exact: true })
+    .click()
+  state.requestHistoryDelay = 200
+  state.requestHistoryFailure = 503
+  await page
+    .getByRole("button", { name: "Review request", exact: true })
+    .click()
+  await expect.poll(() => state.requestHistoryStarted.length).toBe(1)
+  await page.getByRole("button", { name: "Close review", exact: true }).click()
+  await page
+    .getByRole("button", { name: "Review request", exact: true })
+    .click()
+  await expect.poll(() => state.requestHistoryResponses.length).toBe(2)
+  await expect(
+    page.getByText("Test request history unavailable", { exact: true })
+  ).toHaveCount(0)
+  await page.getByLabel(/Admin review note/).fill("Keep this note for retry")
+  state.reviewFailNext = 503
+  await page.getByRole("button", { name: "Save review", exact: true }).click()
+  await expect(
+    page.getByRole("button", { name: "Save review", exact: true })
+  ).toBeEnabled()
+  await expect(page.getByLabel(/Admin review note/)).toHaveValue(
+    "Keep this note for retry"
+  )
+  await page.getByRole("button", { name: "Save review", exact: true }).click()
+  await expect(
+    page.getByRole("button", { name: "Save review", exact: true })
+  ).toHaveCount(0)
+  assert.equal(state.accountRequests[0].status, "acknowledged")
+  assert.equal(state.accountRequests[0].adminNote, "Keep this note for retry")
+})
+
+test("non-JSON unauthorized responses disable customer and reminder mutations until refresh", async () => {
+  await page.route("**/api/admin/subscription-reminders", (route) =>
+    route.fulfill({
+      status: 401,
+      contentType: "text/plain",
+      body: "Unauthorized",
+    })
+  )
+  await page.getByRole("button", { name: "Refresh renewal queue" }).click()
+  const reminders = page.getByRole("region", { name: "Daily renewal queue" })
+  await expect(reminders.getByRole("alert")).toContainText("session expired")
+  await expect(
+    reminders.getByRole("button", { name: "Check reminders now" })
+  ).toBeDisabled()
+  await page.goto(`${origin}/account`)
+  await page
+    .getByRole("button", { name: "Request renewal", exact: true })
+    .click()
+  await page.route("**/api/account/subscription", (route) =>
+    route.fulfill({
+      status: 401,
+      contentType: "text/plain",
+      body: "Unauthorized",
+    })
+  )
+  await page
+    .getByRole("button", { name: "Submit request", exact: true })
+    .click()
+  await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
+    "session expired"
+  )
+  await expect(
+    page.getByRole("button", { name: "Submit request", exact: true })
+  ).toBeDisabled()
 })

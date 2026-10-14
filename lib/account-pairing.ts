@@ -257,7 +257,9 @@ export async function handleAccountPairing(
           status: "active",
           challenge: row.challenge,
           revision: binding.subscription.revision,
-          subscriptionEndsAt: binding.subscription.endsAt,
+          ...(request.headers.get("Photodepot-Receipt-Version") === "2"
+            ? { subscriptionEndsAt: binding.subscription.endsAt }
+            : {}),
         },
         Date.now(),
         binding.subscription.endsAt

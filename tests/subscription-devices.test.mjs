@@ -3,6 +3,7 @@ import {
   createHash,
   generateKeyPairSync,
   randomBytes,
+  randomUUID,
   sign,
   verify,
 } from "node:crypto"
@@ -221,6 +222,68 @@ function bind(userId, mac, now = epoch) {
   )
 }
 
+// Frozen pre-two-slot SQL exercises the backend that is still live while the
+// migrations are applied, including its omitted active/assignment columns.
+async function legacyBind(userId, mac, now = epoch) {
+  const results = await database.batch([
+    database
+      .prepare(
+        `UPDATE subscriptions SET current_device_id = ?,
+      revision = revision + CASE WHEN current_device_id IS NULL THEN 1 ELSE 0 END,
+      updated_at = CASE WHEN current_device_id IS NULL THEN ? ELSE updated_at END
+      WHERE user_id = ? AND status = 'active' AND started_at <= ? AND end_at > ?
+      AND (current_device_id IS NULL OR current_device_id = ?)
+      AND NOT EXISTS (SELECT 1 FROM account_devices d WHERE d.device_id = ? AND d.user_id != ?)
+      RETURNING *`
+      )
+      .bind(
+        mac.deviceId,
+        now,
+        userId,
+        now,
+        now,
+        mac.deviceId,
+        mac.deviceId,
+        userId
+      ),
+    database
+      .prepare(
+        `INSERT INTO account_devices (device_id,user_id,public_key,binding_revision,activated_at)
+      SELECT ?,user_id,?,binding_revision,? FROM subscriptions WHERE user_id=? AND current_device_id=?
+      AND status='active' AND started_at<=? AND end_at>? AND changes()=1
+      ON CONFLICT(device_id) DO UPDATE SET binding_revision=excluded.binding_revision,
+      activated_at=CASE WHEN account_devices.binding_revision!=excluded.binding_revision
+        THEN excluded.activated_at ELSE account_devices.activated_at END
+      WHERE account_devices.user_id=excluded.user_id AND account_devices.public_key=excluded.public_key`
+      )
+      .bind(
+        mac.deviceId,
+        mac.publicKeyEncoded,
+        now,
+        userId,
+        mac.deviceId,
+        now,
+        now
+      ),
+    database
+      .prepare(
+        `INSERT INTO subscription_audit (id,subscription_id,action,actor,created_at,detail)
+      SELECT ?,id,'bind-device',user_id,?,'Mac connected / assignment ' || binding_revision || ' / ' || current_device_id
+      FROM subscriptions WHERE user_id=? AND current_device_id=? AND changes()=1
+      AND NOT EXISTS (SELECT 1 FROM subscription_audit a WHERE a.subscription_id=subscriptions.id
+        AND a.action='bind-device' AND a.detail='Mac connected / assignment ' || binding_revision || ' / ' || current_device_id)`
+      )
+      .bind(randomUUID(), now, userId, mac.deviceId),
+    database
+      .prepare(
+        `SELECT s.*,d.binding_revision AS device_binding_revision FROM account_devices d
+      JOIN subscriptions s ON s.user_id=d.user_id WHERE d.device_id=?`
+      )
+      .bind(mac.deviceId),
+  ])
+  return results[3].results[0]
+}
+
 function proof(mac) {
   const challenge = randomBytes(32).toString("base64url")
   return {
@@ -241,13 +304,14 @@ function proof(mac) {
   }
 }
 
-function verifyRequest(mac, bindings = env, changes = {}) {
+function verifyRequest(mac, bindings = env, changes = {}, headers = {}) {
   return handleLicenseRequest(
     new Request(`${origin}/api/licenses/verify`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
         "cf-connecting-ip": `account-test-${sequence++}`,
+        ...headers,
       },
       body: JSON.stringify({ ...proof(mac), ...changes }),
     }),
@@ -353,6 +417,101 @@ test("two-Mac migration preserves the current single Mac, notes and old revoked 
   assert.deepEqual(
     await listSubscriptionAudit(database, migratedUserId),
     auditBefore
+  )
+})
+
+test("migration handoff admits legacy inserts and returning upserts while preserving Mac revisions", async () => {
+  const userId = "user_legacy_migration_handoff"
+  await assign(userId)
+  const mac = device()
+  const inserted = await legacyBind(userId, mac)
+  assert.equal(inserted.current_device_id, mac.deviceId)
+  let deviceState = await getSubscriptionDevice(database, mac.deviceId, epoch)
+  assert.equal(deviceState.active, true)
+  assert.equal(deviceState.assignmentRevision, 1)
+  assert.equal(deviceState.subscription.devices.length, 1)
+  // An old reset changes the account epoch without updating the active column.
+  await database
+    .prepare(
+      `UPDATE subscriptions SET current_device_id=NULL,binding_revision=binding_revision+1,
+    revision=revision+1 WHERE user_id=?`
+    )
+    .bind(userId)
+    .run()
+  assert.equal(
+    (await getSubscriptionDevice(database, mac.deviceId, epoch)).active,
+    false
+  )
+  const returned = await legacyBind(userId, mac, epoch + 1)
+  assert.equal(returned.current_device_id, mac.deviceId)
+  deviceState = await getSubscriptionDevice(database, mac.deviceId, epoch)
+  assert.equal(deviceState.active, true)
+  assert.equal(deviceState.assignmentRevision, 1)
+  assert.equal(deviceState.bindingRevision, 2)
+  assert.equal(deviceState.subscription.devices.length, 1)
+  const reset = await resetSubscriptionDevice(
+    database,
+    userId,
+    deviceState.subscription.revision,
+    actor,
+    epoch + 2,
+    "Single reset during handoff",
+    mac.deviceId
+  )
+  const legacyProof = await database
+    .prepare(
+      `SELECT s.current_device_id,s.binding_revision,
+    d.binding_revision AS device_binding_revision FROM account_devices d JOIN subscriptions s ON s.user_id=d.user_id
+    WHERE d.device_id=?`
+    )
+    .bind(mac.deviceId)
+    .first()
+  assert.equal(legacyProof.current_device_id, null)
+  assert.equal(reset.bindingRevision, 2)
+  assert.equal(
+    (await getSubscriptionDevice(database, mac.deviceId, epoch))
+      .assignmentRevision,
+    2
+  )
+  // A returning old upsert after an account epoch reset retains the individual
+  // revision instead of overwriting it with the newly added column's default.
+  await database
+    .prepare(
+      `UPDATE subscriptions SET current_device_id=NULL,binding_revision=binding_revision+1,
+    revision=revision+1 WHERE user_id=?`
+    )
+    .bind(userId)
+    .run()
+  await legacyBind(userId, mac, epoch + 3)
+  deviceState = await getSubscriptionDevice(database, mac.deviceId, epoch)
+  assert.equal(deviceState.active, true)
+  assert.equal(deviceState.bindingRevision, 3)
+  assert.equal(deviceState.assignmentRevision, 2)
+})
+
+test("legacy handoff activation cannot bypass the two-Mac database guard", async () => {
+  const userId = "user_legacy_handoff_capacity"
+  await assign(userId)
+  const first = device(),
+    second = device(),
+    third = device()
+  await bind(userId, first)
+  await bind(userId, second)
+  const before = await getSubscription(database, userId, epoch)
+  await assert.rejects(legacyBind(userId, third), /two connected Macs/)
+  assert.deepEqual(await getSubscription(database, userId, epoch), before)
+  assert.equal(
+    await getSubscriptionDevice(database, third.deviceId, epoch),
+    null
+  )
+  assert.equal(
+    (
+      await database
+        .prepare("SELECT current_device_id FROM subscriptions WHERE user_id=?")
+        .bind(userId)
+        .first()
+    ).current_device_id,
+    null
   )
 })
 
@@ -592,6 +751,66 @@ test("active account receipts cap offline access at subscription expiration and 
   await bind(longUser, otherMac)
   const long = await receipt(await verifyRequest(otherMac))
   assert.equal(long.expiresAt - long.issuedAt, LICENSE_GRACE_MS)
+})
+
+test("live verification negotiates subscription expiry without breaking legacy receipt schemas", async (t) => {
+  t.mock.method(Date, "now", () => epoch)
+  const userId = "user_verify_receipt_versions"
+  const subscription = await assign(userId, { endsAt: epoch + 30 * 60_000 })
+  const mac = device()
+  await bind(userId, mac)
+  for (const version of [undefined, "1", "2", "3"]) {
+    const response = await verifyRequest(
+      mac,
+      env,
+      {},
+      version ? { "Photodepot-Receipt-Version": version } : {}
+    )
+    const envelope = await response.clone().json()
+    const payload = await receipt(response)
+    assert.equal(payload.expiresAt, subscription.endsAt)
+    assert.equal(
+      payload.subscriptionEndsAt,
+      version === "2" ? subscription.endsAt : undefined
+    )
+    assert.deepEqual(
+      Object.keys(payload).sort(),
+      [
+        "version",
+        "licenseId",
+        "deviceId",
+        "type",
+        "status",
+        "challenge",
+        "revision",
+        "issuedAt",
+        "expiresAt",
+        ...(version === "2" ? ["subscriptionEndsAt"] : []),
+      ].sort()
+    )
+    assert.deepEqual(
+      Object.keys(envelope).sort(),
+      [
+        "payload",
+        "signature",
+        ...(version === "2" ? ["collaborationReceipt"] : []),
+      ].sort()
+    )
+    if (version === "2") {
+      const compatible = await receipt(
+        Response.json(envelope.collaborationReceipt, {
+          headers: { "cache-control": "private, no-store" },
+        })
+      )
+      const expected = { ...payload }
+      delete expected.subscriptionEndsAt
+      assert.deepEqual(compatible, expected)
+      assert.deepEqual(Object.keys(envelope.collaborationReceipt).sort(), [
+        "payload",
+        "signature",
+      ])
+    }
+  }
 })
 
 test("subscription expiry, revocation, reset, unverified email and deleted WorkOS accounts produce valid revoked receipts", async (t) => {

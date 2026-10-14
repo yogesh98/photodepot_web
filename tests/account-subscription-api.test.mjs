@@ -8,6 +8,10 @@ import { handleAccountSubscription } from "../functions/api/account/subscription
 import { handleAdminSubscriptionRequests } from "../functions/api/admin/subscription-requests.ts"
 import { bindSubscriptionDevice } from "../lib/subscription-devices.ts"
 import { getSubscription, setSubscription } from "../lib/subscription-store.ts"
+import {
+  createAccountRequest,
+  getAccountRequest,
+} from "../lib/account-requests.ts"
 
 const origin = "https://photodepot.app"
 const clientId = "client_account_dashboard_api"
@@ -20,11 +24,15 @@ const jwk = {
   use: "sig",
   alg: "RS256",
 }
-const macKey = generateKeyPairSync("ed25519")
-  .publicKey.export({ format: "der", type: "spki" })
+const macKey = generateKeyPairSync("ed25519").publicKey.export({
+  format: "der",
+  type: "spki",
+})
 const deviceId = createHash("sha256").update(macKey).digest("hex")
 const publicKey = macKey.toString("base64url")
 let platform, env, originalFetch
+const liveUsers = new Map()
+const accountLookups = []
 function token(userId, role = "member") {
   const header = Buffer.from(
     JSON.stringify({ alg: "RS256", kid: jwk.kid })
@@ -84,6 +92,7 @@ before(async () => {
   env = {
     ...platform.env,
     WORKOS_CLIENT_ID: clientId,
+    WORKOS_API_KEY: "sk_test_account_dashboard_api",
     WORKOS_ADMIN_ORGANIZATION_ID: organization,
     WORKOS_COOKIE_PASSWORD: password,
     WORKOS_REDIRECT_URI: `${origin}/api/auth/callback`,
@@ -104,11 +113,41 @@ before(async () => {
   }
   originalFetch = globalThis.fetch
   globalThis.fetch = async (input) => {
-    assert.equal(String(input), `https://api.workos.com/sso/jwks/${clientId}`)
-    return Response.json({ keys: [jwk] })
+    if (String(input) === `https://api.workos.com/sso/jwks/${clientId}`)
+      return Response.json({ keys: [jwk] })
+    const id = new URL(input).pathname.split("/").at(-1)
+    assert.equal(
+      String(input),
+      `https://api.workos.com/user_management/users/${id}`
+    )
+    accountLookups.push(id)
+    const user = liveUsers.get(id)
+    if (!user)
+      return Response.json({ message: "User not found" }, { status: 404 })
+    if (user === "unavailable")
+      return Response.json({ message: "Unavailable" }, { status: 503 })
+    return Response.json({
+      object: "user",
+      id,
+      email: user.email,
+      email_verified: user.emailVerified,
+      first_name: user.firstName,
+      last_name: user.lastName,
+      created_at: user.createdAt,
+      updated_at: user.createdAt,
+    })
   }
 })
 beforeEach(async () => {
+  liveUsers.clear()
+  accountLookups.length = 0
+  liveUsers.set("user_dashboard_customer", {
+    email: "live.customer@example.test",
+    emailVerified: false,
+    firstName: "Actual",
+    lastName: "Customer",
+    createdAt: "2026-01-02T03:04:05.000Z",
+  })
   await env.DB.batch(
     [
       "DELETE FROM subscription_request_audit",
@@ -411,4 +450,88 @@ test("Owner request review is revision-safe and hides review notes from customer
   assert.equal(customer.requests[0].status, "acknowledged")
   assert.equal(JSON.stringify(customer).includes("Admin-only"), false)
   assert.equal("audit" in customer, false)
+})
+
+test("admin request queue uses live account metadata, deduplicates lookups and marks deleted accounts", async () => {
+  for (const values of [
+    { action: "renewal" },
+    { action: "reset-device", deviceId },
+    { userId: "user_dashboard_other", action: "renewal" },
+  ])
+    await createAccountRequest(env.DB, {
+      userId: "user_dashboard_customer",
+      email: "stored.old.email@example.test",
+      ...values,
+    })
+  const response = await handleAdminSubscriptionRequests(
+    request(
+      "/api/admin/subscription-requests",
+      await cookie("user_dashboard_owner", "admin", "owner")
+    ),
+    env
+  )
+  assert.equal(response.status, 200)
+  const queue = await response.json()
+  assert.equal(queue.requests.length, 3)
+  for (const item of queue.requests.filter(
+    (item) => item.userId === "user_dashboard_customer"
+  )) {
+    assert.deepEqual(item.user, {
+      id: "user_dashboard_customer",
+      email: "live.customer@example.test",
+      emailVerified: false,
+      firstName: "Actual",
+      lastName: "Customer",
+      createdAt: Date.parse("2026-01-02T03:04:05.000Z"),
+    })
+    assert.equal(item.email, "stored.old.email@example.test")
+  }
+  assert.equal(
+    queue.requests.find((item) => item.userId === "user_dashboard_other").user,
+    null
+  )
+  assert.deepEqual(accountLookups.sort(), [
+    "user_dashboard_customer",
+    "user_dashboard_other",
+  ])
+  liveUsers.set("user_dashboard_customer", "unavailable")
+  const unavailable = await handleAdminSubscriptionRequests(
+    request(
+      "/api/admin/subscription-requests",
+      await cookie("user_dashboard_owner", "admin", "owner")
+    ),
+    env
+  )
+  assert.equal(unavailable.status, 503)
+})
+
+test("invalid subscription environment prevents customer requests and administrator reviews", async () => {
+  const bindings = { ...env, PHOTODEPOT_ENVIRONMENT: "staging" }
+  const customer = await cookie()
+  const write = await handleAccountSubscription(
+    request("/api/account/subscription", customer, {
+      action: "request-renewal",
+    }),
+    bindings
+  )
+  assert.equal(write.status, 503)
+  const { request: created } = await createAccountRequest(env.DB, {
+    userId: "user_dashboard_customer",
+    email: "customer@example.test",
+    action: "renewal",
+  })
+  const review = await handleAdminSubscriptionRequests(
+    request(
+      "/api/admin/subscription-requests",
+      await cookie("user_dashboard_owner", "admin", "owner"),
+      {
+        requestId: created.id,
+        action: "resolve",
+        expectedRevision: 1,
+      }
+    ),
+    bindings
+  )
+  assert.equal(review.status, 503)
+  assert.equal((await getAccountRequest(env.DB, created.id)).revision, 1)
 })

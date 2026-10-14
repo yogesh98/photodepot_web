@@ -23,6 +23,7 @@ export async function handleAccountSubscription(request: Request, env: Env) {
   const auth = await authenticateWorkOSAccount(request, env)
   if (auth instanceof Response) return auth
   try {
+    const environment = subscriptionEnvironment(env)
     if (!["GET", "POST"].includes(request.method)) {
       const response = json({ error: "Method not allowed." }, 405)
       response.headers.set("Allow", "GET, POST")
@@ -97,7 +98,7 @@ export async function handleAccountSubscription(request: Request, env: Env) {
       : null
     return withAdminSession(
       json({
-        environment: subscriptionEnvironment(env),
+        environment,
         user: { email: auth.email },
         subscription: safeSubscription,
         requests: await listAccountRequests(env.DB, auth.userId),

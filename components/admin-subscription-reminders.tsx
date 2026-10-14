@@ -12,7 +12,7 @@ type ReminderQueue = {
   mode: "preview" | "resend" | "disabled"
   upcoming: {
     subscription: SubscriptionSummary
-    user: { id: string; email: string; name: string } | null
+    user: Omit<WorkOSUserSummary, "subscription"> | null
   }[]
   outbox: {
     id: string
@@ -70,13 +70,13 @@ export function AdminSubscriptionReminders({
             }
           : {}),
       })
-      const result = await response.json()
       if (response.status === 401) {
-        setSessionExpired(true)
+        if (mounted.current && !active.signal.aborted) setSessionExpired(true)
         throw new Error(
           "Your session expired. Sign in in a new tab, then refresh this queue."
         )
       }
+      const result = await response.json()
       if (!response.ok)
         throw new Error(
           typeof result?.error === "string"
@@ -202,7 +202,11 @@ export function AdminSubscriptionReminders({
               <div className={styles.queueItemHeading}>
                 <div>
                   <strong>
-                    {user?.name || user?.email || subscription.userId}
+                    {[user?.firstName, user?.lastName]
+                      .filter(Boolean)
+                      .join(" ") ||
+                      user?.email ||
+                      subscription.userId}
                   </strong>
                   <small>
                     {user?.email} ·{" "}
@@ -217,12 +221,7 @@ export function AdminSubscriptionReminders({
                     disabled={disabled}
                     onClick={() =>
                       onReview({
-                        id: user.id,
-                        email: user.email,
-                        firstName: user.name || null,
-                        lastName: null,
-                        emailVerified: true,
-                        createdAt: subscription.startsAt,
+                        ...user,
                         subscription,
                       })
                     }

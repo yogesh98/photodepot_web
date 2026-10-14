@@ -9,6 +9,14 @@ import type { WorkOSUserSummary } from "@/lib/subscription-types"
 import styles from "./subscription-dashboard.module.css"
 
 type QueueItem = AdminRequestQueue["requests"][number]
+class RequestQueueError extends Error {
+  constructor(
+    message: string,
+    readonly status: number
+  ) {
+    super(message)
+  }
+}
 async function api<T>(
   query = "",
   body?: object,
@@ -22,14 +30,26 @@ async function api<T>(
     headers: body ? { "Content-Type": "application/json" } : {},
     ...(body ? { body: JSON.stringify(body) } : {}),
   })
-  const result = await response.json()
+  if (response.status === 401)
+    throw new RequestQueueError(
+      "Your admin session expired. Sign in again, then refresh the queue.",
+      401
+    )
+  let result
+  try {
+    result = await response.json()
+  } catch {
+    throw new RequestQueueError(
+      "Unable to read the request queue. Try again.",
+      response.status
+    )
+  }
   if (!response.ok)
-    throw new Error(
-      response.status === 401
-        ? "Your admin session expired. Sign in again, then refresh the queue."
-        : typeof result?.error === "string"
-          ? result.error
-          : "Unable to load the request queue."
+    throw new RequestQueueError(
+      typeof result?.error === "string"
+        ? result.error
+        : "Unable to load the request queue.",
+      response.status
     )
   return result as T
 }
@@ -51,16 +71,20 @@ export function AdminSubscriptionRequests({
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
+  const [sessionExpired, setSessionExpired] = useState(false)
+  const [reloadRequired, setReloadRequired] = useState(false)
   const [notice, setNotice] = useState("")
   const [selected, setSelected] = useState<QueueItem | null>(null)
   const [action, setAction] = useState("acknowledge")
   const [note, setNote] = useState("")
   const [audit, setAudit] = useState<AccountRequestAudit[]>([])
   const request = useRef<AbortController | null>(null)
+  const historyRequest = useRef<AbortController | null>(null)
   const mounted = useRef(false)
   const selectedId = useRef<string | null>(null)
   const load = useCallback(async () => {
     request.current?.abort()
+    historyRequest.current?.abort()
     const controller = new AbortController()
     request.current = controller
     setLoading(true)
@@ -75,16 +99,21 @@ export function AdminSubscriptionRequests({
       if (!controller.signal.aborted && mounted.current) {
         setQueue(result)
         setError("")
+        setSessionExpired(false)
+        setReloadRequired(false)
         setSelected(null)
         selectedId.current = null
       }
     } catch (cause) {
-      if (!controller.signal.aborted && mounted.current)
+      if (!controller.signal.aborted && mounted.current) {
         setError(
           cause instanceof Error
             ? cause.message
             : "Unable to load the request queue."
         )
+        if (cause instanceof RequestQueueError && cause.status === 401)
+          setSessionExpired(true)
+      }
     } finally {
       if (!controller.signal.aborted && mounted.current) setLoading(false)
     }
@@ -97,16 +126,22 @@ export function AdminSubscriptionRequests({
     return () => {
       mounted.current = false
       request.current?.abort()
+      historyRequest.current?.abort()
     }
   }, [load])
   useEffect(() => {
-    if (selected || busy) return
+    if (selected || busy || sessionExpired) return
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") void load()
     }, 30_000)
     return () => window.clearInterval(timer)
-  }, [load, selected, busy])
+  }, [load, selected, busy, sessionExpired])
   async function review(item: QueueItem) {
+    request.current?.abort()
+    historyRequest.current?.abort()
+    const controller = new AbortController()
+    historyRequest.current = controller
+    setLoading(false)
     selectedId.current = item.id
     setSelected(item)
     setNote(item.adminNote)
@@ -116,23 +151,38 @@ export function AdminSubscriptionRequests({
     setNotice("")
     try {
       const result = await api<{ audit: AccountRequestAudit[] }>(
-        `?requestId=${encodeURIComponent(item.id)}`
+        `?requestId=${encodeURIComponent(item.id)}`,
+        undefined,
+        controller.signal
       )
-      if (mounted.current && selectedId.current === item.id)
+      if (
+        mounted.current &&
+        !controller.signal.aborted &&
+        selectedId.current === item.id
+      )
         setAudit(result.audit)
     } catch (cause) {
-      if (mounted.current)
+      if (
+        mounted.current &&
+        !controller.signal.aborted &&
+        selectedId.current === item.id
+      ) {
         setError(
           cause instanceof Error
             ? cause.message
             : "Unable to read request history."
         )
+        if (cause instanceof RequestQueueError && cause.status === 401)
+          setSessionExpired(true)
+      }
     }
   }
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!selected || busy || disabled || error) return
+    if (!selected || busy || disabled || sessionExpired || reloadRequired)
+      return
     setBusy(true)
+    setError("")
     try {
       await api("", {
         action,
@@ -148,18 +198,18 @@ export function AdminSubscriptionRequests({
       setError(
         cause instanceof Error ? cause.message : "Unable to review the request."
       )
+      if (cause instanceof RequestQueueError && cause.status === 401)
+        setSessionExpired(true)
+      if (cause instanceof RequestQueueError && cause.status === 409)
+        setReloadRequired(true)
     } finally {
       if (mounted.current) setBusy(false)
     }
   }
   function openAccount(item: QueueItem) {
+    if (!item.user) return
     onReview({
-      id: item.userId,
-      email: item.email,
-      firstName: null,
-      lastName: null,
-      emailVerified: true,
-      createdAt: item.subscription?.startsAt ?? item.createdAt,
+      ...item.user,
       subscription: item.subscription,
     })
   }
@@ -254,6 +304,12 @@ export function AdminSubscriptionRequests({
                   ? `${item.subscription.type === "trial" ? "Trial" : "Standard"} · ${item.subscription.status} · expires ${date(item.subscription.endsAt)} · ${item.subscription.devices.length}/${item.subscription.deviceLimit} Macs`
                   : "No subscription assigned"}
               </p>
+              {!item.user && (
+                <p className={styles.queueContext}>
+                  This account is no longer available. Its request can still be
+                  reviewed.
+                </p>
+              )}
               {item.deviceId && (
                 <code className={styles.queueDevice}>{item.deviceId}</code>
               )}
@@ -269,14 +325,16 @@ export function AdminSubscriptionRequests({
                 <button
                   type="button"
                   onClick={() => openAccount(item)}
-                  disabled={disabled || busy}
+                  disabled={disabled || busy || sessionExpired || !item.user}
                 >
                   Open account
                 </button>
                 <button
                   type="button"
                   onClick={() => void review(item)}
-                  disabled={disabled || busy}
+                  disabled={
+                    disabled || busy || sessionExpired || reloadRequired
+                  }
                 >
                   {["pending", "acknowledged"].includes(item.status)
                     ? "Review request"
@@ -349,7 +407,9 @@ export function AdminSubscriptionRequests({
                     {["pending", "acknowledged"].includes(item.status) && (
                       <button
                         type="submit"
-                        disabled={busy || disabled || !!error}
+                        disabled={
+                          busy || disabled || sessionExpired || reloadRequired
+                        }
                       >
                         {busy ? "Saving…" : "Save review"}
                       </button>
@@ -358,6 +418,7 @@ export function AdminSubscriptionRequests({
                       type="button"
                       className={styles.quiet}
                       onClick={() => {
+                        historyRequest.current?.abort()
                         selectedId.current = null
                         setSelected(null)
                       }}

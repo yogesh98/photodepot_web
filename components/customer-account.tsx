@@ -26,6 +26,11 @@ async function api<T>(body?: object, signal?: AbortSignal): Promise<T> {
     headers: body ? { "Content-Type": "application/json" } : {},
     ...(body ? { body: JSON.stringify(body) } : {}),
   })
+  if (response.status === 401)
+    throw new AccountError(
+      "Your session expired. Sign in again, then refresh your account.",
+      401
+    )
   let result
   try {
     result = await response.json()
@@ -37,11 +42,9 @@ async function api<T>(body?: object, signal?: AbortSignal): Promise<T> {
   }
   if (!response.ok)
     throw new AccountError(
-      response.status === 401
-        ? "Your session expired. Sign in again, then refresh your account."
-        : typeof result?.error === "string"
-          ? result.error
-          : "Your account is temporarily unavailable.",
+      typeof result?.error === "string"
+        ? result.error
+        : "Your account is temporarily unavailable.",
       response.status
     )
   return result as T
@@ -108,9 +111,9 @@ function RequestDialog({
         if (event.key !== "Tab") return
         const elements = Array.from(
           event.currentTarget.querySelectorAll<HTMLElement>(
-            "button:not(:disabled), textarea:not(:disabled)"
+            "button:not(:disabled), textarea:not(:disabled), a[href]"
           )
-        )
+        ).filter((element) => element.getClientRects().length > 0)
         const first = elements[0],
           last = elements.at(-1)
         if (event.shiftKey && document.activeElement === first) {

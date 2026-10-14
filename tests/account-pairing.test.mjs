@@ -207,7 +207,8 @@ function pair(
   pairingId,
   changes = {},
   bindings = env,
-  hostname = origin
+  hostname = origin,
+  headers = {}
 ) {
   return handleAccountPairing(
     new Request(`${hostname}/api/account/pairing/${action}`, {
@@ -215,6 +216,7 @@ function pair(
       headers: {
         "content-type": "application/json",
         "cf-connecting-ip": `pairing-test-${sequence++}`,
+        ...headers,
       },
       body: JSON.stringify(signedBody(device, action, pairingId, changes)),
     }),
@@ -267,6 +269,66 @@ function decodeReceipt(envelope) {
   )
   return JSON.parse(bytes.toString("utf8"))
 }
+
+test("pairing receipts preserve legacy payloads and expose subscription expiry to negotiated clients", async (t) => {
+  t.mock.method(Date, "now", () => epoch)
+  const userId = "user_pairing_receipt_versions"
+  const subscription = await assign(userId, "regular", epoch + 30 * 60_000)
+  const started = await start()
+  assert.equal((await approval(started, userId)).status, 200)
+  for (const version of [undefined, "1", "2", "3"]) {
+    const response = await pair(
+      started.device,
+      "poll",
+      started.pairingId,
+      {},
+      env,
+      origin,
+      version ? { "Photodepot-Receipt-Version": version } : {}
+    )
+    assert.equal(response.status, 200)
+    const receipt = (await response.json()).receipt
+    const payload = decodeReceipt(receipt)
+    assert.equal(payload.expiresAt, subscription.endsAt)
+    assert.equal(
+      payload.subscriptionEndsAt,
+      version === "2" ? subscription.endsAt : undefined
+    )
+    assert.deepEqual(
+      Object.keys(payload).sort(),
+      [
+        "version",
+        "licenseId",
+        "deviceId",
+        "type",
+        "status",
+        "challenge",
+        "revision",
+        "issuedAt",
+        "expiresAt",
+        ...(version === "2" ? ["subscriptionEndsAt"] : []),
+      ].sort()
+    )
+    assert.deepEqual(
+      Object.keys(receipt).sort(),
+      [
+        "payload",
+        "signature",
+        ...(version === "2" ? ["collaborationReceipt"] : []),
+      ].sort()
+    )
+    if (version === "2") {
+      const compatible = decodeReceipt(receipt.collaborationReceipt)
+      const expected = { ...payload }
+      delete expected.subscriptionEndsAt
+      assert.deepEqual(compatible, expected)
+      assert.deepEqual(Object.keys(receipt.collaborationReceipt).sort(), [
+        "payload",
+        "signature",
+      ])
+    }
+  }
+})
 
 test("desktop pairing completes through browser consent and retries the same proof without exposing credentials", async (t) => {
   t.mock.method(Date, "now", () => epoch)

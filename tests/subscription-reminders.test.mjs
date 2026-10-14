@@ -166,6 +166,35 @@ test("concurrent production jobs send once, preserve provider idempotency, and w
     0
   )
 })
+test("the renewal queue preserves actual account metadata and represents deleted accounts explicitly", async () => {
+  await grant("user_unverified")
+  users.set("user_unverified", { verified: false })
+  await env.DB.prepare(
+    "UPDATE subscriptions SET started_at=? WHERE user_id='user_unverified'"
+  )
+    .bind(now - day)
+    .run()
+  await grant("user_deleted")
+  users.delete("user_deleted")
+  const queue = await subscriptionReminderQueue(env, now)
+  const account = queue.upcoming.find(
+    (item) => item.subscription.userId === "user_unverified"
+  )
+  assert.deepEqual(account.user, {
+    id: "user_unverified",
+    email: "user_unverified@example.test",
+    firstName: "Customer",
+    lastName: null,
+    emailVerified: false,
+    createdAt: now - 5 * day,
+  })
+  assert.notEqual(account.user.createdAt, account.subscription.startsAt)
+  assert.equal(
+    queue.upcoming.find((item) => item.subscription.userId === "user_deleted")
+      .user,
+    null
+  )
+})
 test("unknown provider outcomes retry the identical payload/key and stop outside the24h deduplication window", async () => {
   await grant("user_due", now + 2 * day)
   const calls = []

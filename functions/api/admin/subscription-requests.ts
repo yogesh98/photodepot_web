@@ -12,6 +12,7 @@ import {
 } from "../../../lib/cloudflare.ts"
 import { listSubscriptions } from "../../../lib/subscription-store.ts"
 import { subscriptionEnvironment } from "../../../lib/subscription-environment.ts"
+import { getWorkOSUser } from "../../../lib/workos-users.ts"
 import {
   AccountRequestConflictError,
   getAccountRequest,
@@ -27,6 +28,7 @@ export async function handleAdminSubscriptionRequests(
   const auth = await authenticateLicenseAdmin(request, env)
   if (auth instanceof Response) return auth
   try {
+    const environment = subscriptionEnvironment(env)
     if (request.method === "GET") {
       const query = new URL(request.url).searchParams
       if (query.has("requestId")) {
@@ -47,13 +49,38 @@ export async function handleAdminSubscriptionRequests(
         env.DB,
         queue.requests.map((item) => item.userId)
       )
+      const users = new Map()
+      const userIds = [...new Set(queue.requests.map((item) => item.userId))]
+      // Bound concurrent WorkOS lookups and share one result for each account.
+      for (let offset = 0; offset < userIds.length; offset += 10) {
+        const batch = await Promise.all(
+          userIds.slice(offset, offset + 10).map(async (userId) => {
+            const user = await getWorkOSUser(env, userId)
+            return [
+              userId,
+              user
+                ? {
+                    id: user.id,
+                    email: user.email,
+                    firstName: user.firstName,
+                    lastName: user.lastName,
+                    emailVerified: user.emailVerified,
+                    createdAt: Date.parse(user.createdAt),
+                  }
+                : null,
+            ] as const
+          })
+        )
+        for (const [userId, user] of batch) users.set(userId, user)
+      }
       return withAdminSession(
         json({
           ...queue,
-          environment: subscriptionEnvironment(env),
+          environment,
           requests: queue.requests.map((item) => ({
             ...item,
             subscription: subscriptions.get(item.userId) ?? null,
+            user: users.get(item.userId) ?? null,
           })),
         }),
         auth

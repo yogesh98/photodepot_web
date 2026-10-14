@@ -4,6 +4,7 @@ import type {
   SubscriptionStatus,
   SubscriptionType,
   SubscriptionSummary,
+  WorkOSUserSummary,
 } from "./subscription-types.ts"
 
 export type AccountRequestAction = "renewal" | "reset-device"
@@ -48,7 +49,10 @@ export interface CustomerAccount {
 }
 export interface AdminRequestQueue {
   environment: "production" | "development"
-  requests: (AccountRequest & { subscription: SubscriptionSummary | null })[]
+  requests: (AccountRequest & {
+    subscription: SubscriptionSummary | null
+    user: Omit<WorkOSUserSummary, "subscription"> | null
+  })[]
   openCount: number
   limit: number
 }

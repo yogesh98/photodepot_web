@@ -175,7 +175,9 @@ export async function handleLicenseRequest(
             status: active ? "active" : "revoked",
             challenge: body.challenge,
             revision: currentDevice.subscription.revision,
-            subscriptionEndsAt: currentDevice.subscription.endsAt,
+            ...(request.headers.get("Photodepot-Receipt-Version") === "2"
+              ? { subscriptionEndsAt: currentDevice.subscription.endsAt }
+              : {}),
           },
           verifiedAt,
           currentDevice.subscription.endsAt

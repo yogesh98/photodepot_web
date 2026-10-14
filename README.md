@@ -21,10 +21,9 @@ local network, and changes are shared across the project.
 Ingest and export remain with the host. The complete Ingest, Cull, Organize, and
 Export workflow is also explained. Joining the waitlist
 is its only call to action. The original download page lives at `/tester`, with
-its Apple Silicon and Intel download buttons. Downloads are currently paused while
-desktop licensing is checked locally; the buttons are disabled and both API routes
-return the unavailable notice without reading R2. A license key is required in the
-desktop app to open or create local projects.
+its Apple Silicon and Intel download buttons for version 0.2.0. An active account
+subscription or compatible license is required in the desktop app to open or
+create local projects.
 
 Screenshots show the actual Photodepot desktop app in light mode with demo
 media. Capture and media provenance are documented in
@@ -96,15 +95,13 @@ signs are literal; there is no Next.js-style variable expansion.
 
 ### Downloads and releases
 
-Downloads are temporarily paused with `DOWNLOADS_ENABLED = false` in
-`lib/download-files.ts`. Website installer copies and hosted R2 installers have
-been removed, and upload commands refuse to run while paused. Re-enable the flag
-only when a licensed desktop release is ready.
+Version 0.2.0 provides account sign-in, seven-day trials, and up to two connected
+Macs. Both signed, notarized installers are published together.
 
 For that release, keep DMGs in the ignored `downloads/` folder, **outside `public/`**:
 
-- `photodepot-0.1.6-arm64.dmg`
-- `photodepot-0.1.6-x64.dmg`
+- `photodepot-0.2.0-arm64.dmg`
+- `photodepot-0.2.0-x64.dmg`
 
 Update the versioned keys in `lib/download-files.ts` for a new release, upload
 both installers, then deploy. Upload commands validate both files before writing
@@ -190,10 +187,10 @@ pnpm functions:build
 ```
 
 Tests use Node's built-in runner and Cloudflare's local D1/R2 runtime. API test
-bindings are isolated and do not access production storage. Tests cover paused
-GET/HEAD downloads without R2 access, byte-range parsing and invalid requests; D1 waitlist
-persistence and duplicates; license administration and verification; and static
-asset leakage prevention.
+bindings are isolated and do not access production storage. Tests cover public
+GET/HEAD downloads, byte ranges, unavailable storage and invalid requests;
+D1 waitlist persistence and duplicates; license administration and verification;
+and static asset leakage prevention.
 
 The dashboard and customer account browser tests run against the built site and
 isolated mock APIs. They cover manual grants, extensions, notes, revocation,
