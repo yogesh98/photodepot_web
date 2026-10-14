@@ -1,5 +1,9 @@
 import type { PagesFunction } from "@cloudflare/workers-types"
-import { authenticateLicenseAdmin } from "../../../lib/license-admin-auth.ts"
+import {
+  authenticateLicenseAdmin,
+  withAdminSession,
+  type AdminAuth,
+} from "../../../lib/license-admin-auth.ts"
 import {
   BodyError,
   json,
@@ -19,6 +23,16 @@ const idPattern = /^[a-f0-9-]{36}$/
 export async function handleAdminLicenses(request: Request, env: Env) {
   const auth = await authenticateLicenseAdmin(request, env)
   if (auth instanceof Response) return auth
+  return withAdminSession(
+    await handleAuthorizedAdminLicenses(request, env, auth),
+    auth
+  )
+}
+async function handleAuthorizedAdminLicenses(
+  request: Request,
+  env: Env,
+  auth: AdminAuth
+) {
   try {
     if (request.method === "GET") {
       const query = new URL(request.url).searchParams

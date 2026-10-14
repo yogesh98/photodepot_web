@@ -4,8 +4,11 @@ export interface Env {
   DOWNLOADS: R2Bucket
   DB: D1Database
   PHOTODEPOT_LICENSE_SIGNING_PRIVATE_KEY?: string
-  PHOTODEPOT_ACCESS_ISSUER?: string
-  PHOTODEPOT_ACCESS_AUDIENCE?: string
+  WORKOS_CLIENT_ID?: string
+  WORKOS_API_KEY?: string
+  WORKOS_ADMIN_ORGANIZATION_ID?: string
+  WORKOS_COOKIE_PASSWORD?: string
+  WORKOS_REDIRECT_URI?: string
 }
 
 export const privateHeaders = {

@@ -2,7 +2,15 @@
 # License API: base64 DER PKCS8 Ed25519 private signing key, never a browser env var.
 # Generate with scripts/generate-license-keypair.mjs; use a separate test pair locally.
 PHOTODEPOT_LICENSE_SIGNING_PRIVATE_KEY=""
-# Cloudflare Zero Trust Access application (JWT issuer + Application Audience AUD).
-# No local bypass exists. Both settings are required for /admin/* and /api/admin/*.
-PHOTODEPOT_ACCESS_ISSUER="https://your-team.cloudflareaccess.com"
-PHOTODEPOT_ACCESS_AUDIENCE="replace-with-application-audience-aud"
+# WorkOS hosted AuthKit. No local admin bypass exists.
+# Server-only production API key for listing users and checking account status.
+WORKOS_API_KEY=""
+# Owner role slug "owner" must belong to this specific admin organization.
+WORKOS_CLIENT_ID="client_replace-with-your-client-id"
+WORKOS_ADMIN_ORGANIZATION_ID="org_replace-with-admin-organization-id"
+# Register this exact callback in WorkOS. Use http://localhost:8788/api/auth/callback
+# for a separate staging application when testing in local Pages preview.
+WORKOS_REDIRECT_URI="https://photodepot.app/api/auth/callback"
+# Generate a random secret of at least 32 characters; never use a sample password.
+# Store it as an encrypted Pages secret in production and do not commit .dev.vars.
+WORKOS_COOKIE_PASSWORD=""

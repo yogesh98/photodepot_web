@@ -16,6 +16,29 @@ type PendingAction = {
   license: LicenseSummary
   action: "revoke" | "restore" | "reset-device" | "set-type"
 }
+class SessionExpiredError extends Error {
+  constructor() {
+    super("Your session expired. Sign in in a new tab, then select Refresh.")
+  }
+}
+function DashboardError({
+  message,
+  sessionExpired,
+}: {
+  message: string
+  sessionExpired: boolean
+}) {
+  return (
+    <p role="alert" className={styles.error}>
+      {message}{" "}
+      {sessionExpired && (
+        <a href="/api/auth/login" target="_blank" rel="noopener noreferrer">
+          Sign in
+        </a>
+      )}
+    </p>
+  )
+}
 function DashboardDialog({
   children,
   onClose,
@@ -57,11 +80,12 @@ async function api(body?: object, query = "") {
     headers: body ? { "Content-Type": "application/json" } : {},
     ...(body ? { body: JSON.stringify(body) } : {}),
   })
+  if (response.status === 401) throw new SessionExpiredError()
   let result
   try {
     result = await response.json()
   } catch {
-    throw new Error("Sign in through Cloudflare Access, then reload this page.")
+    throw new Error("Unable to read the server response. Try again.")
   }
   if (!response.ok)
     throw new Error(result.error || "Unable to save this change.")
@@ -73,6 +97,7 @@ export function LicenseDashboard() {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
+  const [sessionExpired, setSessionExpired] = useState(false)
   const [notice, setNotice] = useState("")
   const [newKey, setNewKey] = useState("")
   const [pending, setPending] = useState<PendingAction | null>(null)
@@ -80,24 +105,36 @@ export function LicenseDashboard() {
     license: LicenseSummary
     entries: LicenseAudit[]
   } | null>(null)
-  const load = useCallback(async (next?: string) => {
-    setLoading(true)
-    setError("")
-    try {
-      const result = await api(
-        undefined,
-        next ? `?cursor=${encodeURIComponent(next)}` : ""
-      )
-      setLicenses((previous) =>
-        next ? [...previous, ...result.licenses] : result.licenses
-      )
-      setCursor(result.nextCursor)
-    } catch (cause) {
-      setError((cause as Error).message)
-    } finally {
-      setLoading(false)
-    }
+  const handleError = useCallback((cause: unknown) => {
+    setError(
+      cause instanceof Error
+        ? cause.message
+        : "Unable to complete this request."
+    )
+    if (cause instanceof SessionExpiredError) setSessionExpired(true)
   }, [])
+  const load = useCallback(
+    async (next?: string) => {
+      setLoading(true)
+      setError("")
+      try {
+        const result = await api(
+          undefined,
+          next ? `?cursor=${encodeURIComponent(next)}` : ""
+        )
+        setLicenses((previous) =>
+          next ? [...previous, ...result.licenses] : result.licenses
+        )
+        setCursor(result.nextCursor)
+        setSessionExpired(false)
+      } catch (cause) {
+        handleError(cause)
+      } finally {
+        setLoading(false)
+      }
+    },
+    [handleError]
+  )
   useEffect(() => {
     let active = true
     void api()
@@ -105,9 +142,10 @@ export function LicenseDashboard() {
         if (!active) return
         setLicenses(result.licenses)
         setCursor(result.nextCursor)
+        setSessionExpired(false)
       })
       .catch((cause: Error) => {
-        if (active) setError(cause.message)
+        if (active) handleError(cause)
       })
       .finally(() => {
         if (active) setLoading(false)
@@ -115,7 +153,7 @@ export function LicenseDashboard() {
     return () => {
       active = false
     }
-  }, [])
+  }, [handleError])
   async function grant(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const form = event.currentTarget
@@ -135,7 +173,7 @@ export function LicenseDashboard() {
       form.reset()
       await load()
     } catch (cause) {
-      setError((cause as Error).message)
+      handleError(cause)
     } finally {
       setBusy(false)
     }
@@ -163,7 +201,7 @@ export function LicenseDashboard() {
       setPending(null)
       await load()
     } catch (cause) {
-      setError((cause as Error).message)
+      handleError(cause)
     } finally {
       setBusy(false)
     }
@@ -175,7 +213,7 @@ export function LicenseDashboard() {
       const result = await api(undefined, `?id=${license.id}`)
       setAudit({ license, entries: result.audit })
     } catch (cause) {
-      setError((cause as Error).message)
+      handleError(cause)
     } finally {
       setBusy(false)
     }
@@ -186,7 +224,23 @@ export function LicenseDashboard() {
         <Link href="/" className={styles.brand}>
           photodepot
         </Link>
-        <span>Administration</span>
+        <div className={styles.accountActions}>
+          <span>Administration</span>
+          <form action="/api/auth/logout" method="post">
+            <button
+              type="submit"
+              className={styles.quiet}
+              disabled={busy || Boolean(newKey)}
+              title={
+                newKey
+                  ? "Save the displayed license key before signing out."
+                  : undefined
+              }
+            >
+              Sign out
+            </button>
+          </form>
+        </div>
       </header>
       <div className={styles.heading}>
         <div>
@@ -206,9 +260,7 @@ export function LicenseDashboard() {
         </button>
       </div>
       {error && (
-        <p role="alert" className={styles.error}>
-          {error}
-        </p>
+        <DashboardError message={error} sessionExpired={sessionExpired} />
       )}
       {notice && (
         <p role="status" className={styles.notice}>
@@ -296,7 +348,10 @@ export function LicenseDashboard() {
               placeholder="Optional customer details"
             />
           </label>
-          <button type="submit" disabled={busy || Boolean(newKey)}>
+          <button
+            type="submit"
+            disabled={busy || sessionExpired || Boolean(newKey)}
+          >
             {busy ? "Saving…" : "Grant license"}
           </button>
         </form>
@@ -365,7 +420,7 @@ export function LicenseDashboard() {
                     <div className={styles.rowActions}>
                       <button
                         type="button"
-                        disabled={busy}
+                        disabled={busy || sessionExpired}
                         onClick={() =>
                           setPending({
                             license,
@@ -380,7 +435,7 @@ export function LicenseDashboard() {
                       </button>
                       <button
                         type="button"
-                        disabled={busy}
+                        disabled={busy || sessionExpired}
                         onClick={() =>
                           setPending({ license, action: "set-type" })
                         }
@@ -389,7 +444,7 @@ export function LicenseDashboard() {
                       </button>
                       <button
                         type="button"
-                        disabled={busy || !license.deviceId}
+                        disabled={busy || sessionExpired || !license.deviceId}
                         onClick={() =>
                           setPending({ license, action: "reset-device" })
                         }
@@ -398,7 +453,7 @@ export function LicenseDashboard() {
                       </button>
                       <button
                         type="button"
-                        disabled={busy}
+                        disabled={busy || sessionExpired}
                         onClick={() => void history(license)}
                       >
                         History
@@ -458,12 +513,14 @@ export function LicenseDashboard() {
                   : "The assigned Mac can regain local project access after a successful online verification."}
           </p>
           {error && (
-            <p role="alert" className={styles.error}>
-              {error}
-            </p>
+            <DashboardError message={error} sessionExpired={sessionExpired} />
           )}
           <div className={styles.actions}>
-            <button type="button" onClick={() => void change()} disabled={busy}>
+            <button
+              type="button"
+              onClick={() => void change()}
+              disabled={busy || sessionExpired}
+            >
               {busy ? "Saving…" : "Confirm change"}
             </button>
             <button

@@ -1,0 +1,457 @@
+import assert from "node:assert/strict"
+import { readFile } from "node:fs/promises"
+import { after, before, test } from "node:test"
+import { getPlatformProxy, unstable_splitSqlQuery } from "wrangler"
+import {
+  changeSubscription,
+  getSubscription,
+  listSubscriptionAudit,
+  listSubscriptions,
+  setSubscription,
+  SubscriptionConflictError,
+} from "../lib/subscription-store.ts"
+
+const now = 1_800_000_000_000
+const day = 24 * 60 * 60 * 1000
+const actor = "owner@example.com"
+const legacyLicenseId = "00000000-0000-4000-8000-000000000001"
+let platform, database, legacySnapshot
+
+async function migrate(filename) {
+  const source = await readFile(
+    new URL(`../migrations/${filename}`, import.meta.url),
+    "utf8"
+  )
+  await database.batch(
+    unstable_splitSqlQuery(source).map((sql) => database.prepare(sql))
+  )
+}
+
+async function legacyRows() {
+  const tables = [
+    "waitlist",
+    "download_attempts",
+    "licenses",
+    "license_devices",
+    "license_audit",
+    "license_attempts",
+  ]
+  return Promise.all(
+    tables.map(
+      async (table) =>
+        (await database.prepare(`SELECT * FROM ${table}`).all()).results
+    )
+  )
+}
+
+before(async () => {
+  platform = await getPlatformProxy({
+    configPath: "wrangler.jsonc",
+    persist: false,
+    remoteBindings: false,
+    envFiles: [],
+  })
+  database = platform.env.DB
+  await migrate("0001_waitlist.sql")
+  await migrate("0002_licenses.sql")
+  await database.batch([
+    database
+      .prepare(
+        "INSERT INTO waitlist (first_name, email, heard_about_us) VALUES (?, ?, ?)"
+      )
+      .bind("Existing", "existing@example.com", "A friend"),
+    database
+      .prepare(
+        "INSERT INTO download_attempts (key, attempts, expires_at) VALUES (?, ?, ?)"
+      )
+      .bind("existing-download", 2, now),
+    database
+      .prepare(
+        "INSERT INTO licenses (id, key_hash, key_suffix, type, customer_name, email, current_device_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      )
+      .bind(
+        legacyLicenseId,
+        "legacy-key-hash",
+        "ABCD",
+        "regular",
+        "Existing Customer",
+        "existing@example.com",
+        "legacy-device",
+        now,
+        now
+      ),
+    database
+      .prepare(
+        "INSERT INTO license_devices (device_id, license_id, public_key, binding_revision, activated_at) VALUES (?, ?, ?, ?, ?)"
+      )
+      .bind("legacy-device", legacyLicenseId, "legacy-public-key", 1, now),
+    database
+      .prepare(
+        "INSERT INTO license_audit (id, license_id, action, actor, created_at, detail) VALUES (?, ?, ?, ?, ?, ?)"
+      )
+      .bind(
+        "legacy-audit",
+        legacyLicenseId,
+        "grant",
+        actor,
+        now,
+        "Existing license"
+      ),
+    database
+      .prepare(
+        "INSERT INTO license_attempts (key, attempts, expires_at) VALUES (?, ?, ?)"
+      )
+      .bind("existing-license-attempt", 3, now),
+  ])
+  legacySnapshot = await legacyRows()
+  await migrate("0003_subscriptions.sql")
+})
+
+after(async () => {
+  await platform?.dispose()
+})
+
+function set(userId, values = {}, at = now) {
+  return setSubscription(
+    database,
+    {
+      userId,
+      type: "trial",
+      endsAt: at + 30 * day,
+      expectedRevision: 0,
+      ...values,
+    },
+    actor,
+    at
+  )
+}
+
+test("subscription migration preserves existing license, device, audit, rate-limit and waitlist data", async () => {
+  assert.deepEqual(await legacyRows(), legacySnapshot)
+  assert.equal(
+    (
+      await database
+        .prepare("SELECT count(*) AS count FROM subscriptions")
+        .first()
+    ).count,
+    0
+  )
+})
+
+test("a WorkOS user has no access until an administrator explicitly assigns a subscription", async () => {
+  const userId = "user_ungranted"
+  assert.equal(await getSubscription(database, userId, now), null)
+  assert.deepEqual(await listSubscriptions(database, [userId], now), new Map())
+  assert.deepEqual(await listSubscriptions(database, [], now), new Map())
+  assert.deepEqual(await listSubscriptionAudit(database, userId), [])
+})
+
+test("trial and regular access expires at the exact end boundary without rewriting persisted state", async () => {
+  for (const type of ["trial", "regular"]) {
+    const userId = `user_boundary_${type}`
+    const subscription = await set(userId, { type, endsAt: now + day })
+    assert.match(
+      subscription.id,
+      /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/
+    )
+    assert.equal(subscription.userId, userId)
+    assert.equal(subscription.startsAt, now)
+    assert.equal(subscription.updatedAt, now)
+    assert.equal(subscription.revision, 1)
+    assert.equal(subscription.status, "active")
+    assert.equal(
+      (await getSubscription(database, userId, now + day - 1)).status,
+      "active"
+    )
+    assert.equal(
+      (await getSubscription(database, userId, now + day)).status,
+      "expired"
+    )
+    assert.equal(
+      (await getSubscription(database, userId, now + day + 1)).status,
+      "expired"
+    )
+    const row = await database
+      .prepare("SELECT status, revision FROM subscriptions WHERE user_id = ?")
+      .bind(userId)
+      .first()
+    assert.deepEqual(row, { status: "active", revision: 1 })
+    const audit = await listSubscriptionAudit(database, userId)
+    assert.equal(audit.length, 1)
+    assert.equal(audit[0].action, "set")
+    assert.equal(audit[0].actor, actor)
+    assert.equal(audit[0].createdAt, now)
+  }
+})
+
+test("revocation takes precedence over expiry and restoring an expired subscription does not extend it", async () => {
+  const userId = "user_revocation"
+  const original = await set(userId, { endsAt: now + 100 })
+  const revoked = await changeSubscription(
+    database,
+    userId,
+    "revoke",
+    1,
+    actor,
+    undefined,
+    now + 50
+  )
+  assert.equal(revoked.status, "revoked")
+  assert.equal(revoked.revision, 2)
+  assert.equal(
+    (await getSubscription(database, userId, now + 150)).status,
+    "revoked"
+  )
+  const restored = await changeSubscription(
+    database,
+    userId,
+    "restore",
+    2,
+    actor,
+    undefined,
+    now + 150
+  )
+  assert.equal(restored.status, "expired")
+  assert.equal(restored.startsAt, original.startsAt)
+  assert.equal(restored.endsAt, original.endsAt)
+  assert.equal(restored.updatedAt, now + 150)
+  assert.equal(restored.revision, 3)
+  assert.deepEqual(
+    (await listSubscriptionAudit(database, userId)).map(({ action }) => action),
+    ["restore", "revoke", "set"]
+  )
+})
+
+test("extensions add time from the later of now or expiry and preserve revoked status", async () => {
+  const userId = "user_extension"
+  const original = await set(userId, { endsAt: now + day })
+  const extended = await changeSubscription(
+    database,
+    userId,
+    "extend",
+    1,
+    actor,
+    7,
+    now + 100
+  )
+  assert.equal(extended.endsAt, now + 8 * day)
+  assert.equal(extended.startsAt, original.startsAt)
+  const afterExpiry = now + 10 * day
+  const renewed = await changeSubscription(
+    database,
+    userId,
+    "extend",
+    2,
+    actor,
+    2,
+    afterExpiry
+  )
+  assert.equal(renewed.endsAt, afterExpiry + 2 * day)
+  assert.equal(renewed.status, "active")
+  const revoked = await changeSubscription(
+    database,
+    userId,
+    "revoke",
+    3,
+    actor,
+    undefined,
+    afterExpiry + 100
+  )
+  const revokedExtension = await changeSubscription(
+    database,
+    userId,
+    "extend",
+    revoked.revision,
+    actor,
+    1,
+    afterExpiry + 200
+  )
+  assert.equal(revokedExtension.status, "revoked")
+  assert.equal(revokedExtension.endsAt, afterExpiry + 3 * day)
+  const restored = await changeSubscription(
+    database,
+    userId,
+    "restore",
+    revokedExtension.revision,
+    actor,
+    undefined,
+    afterExpiry + 300
+  )
+  assert.equal(restored.status, "active")
+  assert.equal(restored.endsAt, revokedExtension.endsAt)
+})
+
+test("setting a replacement subscription requires the current revision and starts its explicit grant now", async () => {
+  const userId = "user_replacement"
+  const first = await set(userId)
+  const replacement = await set(
+    userId,
+    { type: "regular", expectedRevision: 1, endsAt: now + 60 * day },
+    now + day
+  )
+  assert.equal(replacement.id, first.id)
+  assert.equal(replacement.type, "regular")
+  assert.equal(replacement.startsAt, now + day)
+  assert.equal(replacement.endsAt, now + 60 * day)
+  assert.equal(replacement.revision, 2)
+  await assert.rejects(
+    set(userId, { expectedRevision: 1 }),
+    SubscriptionConflictError
+  )
+  assert.equal((await listSubscriptionAudit(database, userId)).length, 2)
+  assert.deepEqual(
+    await getSubscription(database, userId, now + day),
+    replacement
+  )
+})
+
+test("concurrent first grants and edits permit exactly one revision winner and never audit losing writes", async () => {
+  const userId = "user_concurrent"
+  const grants = await Promise.allSettled(
+    Array.from({ length: 6 }, () => set(userId))
+  )
+  assert.equal(grants.filter(({ status }) => status === "fulfilled").length, 1)
+  for (const result of grants.filter(({ status }) => status === "rejected"))
+    assert.ok(result.reason instanceof SubscriptionConflictError)
+  assert.equal((await listSubscriptionAudit(database, userId)).length, 1)
+  const edits = await Promise.allSettled([
+    changeSubscription(
+      database,
+      userId,
+      "revoke",
+      1,
+      actor,
+      undefined,
+      now + 100
+    ),
+    changeSubscription(database, userId, "extend", 1, actor, 3, now + 100),
+    set(userId, { type: "regular", expectedRevision: 1 }, now + 100),
+  ])
+  assert.equal(edits.filter(({ status }) => status === "fulfilled").length, 1)
+  for (const result of edits.filter(({ status }) => status === "rejected"))
+    assert.ok(result.reason instanceof SubscriptionConflictError)
+  const winner = edits.find(({ status }) => status === "fulfilled").value
+  assert.equal(winner.revision, 2)
+  assert.deepEqual(await getSubscription(database, userId, now + 100), winner)
+  assert.equal((await listSubscriptionAudit(database, userId)).length, 2)
+  await assert.rejects(
+    changeSubscription(
+      database,
+      "user_missing_revision",
+      "restore",
+      0,
+      actor,
+      undefined,
+      now
+    ),
+    SubscriptionConflictError
+  )
+  assert.deepEqual(
+    await listSubscriptionAudit(database, "user_missing_revision"),
+    []
+  )
+})
+
+test("an audit insertion failure rolls back both new grants and existing subscription edits", async () => {
+  const userId = "user_atomicity"
+  const original = await set(userId)
+  await database
+    .prepare(
+      `CREATE TRIGGER reject_subscription_audit BEFORE INSERT ON subscription_audit
+    WHEN NEW.actor = 'blocked@example.com'
+    BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`
+    )
+    .run()
+  try {
+    await assert.rejects(
+      changeSubscription(
+        database,
+        userId,
+        "revoke",
+        1,
+        "blocked@example.com",
+        undefined,
+        now + 100
+      ),
+      /audit unavailable/
+    )
+    assert.deepEqual(await getSubscription(database, userId, now), original)
+    assert.equal((await listSubscriptionAudit(database, userId)).length, 1)
+    await assert.rejects(
+      setSubscription(
+        database,
+        {
+          userId: "user_atomicity_new",
+          type: "trial",
+          endsAt: now + day,
+          expectedRevision: 0,
+        },
+        "blocked@example.com",
+        now
+      ),
+      /audit unavailable/
+    )
+    assert.equal(
+      await getSubscription(database, "user_atomicity_new", now),
+      null
+    )
+    assert.deepEqual(
+      await listSubscriptionAudit(database, "user_atomicity_new"),
+      []
+    )
+  } finally {
+    await database.prepare("DROP TRIGGER reject_subscription_audit").run()
+  }
+})
+
+test("invalid subscription dates, types, revisions and extension durations never change access or audits", async () => {
+  const userId = "user_validation"
+  for (const changes of [
+    { type: "paid" },
+    { endsAt: now },
+    { endsAt: now - 1 },
+    { endsAt: Number.NaN },
+    { endsAt: 8_640_000_000_000_001 },
+    { expectedRevision: -1 },
+    { expectedRevision: 0.5 },
+    { userId: "user_bad'; DROP TABLE subscriptions;--" },
+  ])
+    await assert.rejects(set(userId, changes), TypeError)
+  const original = await set(userId)
+  for (const days of [
+    undefined,
+    0,
+    -1,
+    0.5,
+    Number.POSITIVE_INFINITY,
+    Number.MAX_SAFE_INTEGER,
+  ])
+    await assert.rejects(
+      changeSubscription(database, userId, "extend", 1, actor, days, now),
+      TypeError
+    )
+  await assert.rejects(
+    changeSubscription(database, userId, "delete", 1, actor, undefined, now),
+    TypeError
+  )
+  assert.deepEqual(await getSubscription(database, userId, now), original)
+  assert.equal((await listSubscriptionAudit(database, userId)).length, 1)
+})
+
+test("subscription lookup limits SQL parameters, deduplicates users and returns only assigned accounts", async () => {
+  const users = Array.from(
+    { length: 205 },
+    (_, index) => `user_listing_${index}`
+  )
+  const first = await set(users[0], { type: "trial", endsAt: now + 100 })
+  const last = await set(users.at(-1), { type: "regular", endsAt: now + day })
+  const result = await listSubscriptions(
+    database,
+    [...users, users[0]],
+    now + 100
+  )
+  assert.equal(result.size, 2)
+  assert.deepEqual(result.get(users[0]), { ...first, status: "expired" })
+  assert.deepEqual(result.get(users.at(-1)), last)
+  assert.equal(result.has(users[1]), false)
+})

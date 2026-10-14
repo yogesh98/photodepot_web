@@ -1,9 +1,9 @@
 import type { Metadata } from "next"
-import { LicenseDashboard } from "@/components/license-dashboard"
+import { SubscriptionDashboard } from "@/components/subscription-dashboard"
 export const metadata: Metadata = {
-  title: "Licenses · Photodepot",
+  title: "Subscriptions · Photodepot",
   robots: { index: false, follow: false },
 }
 export default function Page() {
-  return <LicenseDashboard />
+  return <SubscriptionDashboard />
 }

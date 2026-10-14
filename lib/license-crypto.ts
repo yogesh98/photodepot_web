@@ -78,14 +78,21 @@ export function signedReceipt(
     challenge: string
     revision: number
   },
-  now = Date.now()
+  now = Date.now(),
+  maxExpiresAt?: number
 ) {
+  const expiresAt =
+    details.status === "active" && maxExpiresAt !== undefined
+      ? Math.min(now + LICENSE_GRACE_MS, maxExpiresAt)
+      : now + LICENSE_GRACE_MS
+  if (!Number.isSafeInteger(expiresAt) || expiresAt <= now)
+    throw new Error("License access has expired")
   const payload = Buffer.from(
     JSON.stringify({
       version: 1,
       ...details,
       issuedAt: now,
-      expiresAt: now + LICENSE_GRACE_MS,
+      expiresAt,
     })
   ).toString("base64url")
   return {

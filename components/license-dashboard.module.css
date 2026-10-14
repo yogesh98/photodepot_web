@@ -19,7 +19,12 @@
   font-weight: 600;
   letter-spacing: -1.3px;
 }
-.header > span,
+.accountActions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.accountActions > span,
 .muted {
   color: #767268;
   font-size: 12px;
@@ -82,6 +87,11 @@
   background: #fff1eb;
   color: #943b20;
   line-height: 1.6;
+}
+.error a {
+  color: inherit;
+  font-weight: 600;
+  text-underline-offset: 3px;
 }
 .notice {
   background: #eaf4ee;

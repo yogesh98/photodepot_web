@@ -39,7 +39,7 @@ Video and poster URLs use content-hashed filenames through the generated
 ## Cloudflare hosting
 
 The frontend is a Next.js static export hosted on Cloudflare Pages. Pages
-Functions handle `/api/waitlist` and `/api/download/arm64` or `/api/download/x64`.
+Functions handle the waitlist, downloads, license API, and WorkOS authentication.
 Installers live in a **private R2 Standard bucket**; the waitlist lives in D1.
 Only `/api/*` and the protected `/admin` routes invoke Functions, so other website
 assets use free static hosting.
@@ -64,7 +64,7 @@ pnpm preview
 ```
 
 Downloads do not require a password or cookie. Configure license signing and
-admin Access settings in the ignored `.dev.vars` file when testing licensing;
+admin WorkOS settings in the ignored `.dev.vars` file when testing licensing;
 see `deploy/LICENSES.md`. Local secrets are server-only; never prefix them with
 `NEXT_PUBLIC_`. Wrangler keeps local D1
 and R2 data in ignored `.wrangler/state/`. Local preview normally runs at
@@ -119,7 +119,7 @@ the installer and support HEAD and single-byte ranges. Download requests require
 no password, cookie, license key or D1 access; project access is controlled by the
 desktop license feature. Missing or unavailable installer storage returns users
 to `/tester` with a download error. Admin license management remains protected
-by Cloudflare Access. The old `download_attempts` table is retained by the
+by WorkOS AuthKit with an Owner role in the configured admin organization. The old `download_attempts` table is retained by the
 historical migration and is no longer used.
 
 Builds and deploys reject installers, SQLite databases, environment
@@ -173,6 +173,12 @@ Cloudflare dashboard and avoid retaining unused release binaries indefinitely.
 - [R2 pricing](https://developers.cloudflare.com/r2/pricing/)
 - [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/)
 
+Administration uses standard WorkOS hosted AuthKit login and role checks. AuthKit
+and RBAC are free up to 1 million monthly active users under the current
+[WorkOS pricing](https://workos.com/pricing). This integration does not require a
+custom authentication domain, Enterprise SSO, Directory Sync, Radar, or other
+paid add-ons. Subscription billing is not enabled by this change.
+
 ## Verify
 
 ```sh
@@ -196,8 +202,29 @@ media kit with `pnpm brand:generate` before copying updated exports here.
 Photography credits are in `public/photography/pexels/README.md`; the Inter font license is in
 `app/fonts/OFL.txt`.
 
-## Licenses
+## Account subscriptions
 
-Manual license administration is available at `/admin/licenses` after Cloudflare Access, D1 and signing secrets are configured. See [licensing setup and protocol](deploy/LICENSES.md) before deploying a licensed desktop build. Production migration, Access configuration, secrets and deployment are separate release steps.
+Subscription administration is available at `/admin/subscriptions`; `/admin/licenses` opens the same dashboard for existing bookmarks. All Photodepot WorkOS users appear automatically, including users without a subscription. Only the `owner` role in `WORKOS_ADMIN_ORGANIZATION_ID` can assign Trial or Standard access, choose a duration, extend, revoke, restore, reset Mac access, and read its audit history. Signups receive neither subscriptions nor administration membership automatically. See [subscription setup and protocol](deploy/LICENSES.md).
 
-Revocation and Mac resets update the server immediately. The desktop saves the latest signed license state and applies local access restrictions after the app is closed and reopened. An admitted session keeps its ongoing work, hosting, and collaboration until quit. Closing a project or window does not end that session. Offline launches still use the 48-hour/10-startup allowance; joining a licensed host remains available without a local license.
+Set `WORKOS_CLIENT_ID`, `WORKOS_ADMIN_ORGANIZATION_ID`,
+`WORKOS_REDIRECT_URI=https://photodepot.app/api/auth/callback`, and a random
+`WORKOS_COOKIE_PASSWORD` of at least 32 characters in Pages settings/secrets.
+The server uses PKCE and encrypted HttpOnly session cookies. Add the server-only
+encrypted `WORKOS_API_KEY` secret for listing users and checking account status.
+Never include the key in browser assets or desktop builds. Apply additive D1
+migrations `0003` through `0005` after making a private backup.
+
+The dashboard refreshes visible user pages every 30 seconds while no dialog or
+mutation is open. Edits use revision checks to reject stale writes. If a session
+expires, Sign in opens a new tab; return and select Refresh.
+
+Desktop account sign-in opens WorkOS in the external browser and asks the user
+to approve the Mac. The desktop receives a signed finite receipt, with no WorkOS
+tokens or API key. One account binds to one Mac; reset invalidates prior bindings
+and earlier approved requests. Receipt expiry is capped at the subscription end
+and 48 hours. An admitted session keeps its work and collaboration until quit;
+expiry, revocation, and offline limits are enforced on the next app launch.
+Existing license keys remain compatible during migration. Device identity and
+receipts still use the existing encrypted local storage, which can access macOS
+Keychain. Manual subscription assignment does not charge customers or enable
+paid WorkOS services; automated payment collection requires a later billing integration.

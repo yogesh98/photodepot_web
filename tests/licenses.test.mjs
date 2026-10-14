@@ -9,20 +9,25 @@ import {
 import { readFile, readdir } from "node:fs/promises"
 import { after, before, test } from "node:test"
 import { getPlatformProxy, unstable_splitSqlQuery } from "wrangler"
+import { sealData, unsealData } from "iron-session"
 import { handleAdminLicenses } from "../functions/api/admin/licenses.ts"
 import { handleLicenseRequest } from "../lib/license-api.ts"
-import {
-  authenticateLicenseAdmin,
-  LICENSE_ADMIN_EMAIL,
-} from "../lib/license-admin-auth.ts"
+import { authenticateLicenseAdmin } from "../lib/license-admin-auth.ts"
 import { allowLicenseAttempt } from "../lib/license-rate-limit.ts"
 import { LICENSE_GRACE_MS } from "../lib/license-crypto.ts"
 
 const vendor = generateKeyPairSync("ed25519")
 const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 })
-const issuer = "https://license-test.cloudflareaccess.com"
+const issuer = "https://api.workos.com"
 const origin = "https://photodepot.app"
-const audience = "test-license-admin-audience"
+const clientId = "client_test_admin"
+const organizationId = "org_test_admin"
+const cookiePassword = "license-test-cookie-password-at-least-32-characters"
+const adminEmail = "yogesh.patel0221@gmail.com"
+const userId = "user_test_admin"
+const sessionId = "session_test_admin"
+const jwksUrl = `${issuer}/sso/jwks/${clientId}`
+let refreshResponse
 const jwk = {
   ...rsa.publicKey.export({ format: "jwk" }),
   kid: "test-rsa-key",
@@ -43,8 +48,10 @@ before(async () => {
     PHOTODEPOT_LICENSE_SIGNING_PRIVATE_KEY: vendor.privateKey
       .export({ format: "der", type: "pkcs8" })
       .toString("base64"),
-    PHOTODEPOT_ACCESS_ISSUER: issuer,
-    PHOTODEPOT_ACCESS_AUDIENCE: audience,
+    WORKOS_CLIENT_ID: clientId,
+    WORKOS_ADMIN_ORGANIZATION_ID: organizationId,
+    WORKOS_COOKIE_PASSWORD: cookiePassword,
+    WORKOS_REDIRECT_URI: `${origin}/api/auth/callback`,
   }
   for (const filename of (
     await readdir(new URL("../migrations/", import.meta.url))
@@ -60,8 +67,20 @@ before(async () => {
     )
   }
   originalFetch = globalThis.fetch
-  globalThis.fetch = async (url) => {
-    assert.equal(String(url), `${issuer}/cdn-cgi/access/certs`)
+  globalThis.fetch = async (url, options) => {
+    if (String(url) === `${issuer}/user_management/authenticate`) {
+      assert.equal(options.method, "POST")
+      const body = JSON.parse(options.body)
+      assert.equal(body.client_id, clientId)
+      assert.equal(body.grant_type, "refresh_token")
+      assert.equal(body.organization_id, organizationId)
+      assert.equal("client_secret" in body, false)
+      return refreshResponse
+        ? Response.json(refreshResponse)
+        : Response.json({ error: "invalid_grant" }, { status: 400 })
+    }
+    assert.equal(String(url), jwksUrl)
+    assert.equal(options?.redirect, "manual")
     return Response.json({ keys: [jwk] })
   }
 })
@@ -76,8 +95,11 @@ function jwt(changes = {}, headerChanges = {}, key = rsa.privateKey) {
   const payload = Buffer.from(
     JSON.stringify({
       iss: issuer,
-      aud: [audience],
-      email: LICENSE_ADMIN_EMAIL,
+      client_id: clientId,
+      org_id: organizationId,
+      role: "owner",
+      sub: userId,
+      sid: sessionId,
       exp: Math.floor(Date.now() / 1000) + 600,
       iat: Math.floor(Date.now() / 1000),
       ...changes,
@@ -103,12 +125,31 @@ function request(
     ...(body ? { body: JSON.stringify(body) } : {}),
   })
 }
-function admin(body, headers = {}, method, hostname) {
+async function sessionCookie(
+  token = jwt(),
+  changes = {},
+  password = cookiePassword
+) {
+  const sealed = await sealData(
+    {
+      version: 1,
+      clientId,
+      origin,
+      accessToken: token,
+      refreshToken: "test-refresh-token",
+      user: { id: userId, email: adminEmail, emailVerified: true },
+      ...changes,
+    },
+    { password, ttl: 604800 }
+  )
+  return `__Host-photodepot-admin=${sealed}`
+}
+async function admin(body, headers = {}, method, hostname) {
   return handleAdminLicenses(
     request(
       "/api/admin/licenses",
       body,
-      { "cf-access-jwt-assertion": jwt(), ...headers },
+      { cookie: await sessionCookie(), ...headers },
       method,
       hostname
     ),
@@ -207,68 +248,189 @@ async function receipt(response) {
   return payload
 }
 
-test("Cloudflare Access rejects absent, forged, expired, wrong audience/issuer/email and unsafe algorithms", async () => {
-  for (const token of [
+test("WorkOS rejects absent, forged and invalid sessions without trusting legacy Access headers", async () => {
+  const unauthorizedCookies = [
     undefined,
-    "forged",
-    jwt({ exp: 1 }),
-    jwt({ iss: "https://other.cloudflareaccess.com" }),
-    jwt({ aud: ["other"] }),
-    jwt({ email: "attacker@example.com" }),
-    jwt({ iat: Date.now() / 1000 + 120 }),
-    jwt({ nbf: Date.now() / 1000 + 120 }),
-    jwt({}, { alg: "none" }),
-    jwt({}, { alg: "HS256" }),
-    `${jwt().slice(0, -8)}tampered`,
-  ]) {
+    "__Host-photodepot-admin=forged",
+    await sessionCookie(
+      jwt(),
+      {},
+      "wrong-cookie-password-at-least-32-characters"
+    ),
+    await sessionCookie("forged"),
+    await sessionCookie(jwt({ exp: 1 })),
+    await sessionCookie(jwt({ iss: "https://attacker.example" })),
+    await sessionCookie(jwt({ client_id: "client_other" })),
+    await sessionCookie(jwt({ sub: "user_other" })),
+    await sessionCookie(jwt({ sid: undefined })),
+    await sessionCookie(jwt({ iat: Date.now() / 1000 + 120 })),
+    await sessionCookie(jwt({ nbf: Date.now() / 1000 + 120 })),
+    await sessionCookie(jwt({}, { alg: "none" })),
+    await sessionCookie(jwt({}, { alg: "HS256" })),
+    await sessionCookie(`${jwt().slice(0, -8)}tampered`),
+    await sessionCookie(jwt(), { clientId: "client_other" }),
+    await sessionCookie(jwt(), { origin: "https://attacker.example" }),
+    await sessionCookie(jwt(), { version: 2 }),
+  ]
+  for (const cookie of unauthorizedCookies) {
     const response = await authenticateLicenseAdmin(
       request("/admin/licenses", undefined, {
-        ...(token ? { "cf-access-jwt-assertion": token } : {}),
-        "cf-access-authenticated-user-email": LICENSE_ADMIN_EMAIL,
+        ...(cookie ? { cookie } : {}),
+        "cf-access-jwt-assertion": jwt(),
+        "cf-access-authenticated-user-email": adminEmail,
       }),
       env
     )
     assert.ok(response instanceof Response)
     assert.equal(response.status, 401)
   }
+  const sealed = await sessionCookie()
+  assert.deepEqual(
+    await authenticateLicenseAdmin(
+      request("/admin/licenses", undefined, { cookie: sealed }),
+      env
+    ),
+    { email: adminEmail, userId, sessionId }
+  )
+  for (const missing of [
+    "WORKOS_CLIENT_ID",
+    "WORKOS_ADMIN_ORGANIZATION_ID",
+    "WORKOS_COOKIE_PASSWORD",
+    "WORKOS_REDIRECT_URI",
+  ]) {
+    assert.equal(
+      (
+        await authenticateLicenseAdmin(request("/admin/licenses"), {
+          ...env,
+          [missing]: "",
+        })
+      ).status,
+      503
+    )
+  }
+})
+
+test("WorkOS authorization requires Owner in the configured organization and supports multiple roles", async () => {
+  for (const claims of [
+    { role: "member" },
+    { role: "owner", org_id: "org_other" },
+    { role: "Owner" },
+    { role: "member", roles: ["member", "org-owner"] },
+  ]) {
+    const response = await authenticateLicenseAdmin(
+      request("/admin/licenses", undefined, {
+        cookie: await sessionCookie(jwt(claims)),
+      }),
+      env
+    )
+    assert.equal(response.status, 403)
+  }
   assert.deepEqual(
     await authenticateLicenseAdmin(
       request("/admin/licenses", undefined, {
-        "cf-access-jwt-assertion": jwt(),
+        cookie: await sessionCookie(
+          jwt({ role: "member", roles: ["member", "owner"] })
+        ),
       }),
       env
     ),
-    { email: LICENSE_ADMIN_EMAIL }
+    { email: adminEmail, userId, sessionId }
   )
-  assert.equal(
-    (
-      await authenticateLicenseAdmin(request("/admin/licenses"), {
-        ...env,
-        PHOTODEPOT_ACCESS_AUDIENCE: "",
-      })
-    ).status,
-    503
+  const otherEmail = "another-owner@example.com"
+  assert.deepEqual(
+    await authenticateLicenseAdmin(
+      request("/admin/licenses", undefined, {
+        cookie: await sessionCookie(jwt(), {
+          user: { id: userId, email: otherEmail, emailVerified: true },
+        }),
+      }),
+      env
+    ),
+    { email: otherEmail, userId, sessionId }
   )
-  assert.equal(
-    (
-      await handleAdminLicenses(
-        request(
-          "/api/admin/licenses",
-          undefined,
-          {},
-          "GET",
-          "https://preview.photodepot-web.pages.dev"
-        ),
-        env
-      )
-    ).status,
-    401
-  )
+})
+
+test("expired WorkOS sessions refresh with public-client credentials and rotate the sealed cookie", async () => {
+  refreshResponse = {
+    access_token: jwt(),
+    refresh_token: "rotated-refresh-token",
+    organization_id: organizationId,
+    user: {
+      object: "user",
+      id: userId,
+      email: adminEmail,
+      email_verified: true,
+    },
+  }
+  try {
+    const auth = await authenticateLicenseAdmin(
+      request("/api/admin/licenses", undefined, {
+        cookie: await sessionCookie(jwt({ exp: 1 })),
+      }),
+      env
+    )
+    assert.equal(auth.email, adminEmail)
+    assert.equal(auth.userId, userId)
+    assert.equal(auth.sessionId, sessionId)
+    assert.match(auth.setCookie, /^__Host-photodepot-admin=/)
+    assert.match(auth.setCookie, /HttpOnly/i)
+    assert.match(auth.setCookie, /Secure/i)
+    const value = auth.setCookie
+      .split(";")[0]
+      .slice("__Host-photodepot-admin=".length)
+    const session = await unsealData(value, {
+      password: cookiePassword,
+      ttl: 604800,
+    })
+    assert.equal(session.refreshToken, "rotated-refresh-token")
+    assert.equal(session.accessToken, refreshResponse.access_token)
+  } finally {
+    refreshResponse = undefined
+  }
+})
+
+test("admin API rejects cross-origin mutations and credentials from a different deployment origin", async () => {
   assert.equal(
     (await admin({ action: "grant" }, { origin: "https://attacker.example" }))
       .status,
     403
   )
+  assert.equal((await admin({ action: "grant" }, { origin: "" })).status, 403)
+  assert.equal(
+    (
+      await admin(
+        undefined,
+        {},
+        "GET",
+        "https://preview.photodepot-web.pages.dev"
+      )
+    ).status,
+    403
+  )
+})
+
+test("WorkOS key-service outages fail closed without treating the user as signed out", async () => {
+  const outageClient = "client_test_outage"
+  const previousFetch = globalThis.fetch
+  globalThis.fetch = async (url, options) => {
+    assert.equal(String(url), `${issuer}/sso/jwks/${outageClient}`)
+    assert.equal(options.redirect, "manual")
+    return new Response(null, { status: 503 })
+  }
+  try {
+    const response = await authenticateLicenseAdmin(
+      request("/api/admin/licenses", undefined, {
+        cookie: await sessionCookie(jwt({ client_id: outageClient }), {
+          clientId: outageClient,
+        }),
+      }),
+      { ...env, WORKOS_CLIENT_ID: outageClient }
+    )
+    assert.equal(response.status, 503)
+    assert.equal(response.headers.get("set-cookie"), null)
+  } finally {
+    globalThis.fetch = previousFetch
+  }
 })
 
 test("grant returns a high-entropy key once; list masks keys, normalizes email and records an audit", async () => {
@@ -290,7 +452,7 @@ test("grant returns a high-entropy key once; list masks keys, normalizes email a
   assert.ok(!serialized.includes(stored.key_hash))
   const audit = await handleAdminLicenses(
     request(`/api/admin/licenses?id=${granted.license.id}`, undefined, {
-      "cf-access-jwt-assertion": jwt(),
+      cookie: await sessionCookie(),
     }),
     env
   )
@@ -586,7 +748,7 @@ test("admin validates edits and cursor without changing license records on inval
     (
       await handleAdminLicenses(
         request("/api/admin/licenses?cursor=garbage", undefined, {
-          "cf-access-jwt-assertion": jwt(),
+          cookie: await sessionCookie(),
         }),
         env
       )

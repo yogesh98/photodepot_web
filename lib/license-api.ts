@@ -11,6 +11,8 @@ import {
 } from "./license-crypto.ts"
 import { allowLicenseAttempt } from "./license-rate-limit.ts"
 import { activateDevice, findDevice } from "./license-store.ts"
+import { getSubscriptionDevice } from "./subscription-devices.ts"
+import { getWorkOSUser } from "./workos-users.ts"
 
 export async function handleLicenseRequest(
   request: Request,
@@ -80,6 +82,14 @@ export async function handleLicenseRequest(
         ])
       )
         return json({ error: "Device verification failed." }, 401)
+      if (await getSubscriptionDevice(env.DB, device.deviceId))
+        return json(
+          {
+            error:
+              "This Mac uses an account subscription. Sign in with your Photodepot account to continue.",
+          },
+          409
+        )
       const row = await activateDevice(
         env.DB,
         hashLicenseKey(key),
@@ -110,6 +120,48 @@ export async function handleLicenseRequest(
       !/^[a-f0-9]{64}$/.test(body.deviceId)
     )
       return json({ error: "Invalid device." }, 400)
+    const now = Date.now()
+    const accountDevice = await getSubscriptionDevice(
+      env.DB,
+      body.deviceId,
+      now
+    )
+    if (accountDevice) {
+      const device = parseDevicePublicKey(accountDevice.publicKey)
+      if (
+        device.deviceId !== body.deviceId ||
+        !validDeviceProof(device.key, body.signature, [
+          "photodepot-license-v1",
+          "verify",
+          body.deviceId,
+          body.challenge,
+        ])
+      )
+        return json({ error: "Device verification failed." }, 401)
+      const user = await getWorkOSUser(env, accountDevice.userId)
+      const active =
+        user?.id === accountDevice.userId &&
+        user.emailVerified &&
+        accountDevice.subscription.status === "active" &&
+        accountDevice.subscription.startsAt <= now &&
+        accountDevice.currentDeviceId === body.deviceId &&
+        accountDevice.currentBindingRevision === accountDevice.bindingRevision
+      return json(
+        signedReceipt(
+          signer,
+          {
+            licenseId: accountDevice.subscription.id,
+            deviceId: body.deviceId,
+            type: accountDevice.subscription.type,
+            status: active ? "active" : "revoked",
+            challenge: body.challenge,
+            revision: accountDevice.subscription.revision,
+          },
+          now,
+          accountDevice.subscription.endsAt
+        )
+      )
+    }
     const row = await findDevice(env.DB, body.deviceId)
     if (!row)
       return json({ error: "Activate a license on this Mac to continue." }, 404)

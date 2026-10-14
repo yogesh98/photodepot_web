@@ -11,6 +11,9 @@ importers:
       '@base-ui/react':
         specifier: ^1.8.0
         version: 1.8.0(@types/react@19.3.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      '@workos-inc/node':
+        specifier: ^11.0.0
+        version: 11.0.0
       class-variance-authority:
         specifier: ^0.7.1
         version: 0.7.1
@@ -23,6 +26,12 @@ importers:
       framer-motion:
         specifier: ^13.4.6
         version: 13.4.6(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      iron-session:
+        specifier: ^9.0.1
+        version: 9.0.1
+      jose:
+        specifier: ^6.2.12
+        version: 6.2.12
       lucide-react:
         specifier: ^1.49.0
         version: 1.49.0(@types/react@19.3.0)(react@19.2.8)
@@ -1168,6 +1177,10 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  '@workos-inc/node@11.0.0':
+    resolution: {integrity: sha512-swUT6CbkuVQXMOtUpI70LZ8usjSg8OXcKMjKdoYLeqCApRI0Oo97l+nZ0lKzZ5GxjxgcVZGGVK025h7z9WyCJg==}
+    engines: {node: '>=22.11.0'}
+
   accepts@2.0.0:
     resolution: {integrity: sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng==}
     engines: {node: '>= 0.6'}
@@ -1435,6 +1448,10 @@ packages:
   cookie@1.1.1:
     resolution: {integrity: sha512-ei8Aos7ja0weRpFzJnEA9UHJ/7XQmqglbRwnf2ATjcB9Wq874VKH9kfjjirM6UhU2/E5fFYadylyhFldcqSidQ==}
     engines: {node: '>=18'}
+
+  cookie@2.0.1:
+    resolution: {integrity: sha512-yuToqVvRrj6pfDXREyQAAv8SkAEk/8GS3jQRTiUMm66TVtBYmqQeoEjL2Lmq8Rpo6271vH76InTChTitEAm65w==}
+    engines: {node: '>=22'}
 
   cors@2.8.6:
     resolution: {integrity: sha512-tJtZBBHA6vjIAaF6EnIaq6laBBP9aq/Y3ouVJjEfoHbRBcHBAHYcMh/w8LDrk2PvIMMq8gmopa5D4V8RmbrxGw==}
@@ -2076,6 +2093,13 @@ packages:
   ipaddr.js@1.9.1:
     resolution: {integrity: sha512-0KI/607xoxSToH7GjN1FfSbLoU0+btTicjsQSWQlh/hZykN8KpmMf7uYwPW3R+akZ6R/w18ZlXSHBYXiYUPO3g==}
     engines: {node: '>= 0.10'}
+
+  iron-session@9.0.1:
+    resolution: {integrity: sha512-ELSZdcLvA0AMhxUCY+rwKCh42UV88SqEb1ia/bHLF9G+6kScikO6mShtlIq+OtF2UlkZP0dmI2dMdG9vh4rebA==}
+    engines: {node: '>=22.13.0'}
+
+  iron-webcrypto@2.0.0:
+    resolution: {integrity: sha512-rtffZKDUHciZElM8mjFCufBC7nVhCxHYyWHESqs89OioEDz4parOofd8/uhrejh/INhQFfYQfByS22LlezR9sQ==}
 
   is-array-buffer@3.0.5:
     resolution: {integrity: sha512-DDfANUiiG2wC1qawP66qlTugJeL5HyzMpfr8lLK+jMQirGzNod0B12cFB/9q838Ru27sBwfw78/rdoU7RERz6A==}
@@ -3217,6 +3241,10 @@ packages:
     engines: {node: '>=14.17'}
     hasBin: true
 
+  uint8array-extras@1.6.0:
+    resolution: {integrity: sha512-8iAasVS4wUx0gPLjH8Xtz2PeDzTSiy8QiLGu2DT3X5GU+egFEQhpnbtkehbAwjvDcxIERmCYcysiODFmE3Ud0Q==}
+    engines: {node: '>=18'}
+
   unbox-primitive@1.1.0:
     resolution: {integrity: sha512-nWJ91DjeOkej/TA8pXQ3myruKpKEYgqvpw9lz4OPHj/NWFNluYrjbz9j01CJ8yKQd2g4jFoOkINCTW2I5LEEyw==}
     engines: {node: '>= 0.4'}
@@ -4326,6 +4354,8 @@ snapshots:
   '@unrs/resolver-binding-win32-x64-msvc@1.12.2':
     optional: true
 
+  '@workos-inc/node@11.0.0': {}
+
   accepts@2.0.0:
     dependencies:
       mime-types: 3.0.2
@@ -4593,6 +4623,8 @@ snapshots:
   cookie@0.7.2: {}
 
   cookie@1.1.1: {}
+
+  cookie@2.0.1: {}
 
   cors@2.8.6:
     dependencies:
@@ -5417,6 +5449,15 @@ snapshots:
   ip-address@10.7.2: {}
 
   ipaddr.js@1.9.1: {}
+
+  iron-session@9.0.1:
+    dependencies:
+      cookie: 2.0.1
+      iron-webcrypto: 2.0.0
+
+  iron-webcrypto@2.0.0:
+    dependencies:
+      uint8array-extras: 1.6.0
 
   is-array-buffer@3.0.5:
     dependencies:
@@ -6571,6 +6612,8 @@ snapshots:
       - supports-color
 
   typescript@5.9.3: {}
+
+  uint8array-extras@1.6.0: {}
 
   unbox-primitive@1.1.0:
     dependencies:
