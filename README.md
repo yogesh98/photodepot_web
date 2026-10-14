@@ -21,7 +21,7 @@ local network, and changes are shared across the project.
 Ingest and export remain with the host. The complete Ingest, Cull, Organize, and
 Export workflow is also explained. Joining the waitlist
 is its only call to action. The original download page lives at `/tester`, with
-its Apple Silicon and Intel download buttons for version 0.2.1. An active account
+its Apple Silicon and Intel download buttons for version 0.2.2. An active account
 subscription or compatible license is required in the desktop app to open or
 create local projects.
 
@@ -95,13 +95,13 @@ signs are literal; there is no Next.js-style variable expansion.
 
 ### Downloads and releases
 
-Version 0.2.1 provides account sign-in, administrator-assigned subscriptions, and
+Version 0.2.2 provides account sign-in, administrator-assigned subscriptions, and
 up to two connected Macs. Both signed, notarized installers are published together.
 
 For that release, keep DMGs in the ignored `downloads/` folder, **outside `public/`**:
 
-- `photodepot-0.2.1-arm64.dmg`
-- `photodepot-0.2.1-x64.dmg`
+- `photodepot-0.2.2-arm64.dmg`
+- `photodepot-0.2.2-x64.dmg`
 
 Update the versioned keys in `lib/download-files.ts` for a new release, upload
 both installers, then deploy. Upload commands validate both files before writing
