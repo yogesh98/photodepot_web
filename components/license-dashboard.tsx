@@ -155,8 +155,10 @@ export function LicenseDashboard() {
       })
       setNotice(
         pending.action === "reset-device"
-          ? "Mac assignment reset. The previous Mac will lose access at its next verification or grace limit."
-          : "License updated. Connected Macs receive this change at their next verification."
+          ? "Mac assignment reset. The previous Mac will need to reactivate when the app is closed and reopened. Its current session and collaboration continue until then."
+          : pending.action === "revoke"
+            ? "License revoked. Local access will be blocked when the app is closed and reopened. The current session and collaboration continue until then."
+            : "License updated. Connected Macs receive this change at their next verification."
       )
       setPending(null)
       await load()
@@ -309,8 +311,9 @@ export function LicenseDashboard() {
             </span>
           </h2>
           <p>
-            Offline access lasts up to 48 hours or 10 startups between
-            verifications.
+            Offline launches are allowed for up to 48 hours or 10 startups
+            between verifications. Revocation takes effect on the next app
+            launch; current sessions and collaboration continue until quit.
           </p>
         </div>
         <div className={styles.tableScroll}>
@@ -447,9 +450,9 @@ export function LicenseDashboard() {
           </p>
           <p>
             {pending.action === "reset-device"
-              ? "The key can activate another Mac. The previous Mac will be blocked at its next verification or grace limit, and must reactivate if you want to use it again."
+              ? "The key can activate another Mac. The previous Mac will need to reactivate when the app is closed and reopened. Its current session and collaboration continue until then."
               : pending.action === "revoke"
-                ? "This Mac will lose local project access at its next verification or grace limit. Joining a licensed host will remain available."
+                ? "Local project access will be blocked when the app is closed and reopened. The current session, ongoing work, and collaboration continue until then. Joining a licensed host remains available after reopening."
                 : pending.action === "set-type"
                   ? `The license will become ${pending.license.type === "trial" ? "regular" : "trial"}. Its current status and Mac assignment stay the same.`
                   : "The assigned Mac can regain local project access after a successful online verification."}

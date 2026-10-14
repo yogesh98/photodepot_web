@@ -337,19 +337,23 @@ test("activation proof binds one Mac atomically under concurrent first activatio
   assert.equal((await activate(key, mac)).status, 200)
 })
 
-test("both license types revoke and restore with signed receipts; type changes preserve assignment", async () => {
+test("both license types revoke immediately on the server and restore with signed receipts; type changes preserve assignment", async () => {
   for (const type of ["trial", "regular"]) {
     const { key, license } = await grant(type)
     const mac = device()
     const active = await receipt(await activate(key, mac))
-    assert.equal(
-      (await admin({ action: "revoke", id: license.id })).status,
-      200
-    )
+    const response = await admin({ action: "revoke", id: license.id })
+    assert.equal(response.status, 200)
+    const result = await response.json()
+    assert.equal(result.license.status, "revoked")
+    assert.equal(result.license.deviceId, mac.id)
+    // The desktop keeps an admitted session until quit; the server must still
+    // return the latest revocation and reject activation by either Mac.
     const revoked = await receipt(await check(mac))
     assert.equal(revoked.status, "revoked")
     assert.equal(revoked.type, type)
     assert.ok(revoked.revision > active.revision)
+    assert.equal((await activate(key, mac)).status, 409)
     assert.equal((await activate(key, device())).status, 409)
     assert.equal(
       (await admin({ action: "restore", id: license.id })).status,

@@ -193,3 +193,5 @@ Photography credits are in `public/photography/pexels/README.md`; the Inter font
 ## Licenses
 
 Manual license administration is available at `/admin/licenses` after Cloudflare Access, D1 and signing secrets are configured. See [licensing setup and protocol](deploy/LICENSES.md) before deploying a licensed desktop build. Production migration, Access configuration, secrets and deployment are separate release steps.
+
+Revocation and Mac resets update the server immediately. The desktop saves the latest signed license state and applies local access restrictions after the app is closed and reopened. An admitted session keeps its ongoing work, hosting, and collaboration until quit. Closing a project or window does not end that session. Offline launches still use the 48-hour/10-startup allowance; joining a licensed host remains available without a local license.
