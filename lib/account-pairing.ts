@@ -286,6 +286,8 @@ const escape = (text: string) =>
         char
       ]!
   )
+const signOutForm =
+  '<form method="post" action="/api/account/auth/logout"><button type="submit">Sign out</button></form><small>Using the wrong account? Sign out, then start sign-in again from Photodepot on your Mac.</small>'
 function page(title: string, content: string, status = 200) {
   return new Response(
     `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title} · Photodepot</title><style>body{background:#f6f4ef;color:#20231e;font:16px/1.6 system-ui;margin:0}main{max-width:460px;margin:10vh auto;padding:32px}h1{line-height:1.2;font-size:30px}button{background:#20231e;color:white;border:0;border-radius:8px;padding:14px 20px;font:inherit;cursor:pointer}small{display:block;color:#62665b;margin:20px 0}a{color:inherit}form{margin-top:24px}</style><main><p>photodepot</p><h1>${title}</h1>${content}</main></html>`,
@@ -343,7 +345,7 @@ export async function handleAccountApproval(request: Request, env: Env) {
             Location: `/api/account/auth/login?code=${code}`,
           },
         })
-      return accountAuthPage(auth)
+      return accountAuthPage(auth, `/account/activate?code=${code}`)
     }
     const respond = (response: Response) => withAdminSession(response, auth)
     const user = await getWorkOSUser(env, auth.userId)
@@ -373,7 +375,7 @@ export async function handleAccountApproval(request: Request, env: Env) {
       return respond(
         page(
           "Subscription required",
-          `<p>Signed in as <strong>${escape(user.email)}</strong>.</p><p>Your account ${subscription?.status === "expired" ? "subscription has expired" : subscription?.status === "revoked" ? "subscription has been revoked" : "does not have a subscription yet"}. Ask the Photodepot Owner to assign or renew your access, then refresh this page.</p>`,
+          `<p>Signed in as <strong>${escape(user.email)}</strong>.</p><p>Your account ${subscription?.status === "expired" ? "subscription has expired" : subscription?.status === "revoked" ? "subscription has been revoked" : "does not have a subscription yet"}. Ask the Photodepot Owner to assign or renew your access, then refresh this page.</p><p><a href="/account">Open your account page</a> to review your subscription or request access.</p>${signOutForm}`,
           403
         )
       )
@@ -384,7 +386,7 @@ export async function handleAccountApproval(request: Request, env: Env) {
       return respond(
         page(
           "Mac limit reached",
-          `<p>Your account already has ${subscription.deviceLimit} connected Macs.</p><p><a href="/account">Open your account page</a> to request a Mac reset before connecting another Mac.</p>`,
+          `<p>Signed in as <strong>${escape(user.email)}</strong>.</p><p>Your account already has ${subscription.deviceLimit} connected Macs.</p><p><a href="/account">Open your account page</a> to request a Mac reset before connecting another Mac.</p>${signOutForm}`,
           409
         )
       )
@@ -421,7 +423,7 @@ export async function handleAccountApproval(request: Request, env: Env) {
     return respond(
       page(
         "Sign in on your Mac",
-        `<p>Signed in as <strong>${escape(user.email)}</strong>.</p><p>${subscription.type === "trial" ? "Trial" : "Standard"} subscription active until ${escape(new Date(subscription.endsAt).toISOString().slice(0, 10))}.</p><small>Only approve if you just clicked Sign in in Photodepot on your own Mac. This connects this Mac to your account (${subscription.devices.length} of ${subscription.deviceLimit} slots currently used).<br>Mac fingerprint: ${escape(row.device_id.slice(0, 12))}</small><form method="post" action="/account/activate?code=${code}"><button type="submit">Approve Mac sign-in</button></form><form method="post" action="/api/account/auth/logout"><button type="submit">Sign out</button></form>`
+        `<p>Signed in as <strong>${escape(user.email)}</strong>.</p><p>${subscription.type === "trial" ? "Trial" : "Standard"} subscription active until ${escape(new Date(subscription.endsAt).toISOString().slice(0, 10))}.</p><small>Only approve if you just clicked Sign in in Photodepot on your own Mac. This connects this Mac to your account (${subscription.devices.length} of ${subscription.deviceLimit} slots currently used).<br>Mac fingerprint: ${escape(row.device_id.slice(0, 12))}</small><form method="post" action="/account/activate?code=${code}"><button type="submit">Approve Mac sign-in</button></form>${signOutForm}`
       )
     )
   } catch {

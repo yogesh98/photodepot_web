@@ -163,8 +163,12 @@ test("PKCE callback establishes encrypted Owner session without an API key", asy
     request("/api/auth/logout", sessionCookie.split(";")[0], "POST"),
     env
   )
-  assert.equal(logout.status, 303)
-  const target = new URL(logout.headers.get("location"))
+  assert.equal(logout.status, 200)
+  const html = await logout.text()
+  assert.match(html, /http-equiv="refresh"/)
+  const target = new URL(
+    html.match(/href="([^"]+)"/)[1].replaceAll("&amp;", "&")
+  )
   assert.equal(target.origin, "https://api.workos.com")
   assert.equal(target.searchParams.get("session_id"), "session_flow_admin")
   assert.equal(target.searchParams.get("return_to"), `${origin}/`)
@@ -309,8 +313,11 @@ test("sign-out ends the hosted WorkOS session even after its access token expire
     request("/api/auth/logout", `__Host-photodepot-admin=${value}`, "POST"),
     env
   )
+  const html = await response.text()
   assert.equal(
-    new URL(response.headers.get("location")).searchParams.get("session_id"),
+    new URL(
+      html.match(/href="([^"]+)"/)[1].replaceAll("&amp;", "&")
+    ).searchParams.get("session_id"),
     "session_flow_admin"
   )
   assert.equal(calls.length, start)

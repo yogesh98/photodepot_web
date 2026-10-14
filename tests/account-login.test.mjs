@@ -312,6 +312,148 @@ test("direct customer portal login uses its own session and a fixed safe return 
   assert.ok(responseCookie(done, "__Host-photodepot-account"))
   assert.equal(responseCookie(done, "__Host-photodepot-admin"), undefined)
 })
+test("customer sign-in and callback do not depend on administration organization configuration", async () => {
+  for (const organization of [undefined, "invalid"]) {
+    const accountEnv = { ...env, WORKOS_ADMIN_ORGANIZATION_ID: organization }
+    const login = await handleAccountLogin(
+      request("/api/account/auth/login"),
+      accountEnv
+    )
+    assert.equal(login.status, 302)
+    const cookie = cookiePair(
+      responseCookie(login, "__Host-photodepot-account-login")
+    )
+    const transaction = await unsealData(cookieValue(cookie), {
+      password,
+      ttl: 600,
+    })
+    expectedVerifier = transaction.codeVerifier
+    const done = await handleAdminCallback(
+      request(
+        `/api/auth/callback?code=test-account-code&state=${transaction.state}`,
+        cookie
+      ),
+      accountEnv
+    )
+    assert.equal(done.status, 303)
+    assert.equal(done.headers.get("location"), "/account")
+    const session = cookiePair(
+      responseCookie(done, "__Host-photodepot-account")
+    )
+    assert.equal(
+      (
+        await authenticateWorkOSAccount(
+          request("/account", session),
+          accountEnv
+        )
+      ).userId,
+      user.id
+    )
+    assert.equal(
+      (await handleAdminLogin(request("/api/auth/login"), accountEnv)).status,
+      503
+    )
+    assert.equal(
+      (
+        await authenticateLicenseAdmin(
+          request("/admin/subscriptions", session),
+          accountEnv
+        )
+      ).status,
+      503
+    )
+  }
+})
+test("hosted sign-in restart keeps an unexpired Mac destination with fresh state and PKCE", async () => {
+  const previous = await beginAccount()
+  const login = await handleAccountLogin(
+    request("/api/account/auth/login", previous.cookie),
+    env
+  )
+  assert.equal(login.status, 302)
+  const cookie = cookiePair(
+    responseCookie(login, "__Host-photodepot-account-login")
+  )
+  const transaction = await unsealData(cookieValue(cookie), {
+    password,
+    ttl: 600,
+  })
+  assert.equal(transaction.returnPath, activationPath)
+  assert.notEqual(transaction.state, previous.transaction.state)
+  assert.notEqual(transaction.codeVerifier, previous.transaction.codeVerifier)
+  expectedVerifier = transaction.codeVerifier
+  const done = await callback(cookie, transaction.state)
+  assert.equal(done.status, 303)
+  assert.equal(done.headers.get("location"), activationPath)
+})
+test("hosted restarts ignore invalid, expired, cross-audience and foreign transactions", async () => {
+  const previous = await beginAccount()
+  const originalNow = Date.now
+  let expired
+  try {
+    Date.now = () => originalNow() - 1200_000
+    expired = await sealData(previous.transaction, { password, ttl: 600 })
+  } finally {
+    Date.now = originalNow
+  }
+  const invalid = ["forged", expired]
+  for (const changes of [
+    { audience: "admin" },
+    { clientId: "client_other" },
+    { origin: "https://attacker.example" },
+    { returnPath: "//attacker.example" },
+    { returnPath: "/admin/subscriptions" },
+  ])
+    invalid.push(
+      await sealData(
+        { ...previous.transaction, ...changes },
+        { password, ttl: 600 }
+      )
+    )
+  for (const value of invalid) {
+    const login = await handleAccountLogin(
+      request(
+        "/api/account/auth/login",
+        `__Host-photodepot-account-login=${value}`
+      ),
+      env
+    )
+    assert.equal(login.status, 302)
+    const cookie = cookiePair(
+      responseCookie(login, "__Host-photodepot-account-login")
+    )
+    const transaction = await unsealData(cookieValue(cookie), {
+      password,
+      ttl: 600,
+    })
+    assert.equal(transaction.returnPath, "/account")
+  }
+})
+test("missing account callback cookies recover through customer sign-in, never Owner sign-in", async () => {
+  const response = await callback(undefined, "missing-transaction")
+  assert.equal(response.status, 401)
+  const html = await response.text()
+  assert.match(html, /href="\/api\/account\/auth\/login"/)
+  assert.doesNotMatch(html, /href="\/api\/auth\/login"|Owner/)
+  assert.equal(response.headers.get("referrer-policy"), "no-referrer")
+  assert.equal(exchanges.length, 0)
+})
+test("failed account callbacks retain the verified Mac pairing destination for retry", async () => {
+  const { cookie, transaction } = await beginAccount()
+  const response = await handleAdminCallback(
+    request(
+      `/api/auth/callback?error=access_denied&state=${transaction.state}`,
+      cookie
+    ),
+    env
+  )
+  assert.equal(response.status, 401)
+  assert.match(
+    await response.text(),
+    new RegExp(`href="/api/account/auth/login\\?code=${pairingCode}"`)
+  )
+  assert.equal(exchanges.length, 0)
+})
 test("all customer portal shell URLs require a verified account session and keep private headers", async () => {
   for (const path of [
     "/account",
@@ -742,8 +884,13 @@ test("Pages account route adapters set account cookies and sign out expired host
     request: request("/api/account/auth/logout", cookie, "POST"),
     env,
   })
-  assert.equal(logout.status, 303)
-  const target = new URL(logout.headers.get("location"))
+  assert.equal(logout.status, 200)
+  const html = await logout.text()
+  assert.match(html, /http-equiv="refresh"/)
+  assert.equal(logout.headers.get("referrer-policy"), "no-referrer")
+  const target = new URL(
+    html.match(/href="([^"]+)"/)[1].replaceAll("&amp;", "&")
+  )
   assert.equal(target.origin, "https://api.workos.com")
   assert.equal(
     target.searchParams.get("session_id"),

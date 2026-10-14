@@ -49,13 +49,21 @@ function configuration(
   if (
     !clientId ||
     !/^client_[a-zA-Z0-9_]+$/.test(clientId) ||
-    !organizationId ||
-    !/^org_[a-zA-Z0-9_]+$/.test(organizationId) ||
+    (audience === "admin" &&
+      (!organizationId || !/^org_[a-zA-Z0-9_]+$/.test(organizationId))) ||
     !password ||
     password.length < 32 ||
     !redirectUri
   )
-    return json({ error: "License administration is not configured." }, 503)
+    return json(
+      {
+        error:
+          audience === "account"
+            ? "Account sign-in is not configured."
+            : "License administration is not configured.",
+      },
+      503
+    )
   try {
     const callback = new URL(redirectUri)
     const local =
@@ -71,10 +79,7 @@ function configuration(
     )
       throw new Error("Invalid callback")
     if (new URL(request.url).origin !== callback.origin)
-      return json(
-        { error: "Administration is unavailable on this hostname." },
-        403
-      )
+      return json({ error: "Sign-in is unavailable on this hostname." }, 403)
     return {
       clientId,
       organizationId,
@@ -86,7 +91,7 @@ function configuration(
       workos: createWorkOS({ clientId, timeout: 5000, maxRetries: 0 }),
     }
   } catch {
-    return json({ error: "License administration is not configured." }, 503)
+    return json({ error: "Sign-in is not configured." }, 503)
   }
 }
 type Configuration = Exclude<ReturnType<typeof configuration>, Response>
@@ -371,7 +376,33 @@ export async function handleAdminLogin(request: Request, env: Env) {
 export async function handleAccountLogin(request: Request, env: Env) {
   if (request.method !== "GET") return methodNotAllowed("GET")
   const code = new URL(request.url).searchParams.get("code")
-  if (code === null) return beginLogin(request, env, "account", "/account")
+  if (code === null) {
+    const config = configuration(request, env, "account")
+    if (config instanceof Response) return config
+    let returnPath = "/account"
+    const value = cookie(request, cookieName(config, true))
+    if (value) {
+      try {
+        const transaction = await unsealData<LoginTransaction>(value, {
+          password: config.password,
+          ttl: loginLifetime,
+        })
+        // AuthKit restarts at the configured initiate-login URI without the
+        // Mac code. Keep its destination only from our unexpired sealed cookie;
+        // beginLogin still creates fresh state and a fresh PKCE verifier.
+        if (
+          transaction.audience === "account" &&
+          transaction.clientId === config.clientId &&
+          transaction.origin === config.origin &&
+          validAccountReturnPath(transaction.returnPath)
+        )
+          returnPath = transaction.returnPath!
+      } catch {
+        // A missing or invalid transaction starts a new customer portal login.
+      }
+    }
+    return beginLogin(request, env, "account", returnPath)
+  }
   if (!/^[A-Za-z0-9_-]{43}$/.test(code))
     return json({ error: "Invalid Mac sign-in request." }, 400)
   return beginLogin(request, env, "account", `/account/activate?code=${code}`)
@@ -424,12 +455,14 @@ async function beginLogin(
 }
 export async function handleAdminCallback(request: Request, env: Env) {
   if (request.method !== "GET") return methodNotAllowed("GET")
-  let config = configuration(request, env)
+  // The callback is shared. A missing transaction must recover through customer
+  // sign-in, never send a customer into the organization-scoped Owner flow.
+  let config = configuration(request, env, "account")
   if (config instanceof Response) return config
   const query = new URL(request.url).searchParams
   let response: Response
+  let transaction: LoginTransaction | undefined
   try {
-    let transaction: LoginTransaction | undefined
     for (const audience of ["admin", "account"] as const) {
       const candidateConfig = { ...config, audience }
       const value = cookie(request, cookieName(candidateConfig, true))
@@ -443,7 +476,9 @@ export async function handleAdminCallback(request: Request, env: Env) {
         (candidate.audience ?? "admin") === audience
       ) {
         transaction = candidate
-        config = candidateConfig
+        const audienceConfig = configuration(request, env, audience)
+        if (audienceConfig instanceof Response) return audienceConfig
+        config = audienceConfig
         break
       }
     }
@@ -528,7 +563,7 @@ export async function handleAdminCallback(request: Request, env: Env) {
   response.headers.append("Set-Cookie", setCookie(config, "", true))
   return response.status >= 400
     ? config.audience === "account"
-      ? accountAuthPage(response)
+      ? accountAuthPage(response, transaction?.returnPath)
       : adminAuthPage(response)
     : response
 }
@@ -570,20 +605,53 @@ async function logout(
       /* Always permit local sign-out when WorkOS is unavailable. */
     }
   }
-  const response = redirect(location, 303)
+  // A form-action 'self' policy also constrains its HTTP redirect chain in
+  // Chromium. Commit a same-origin document before navigating to WorkOS so
+  // hosted session cookies are cleared without relaxing the approval page CSP.
+  const escapedLocation = location.replace(
+    /[&<>"']/g,
+    (character) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
+        character
+      ]!
+  )
+  const response =
+    location === "/"
+      ? redirect(location, 303)
+      : new Response(
+          `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${escapedLocation}"><title>Signing out · Photodepot</title><main><h1>Signing out</h1><p><a href="${escapedLocation}">Continue signing out of Photodepot</a></p></main></html>`,
+          {
+            headers: {
+              ...privateHeaders,
+              "Content-Type": "text/html; charset=utf-8",
+              "Referrer-Policy": "no-referrer",
+              "Content-Security-Policy":
+                "default-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'",
+            },
+          }
+        )
   response.headers.append("Set-Cookie", setCookie(config, ""))
   response.headers.append("Set-Cookie", setCookie(config, "", true))
   return response
 }
-export function accountAuthPage(response: Response) {
+export function accountAuthPage(response: Response, returnPath?: string) {
   const headers = new Headers(response.headers)
   headers.set("Content-Type", "text/html; charset=utf-8")
+  headers.set("Referrer-Policy", "no-referrer")
   headers.set(
     "Content-Security-Policy",
     "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'"
   )
+  const retryPath =
+    validAccountReturnPath(returnPath) && returnPath !== "/account"
+      ? `/api/account/auth/login?${returnPath!.split("?")[1]}`
+      : "/api/account/auth/login"
+  const message =
+    response.status === 503
+      ? "Sign-in is temporarily unavailable. Please try again in a moment."
+      : "Your sign-in expired or could not be verified. Sign in again to continue. If you were connecting a Mac, you can also restart sign-in from Photodepot."
   return new Response(
-    '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign-in · Photodepot</title><style>body{font:16px/1.6 system-ui;margin:12vh auto;max-width:440px;padding:32px;color:#20231e;background:#f6f4ef}</style><main><p>photodepot</p><h1>Sign-in could not be completed</h1><p>Return to Photodepot on your Mac and start sign-in again.</p></main></html>',
+    `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign-in · Photodepot</title><style>body{font:16px/1.6 system-ui;margin:12vh auto;max-width:440px;padding:32px;color:#20231e;background:#f6f4ef}a{color:inherit}nav{display:flex;gap:24px;margin-top:28px}</style><main><p>photodepot</p><h1>Sign-in could not be completed</h1><p>${message}</p><nav><a href="${retryPath}">Sign in again</a><a href="/">Back to Photodepot</a></nav></main></html>`,
     { status: response.status, headers }
   )
 }

@@ -663,7 +663,14 @@ test("browser approval requires an existing subscription and does not grant acce
   const started = await start()
   const denied = await approval(started, userId)
   assert.equal(denied.status, 403)
-  assert.match(await denied.text(), /does not have a subscription yet/)
+  const deniedPage = await denied.text()
+  assert.match(deniedPage, /does not have a subscription yet/)
+  assert.match(deniedPage, /href="\/account"/)
+  assert.match(
+    deniedPage,
+    /form method="post" action="\/api\/account\/auth\/logout"/
+  )
+  assert.match(deniedPage, /Using the wrong account/)
   assert.equal(await getSubscription(env.DB, userId, epoch), null)
   assert.equal(
     await getSubscriptionDevice(env.DB, started.device.deviceId, epoch),
@@ -766,7 +773,6 @@ test("browser approval requires a verified customer session, canonical host and 
   )
   for (const missing of [
     "WORKOS_CLIENT_ID",
-    "WORKOS_ADMIN_ORGANIZATION_ID",
     "WORKOS_COOKIE_PASSWORD",
     "WORKOS_REDIRECT_URI",
   ]) {
@@ -786,6 +792,18 @@ test("browser approval requires a verified customer session, canonical host and 
       503
     )
   }
+  assert.equal(
+    (
+      await pair(
+        started.device,
+        "start",
+        undefined,
+        {},
+        { ...env, WORKOS_ADMIN_ORGANIZATION_ID: "" }
+      )
+    ).status,
+    201
+  )
 })
 
 test("two accounts approving one request have exactly one immutable winner", async (t) => {
