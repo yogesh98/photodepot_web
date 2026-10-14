@@ -1,10 +1,11 @@
 # Photodepot installers
 
-Version 0.2.2 includes account sign-in and subscriptions. Keep both signed, notarized
+Version 0.2.3 separates development storage and uses the Photodepot name in
+production Keychain entries. Keep both signed, notarized
 installers here, outside the public website:
 
-- `photodepot-0.2.2-arm64.dmg`
-- `photodepot-0.2.2-x64.dmg`
+- `photodepot-0.2.3-arm64.dmg`
+- `photodepot-0.2.3-x64.dmg`
 
 DMGs are ignored by Git. `pnpm downloads:upload` uploads them to the private R2
 bucket, and `pnpm downloads:upload:local` seeds local development storage.
