@@ -17,3 +17,8 @@ WORKOS_COOKIE_PASSWORD=""
 # Production signup webhook signing secret. Local dev uses .dev.vars.development.
 WORKOS_WEBHOOK_SECRET=""
 PHOTODEPOT_ENVIRONMENT="production"
+# Production reminder delivery: verified sender and a server-only sending API key.
+RESEND_API_KEY=""
+PHOTODEPOT_EMAIL_FROM="Photodepot <hello@photodepot.app>"
+# Same random secret (32+ characters) in Pages and the scheduled reminder Worker.
+PHOTODEPOT_REMINDER_TOKEN=""

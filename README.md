@@ -195,9 +195,10 @@ GET/HEAD downloads without R2 access, byte-range parsing and invalid requests; D
 persistence and duplicates; license administration and verification; and static
 asset leakage prevention.
 
-The dashboard browser tests run against the built site and an isolated mock admin
-API. They cover manual grants, extensions, notes, revocation, restoration, Mac
-resets, filtering, pagination, stale edits, session errors, and mobile keyboard
+The dashboard and customer account browser tests run against the built site and
+isolated mock APIs. They cover manual grants, extensions, notes, revocation,
+restoration, individual Mac resets, customer requests, admin review, reminder
+previews, filtering, pagination, stale edits, session errors, and mobile keyboard
 access. Run them separately with an LTS Node.js release:
 
 ```sh
@@ -229,8 +230,8 @@ Set `WORKOS_CLIENT_ID`, `WORKOS_ADMIN_ORGANIZATION_ID`,
 `WORKOS_COOKIE_PASSWORD` of at least 32 characters in Pages settings/secrets.
 The server uses PKCE and encrypted HttpOnly session cookies. Add the server-only
 encrypted `WORKOS_API_KEY` secret for listing users and checking account status.
-Never include the key in browser assets or desktop builds. Apply additive D1
-migrations through `0006` before starting the updated backend. Register a WorkOS
+Never include the key in browser assets or desktop builds. Apply D1
+migrations through `0009` before starting the updated backend. Register a WorkOS
 `user.created` webhook at `https://photodepot.app/api/account/webhook` and store its
 signing secret as `WORKOS_WEBHOOK_SECRET`. The handler validates the signature and
 bounded raw request body before granting access. Without a webhook, signup during
@@ -240,19 +241,55 @@ The dashboard shows its environment, whole-database subscription totals, trials,
 expirations in the next seven days, and Mac assignments. Search and status/type
 filters apply to loaded WorkOS users, with explicit pagination. Admins can grant
 Trial or Standard access by duration or exact end date, extend, revoke, restore,
-reset a Mac, record a reason, keep internal notes, and inspect audit history.
+reset an individual Mac or both Macs, record a reason, keep internal notes, and
+inspect audit history. The customer request queue shows renewals and requests to
+remove a specific Mac. Admins can acknowledge, complete, or decline a request with
+internal review notes. Review status changes never grant access or reset a device;
+apply those changes from account details, then complete the request.
 Visible pages refresh every 30 seconds while no dialog or mutation is open.
 Revision checks reject stale writes. If a session expires, Sign in opens a new
 tab; return and select Refresh. No payment provider or charging flow is connected.
 
 Desktop account sign-in opens WorkOS in the external browser and asks the user
 to approve the Mac. The desktop receives a signed finite receipt, with no WorkOS
-tokens or API key. One account binds to one Mac; reset invalidates prior bindings
-and earlier approved requests. Receipt expiry is capped at the subscription end
+tokens or API key. One account supports up to two Macs. An individual reset
+releases only the selected Mac and leaves the other Mac’s access intact. Resetting
+all Macs invalidates both assignments and earlier approved pairing requests.
+Receipt expiry is capped at the subscription end
 and 48 hours. An admitted session keeps its work and collaboration until quit;
 expiry, revocation, and offline limits are enforced on the next app launch.
 Device identity and receipts use encrypted local storage, which can access macOS
 Keychain. The app exposes account sign-in and subscription access.
+
+### Customer account and requests
+
+Users can sign in at `/account` to view their trial or standard plan, expiry, and
+connected Macs. Account cookies are separate from admin cookies. Customers see
+only their own subscription and latest 50 requests; administrator notes, review
+notes, subscription audits, device keys, and internal revisions are excluded.
+
+Renewal and Mac removal requests require the signed-in account and same-origin
+JSON submission. A Mac removal must select one of that account’s current Macs.
+At most one open request is allowed per account, request type, and Mac; retries
+return the existing request instead of duplicating it. Acknowledged requests stay
+open until completed or declined. New requests are limited to five per rolling
+24 hours. Requests never immediately change access and never collect payment.
+Admin reviews use revision checks and retain a separate administrator audit.
+
+### Daily renewal queue and trial reminders
+
+The admin dashboard lists active trials and standard subscriptions ending within
+seven days. Trial reminder messages are prepared once per trial term during the
+final 48 hours. The queue also shows delivery status, development previews, and
+failed or uncertain attempts. Select **Check reminders now** to process due
+trials; this uses the same routine as the scheduled worker.
+
+Development always saves previews and sends no email. Production delivery stays
+disabled until a provider and sender are configured; no production email settings
+or scheduled worker are deployed by this change. The optional Resend adapter,
+worker setup, and hourly due-reminder checks are documented in
+[the reminder worker guide](workers/README.md). Standard plans appear in the
+renewal queue but do not receive the trial email.
 
 ### Local subscription development
 
@@ -286,3 +323,7 @@ Wrangler working directory. It never loads the production `.dev.vars` file.
 The desktop has separate user data and a separate Mac identity; packaged dev
 builds also have a distinct name and app ID. Production remains the default
 profile for releases. Dev trials and admin mutations do not change production.
+The local development server checks due trial reminders every minute and saves
+their previews. Visit `/account` to submit a local customer request and
+`/admin/subscriptions` to review it or inspect the reminder preview; no email is
+sent from this environment.

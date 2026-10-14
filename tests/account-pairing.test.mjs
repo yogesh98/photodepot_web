@@ -540,11 +540,11 @@ test("cancellation and live expiry at the binding transaction boundary prevent a
     )
     assert.deepEqual(
       await env.DB.prepare(
-        "SELECT current_device_id, revision FROM subscriptions WHERE user_id = ?"
+        "SELECT revision FROM subscriptions WHERE user_id = ?"
       )
         .bind(userId)
         .first(),
-      { current_device_id: null, revision: 1 }
+      { revision: 1 }
     )
     assert.equal((await listSubscriptionAudit(env.DB, userId)).length, 1)
   }
@@ -594,7 +594,7 @@ test("pairing and subscription expiry during WorkOS lookup prevent authorization
   }
 })
 
-test("sign-in and account creation never automatically grant subscriptions", async (t) => {
+test("browser approval requires an existing subscription and does not grant access by itself", async (t) => {
   t.mock.method(Date, "now", () => epoch)
   const userId = "user_pairing_ungranted"
   users.set(userId, { email: `${userId}@example.com`, emailVerified: true })
@@ -759,36 +759,45 @@ test("two accounts approving one request have exactly one immutable winner", asy
   )
 })
 
-test("a second Mac is refused and an old approval cannot reclaim a slot after Owner reset", async (t) => {
+test("two Macs connect, a third is refused, and old approvals cannot reclaim slots after Owner reset", async (t) => {
   t.mock.method(Date, "now", () => epoch)
   const userId = "user_pairing_reset"
   await assign(userId)
   const first = await start()
-  assert.equal((await approval(first, userId)).status, 200)
-  assert.equal((await pair(first.device, "poll", first.pairingId)).status, 200)
   const second = await start()
-  assert.equal((await approval(second, userId)).status, 200)
+  const third = await start()
+  // Approve before either delivery, so the database commit must enforce capacity.
+  for (const request of [first, second, third])
+    assert.equal((await approval(request, userId)).status, 200)
+  assert.equal((await pair(first.device, "poll", first.pairingId)).status, 200)
   assert.equal(
     (await pair(second.device, "poll", second.pairingId)).status,
-    409
+    200
   )
+  assert.equal((await pair(third.device, "poll", third.pairingId)).status, 409)
+  assert.equal((await getSubscription(env.DB, userId, epoch)).devices.length, 2)
+  const fourth = await start()
+  assert.equal((await approval(fourth, userId)).status, 409)
   const reset = await resetSubscriptionDevice(
     env.DB,
     userId,
-    2,
+    3,
     "owner@example.com",
     epoch
   )
   const auditCount = (await listSubscriptionAudit(env.DB, userId)).length
-  assert.equal((await pair(first.device, "poll", first.pairingId)).status, 409)
+  for (const request of [first, second, third])
+    assert.equal(
+      (await pair(request.device, "poll", request.pairingId)).status,
+      409
+    )
   assert.equal(
-    (await pair(second.device, "poll", second.pairingId)).status,
-    409
+    (await getSubscriptionDevice(env.DB, first.device.deviceId, epoch)).active,
+    false
   )
   assert.equal(
-    (await getSubscriptionDevice(env.DB, first.device.deviceId, epoch))
-      .currentDeviceId,
-    null
+    (await getSubscriptionDevice(env.DB, second.device.deviceId, epoch)).active,
+    false
   )
   assert.deepEqual(await getSubscription(env.DB, userId, epoch), reset)
   assert.equal((await listSubscriptionAudit(env.DB, userId)).length, auditCount)
@@ -822,4 +831,93 @@ test("fresh WorkOS account status is enforced during approval and every delivery
       null
     )
   }
+})
+
+test("parallel signed approvals deliver exactly two active receipts and never assign a third Mac", async (t) => {
+  t.mock.method(Date, "now", () => epoch)
+  const userId = "user_signed_two_slot_race"
+  await assign(userId)
+  const pairings = await Promise.all(Array.from({ length: 6 }, () => start()))
+  for (const request of pairings)
+    assert.equal((await approval(request, userId)).status, 200)
+  const deliveries = await Promise.all(
+    pairings.map((request) => pair(request.device, "poll", request.pairingId))
+  )
+  assert.equal(deliveries.filter(({ status }) => status === 200).length, 2)
+  assert.equal(deliveries.filter(({ status }) => status === 409).length, 4)
+  const assigned = await getSubscription(env.DB, userId, epoch)
+  assert.equal(assigned.devices.length, 2)
+  assert.equal(assigned.revision, 3)
+  for (const [index, response] of deliveries.entries()) {
+    const result = await response.json()
+    if (response.status === 200) {
+      const receipt = decodeReceipt(result.receipt)
+      assert.equal(receipt.status, "active")
+      assert.equal(receipt.deviceId, pairings[index].device.deviceId)
+      assert.equal(receipt.licenseId, assigned.id)
+      assert.equal(
+        assigned.devices.some((device) => device.id === receipt.deviceId),
+        true
+      )
+    } else assert.equal("receipt" in result, false)
+  }
+  assert.equal((await listSubscriptionAudit(env.DB, userId)).length, 3)
+})
+
+test("individual reset invalidates that Mac's old approval while the other Mac can retry and fresh browser consent reconnects", async (t) => {
+  t.mock.method(Date, "now", () => epoch)
+  const userId = "user_pairing_individual_reset"
+  await assign(userId)
+  const first = await start(),
+    second = await start()
+  for (const request of [first, second]) {
+    assert.equal((await approval(request, userId)).status, 200)
+    assert.equal(
+      (await pair(request.device, "poll", request.pairingId)).status,
+      200
+    )
+  }
+  const reset = await resetSubscriptionDevice(
+    env.DB,
+    userId,
+    3,
+    "owner@example.com",
+    epoch,
+    "Reset only this Mac",
+    first.device.deviceId
+  )
+  assert.equal(reset.bindingRevision, 1)
+  assert.deepEqual(
+    reset.devices.map(({ id }) => id),
+    [second.device.deviceId]
+  )
+  assert.equal((await pair(first.device, "poll", first.pairingId)).status, 409)
+  assert.equal(
+    (await pair(second.device, "poll", second.pairingId)).status,
+    200
+  )
+  const renewed = await start(first.device)
+  assert.equal((await approval(renewed, userId)).status, 200)
+  const delivered = await pair(renewed.device, "poll", renewed.pairingId)
+  assert.equal(delivered.status, 200)
+  const payload = decodeReceipt((await delivered.json()).receipt)
+  assert.equal(payload.deviceId, first.device.deviceId)
+  const current = await getSubscription(env.DB, userId, epoch)
+  assert.equal(current.devices.length, 2)
+  assert.equal(
+    current.devices.find(({ id }) => id === first.device.deviceId)
+      .assignmentRevision,
+    2
+  )
+  assert.equal(
+    current.devices.find(({ id }) => id === second.device.deviceId)
+      .assignmentRevision,
+    1
+  )
+  assert.equal((await pair(first.device, "poll", first.pairingId)).status, 409)
+  assert.equal(
+    (await pair(second.device, "poll", second.pairingId)).status,
+    200
+  )
+  assert.equal((await listSubscriptionAudit(env.DB, userId)).length, 5)
 })

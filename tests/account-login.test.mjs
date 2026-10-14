@@ -14,6 +14,8 @@ import {
 } from "../lib/license-admin-auth.ts"
 import { onRequest as loginRoute } from "../functions/api/account/auth/login.ts"
 import { onRequest as logoutRoute } from "../functions/api/account/auth/logout.ts"
+import { onRequest as accountMiddleware } from "../functions/_middleware.ts"
+import { handleAdminReminders } from "../functions/api/admin/subscription-reminders.ts"
 import {
   getSubscription,
   listSubscriptionAudit,
@@ -286,6 +288,104 @@ test("account sign-in also permits a verified Member but never creates an admin 
     401
   )
 })
+test("direct customer portal login uses its own session and a fixed safe return path", async () => {
+  const response = await handleAccountLogin(
+    request("/api/account/auth/login?next=https://attacker.example"),
+    env
+  )
+  assert.equal(response.status, 302)
+  const url = new URL(response.headers.get("location"))
+  assert.equal(url.searchParams.has("organization_id"), false)
+  const cookie = cookiePair(
+    responseCookie(response, "__Host-photodepot-account-login")
+  )
+  const transaction = await unsealData(cookieValue(cookie), {
+    password,
+    ttl: 600,
+  })
+  assert.equal(transaction.returnPath, "/account")
+  expectedVerifier = transaction.codeVerifier
+  const done = await callback(cookie, transaction.state)
+  assert.equal(done.status, 303)
+  assert.equal(done.headers.get("location"), "/account")
+  assert.ok(responseCookie(done, "__Host-photodepot-account"))
+  assert.equal(responseCookie(done, "__Host-photodepot-admin"), undefined)
+})
+test("all customer portal shell URLs require a verified account session and keep private headers", async () => {
+  for (const path of [
+    "/account",
+    "/account/",
+    "/account.html",
+    "/account.txt",
+    "/account/__next._full.txt",
+    "/account/__next.account.__PAGE__.txt",
+    "/account/__next._tree.txt",
+  ]) {
+    let served = false
+    let response = await accountMiddleware({
+      request: request(path),
+      env,
+      next: () => {
+        served = true
+        return new Response("account shell")
+      },
+    })
+    assert.equal(response.status, 302)
+    assert.equal(response.headers.get("location"), "/api/account/auth/login")
+    assert.equal(served, false)
+    response = await accountMiddleware({
+      request: request(path, await sessionCookie()),
+      env,
+      next: () => {
+        served = true
+        return new Response("account shell")
+      },
+    })
+    assert.equal(response.status, 200)
+    assert.equal(served, true)
+    assert.equal(response.headers.get("cache-control"), "private, no-store")
+    assert.equal(response.headers.get("x-robots-tag"), "noindex, nofollow")
+  }
+})
+test("reminder queues and manual checks require Owner cookies and same-origin mutations", async () => {
+  const dev = { ...env, PHOTODEPOT_ENVIRONMENT: "development" }
+  for (const cookie of [
+    undefined,
+    await sessionCookie(),
+    await sessionCookie("admin", { org_id: organizationId, role: "member" }),
+  ]) {
+    const denied = await handleAdminReminders(
+      request("/api/admin/subscription-reminders", cookie),
+      dev
+    )
+    assert.ok([401, 403].includes(denied.status))
+  }
+  const owner = await sessionCookie("admin", {
+    org_id: organizationId,
+    role: "owner",
+  })
+  const queue = await handleAdminReminders(
+    request("/api/admin/subscription-reminders", owner),
+    dev
+  )
+  assert.equal(queue.status, 200)
+  assert.equal((await queue.json()).mode, "preview")
+  const make = (originHeader) =>
+    new Request(`${origin}/api/admin/subscription-reminders`, {
+      method: "POST",
+      headers: {
+        cookie: owner,
+        origin: originHeader,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ action: "run" }),
+    })
+  assert.equal(
+    (await handleAdminReminders(make("https://attacker.example"), dev)).status,
+    403
+  )
+  assert.equal((await handleAdminReminders(make(origin), dev)).status, 200)
+})
 test("account callback activates signup trial once and preserves an admin revocation on later sign-in", async () => {
   let flow = await beginAccount()
   assert.equal(
@@ -384,7 +484,7 @@ test("missing, forged, expired and mismatched account transactions never exchang
   }
   assert.equal(exchanges.length, 0)
 })
-test("account transactions cannot return outside the exact Mac activation route", async () => {
+test("account transactions cannot return outside the portal or exact Mac activation route", async () => {
   const { transaction } = await beginAccount()
   for (const returnPath of [
     undefined,

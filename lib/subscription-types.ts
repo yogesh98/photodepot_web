@@ -5,6 +5,7 @@ export type SubscriptionStatus = "active" | "expired" | "revoked"
 export interface SubscriptionDevice {
   id: string
   bindingRevision: number
+  assignmentRevision: number
   activatedAt: number
 }
 
@@ -23,7 +24,8 @@ export interface SubscriptionSummary {
   revision: number
   notes: string
   bindingRevision: number
-  device: SubscriptionDevice | null
+  devices: SubscriptionDevice[]
+  deviceLimit: number
 }
 
 export interface SubscriptionOverview {

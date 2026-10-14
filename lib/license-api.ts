@@ -139,27 +139,46 @@ export async function handleLicenseRequest(
       )
         return json({ error: "Device verification failed." }, 401)
       const user = await getWorkOSUser(env, accountDevice.userId)
+      // WorkOS lookup is an asynchronous boundary: an administrator may revoke
+      // access or reset this Mac while it is in flight. Re-read the assignment
+      // before signing so the receipt reflects the latest local entitlement.
+      const currentDevice = await getSubscriptionDevice(
+        env.DB,
+        body.deviceId,
+        Date.now()
+      )
+      if (
+        !currentDevice ||
+        currentDevice.userId !== accountDevice.userId ||
+        currentDevice.publicKey !== accountDevice.publicKey
+      )
+        return json(
+          { error: "This Mac assignment changed. Sign in again." },
+          403
+        )
+      const verifiedAt = Date.now()
       const active =
-        user?.id === accountDevice.userId &&
+        user?.id === currentDevice.userId &&
         user.emailVerified &&
-        accountDevice.subscription.status === "active" &&
-        accountDevice.subscription.startsAt <= now &&
-        accountDevice.currentDeviceId === body.deviceId &&
-        accountDevice.currentBindingRevision === accountDevice.bindingRevision
+        currentDevice.subscription.status === "active" &&
+        currentDevice.subscription.startsAt <= verifiedAt &&
+        currentDevice.subscription.endsAt > verifiedAt &&
+        currentDevice.active &&
+        currentDevice.currentBindingRevision === currentDevice.bindingRevision
       return json(
         signedReceipt(
           signer,
           {
-            licenseId: accountDevice.subscription.id,
+            licenseId: currentDevice.subscription.id,
             deviceId: body.deviceId,
-            type: accountDevice.subscription.type,
+            type: currentDevice.subscription.type,
             status: active ? "active" : "revoked",
             challenge: body.challenge,
-            revision: accountDevice.subscription.revision,
-            subscriptionEndsAt: accountDevice.subscription.endsAt,
+            revision: currentDevice.subscription.revision,
+            subscriptionEndsAt: currentDevice.subscription.endsAt,
           },
-          now,
-          accountDevice.subscription.endsAt
+          verifiedAt,
+          currentDevice.subscription.endsAt
         )
       )
     }

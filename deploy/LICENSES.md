@@ -6,7 +6,11 @@ Owners can set Trial or Standard access for 1–3,650 days or an exact end date,
 
 `POST /api/account/webhook` verifies WorkOS's signature over the raw bounded body and handles `user.created`. Store the endpoint secret in `WORKOS_WEBHOOK_SECRET`. The verified account callback activates the same trial as a fallback. Both atomically insert only when no subscription exists, record one `initial-trial` audit, and use the account creation date plus exactly seven days. Retries, duplicate notifications, later logins, expired trials, revocations, and manual assignments never restart the trial. Unverified accounts can have a trial record but cannot approve or receive Mac access until verified.
 
-One subscription binds to one Mac. Reset permits a replacement Mac and invalidates earlier binding epochs and approved pairing requests. Device key history is retained for signed revoked receipts. Existing license data and public key activation remain compatible during the transition. The new desktop sign-in ships with the desktop app update; deploying the website alone cannot change installed binaries.
+One subscription connects up to two Macs. Database guards enforce capacity even for simultaneous approvals. Reset one selected Mac to keep the other connected, or reset all assignments. Global binding epochs and individual assignment revisions invalidate stale approvals; a reset Mac must complete a fresh sign-in and browser approval. Device key history is retained for signed revoked receipts. The new desktop sign-in ships with the desktop app update; deploying the website alone cannot change installed binaries.
+
+Customers visit `/account` to see their own subscription, exact expiry, and connected Macs, and submit renewal or selected-Mac reset requests. They never receive administrator notes, private device keys, or admin audit data. Requests are deduplicated and limited to five new requests per account in 24 hours. Owners review requests in the dashboard; acknowledgements/resolutions do not themselves grant access or reset devices.
+
+The daily dashboard queue includes active terms ending in seven days and pending customer requests. Trial-ending emails are eligible during the final 48 hours and use a persistent deduplicated outbox. Development previews messages without sending. See [scheduled reminders and delivery setup](../workers/README.md) for the hourly Worker, production mail settings, retries, and uncertain delivery handling. Apply migrations through `0009` before starting these features.
 
 ## Configure before deployment
 

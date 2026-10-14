@@ -27,7 +27,10 @@
     "deploy": "pnpm build && pnpm functions:build && node scripts/cloudflare.mjs deploy",
     "subscriptions:setup": "node scripts/subscription-development.mjs setup",
     "subscriptions:migrate": "node scripts/subscription-development.mjs migrate",
-    "subscriptions:dev": "pnpm build && pnpm subscriptions:migrate && node scripts/subscription-development.mjs dev"
+    "subscriptions:dev": "pnpm build && pnpm subscriptions:migrate && node scripts/subscription-development.mjs dev",
+    "subscriptions:reminders": "node scripts/subscription-development.mjs reminders",
+    "reminders:build": "wrangler deploy --config wrangler.reminders.jsonc --dry-run --outdir .wrangler/reminders-build",
+    "reminders:deploy": "wrangler deploy --config wrangler.reminders.jsonc"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",

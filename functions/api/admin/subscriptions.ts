@@ -130,6 +130,13 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
       (typeof body.notes !== "string" || body.notes.length > 2000)
     )
       return json({ error: "Enter notes of at most 2,000 characters." }, 400)
+    if (
+      body.deviceId !== undefined &&
+      (body.action !== "reset-device" ||
+        typeof body.deviceId !== "string" ||
+        !/^[a-f0-9]{64}$/.test(body.deviceId))
+    )
+      return json({ error: "Choose a current Mac assignment to reset." }, 400)
     const now = Date.now()
     if (body.action === "set" || body.action === "extend") {
       if (body.endsAt !== undefined) {
@@ -209,7 +216,8 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
                 revision,
                 auth.email,
                 now,
-                reason
+                reason,
+                body.deviceId as string | undefined
               )
             : await changeSubscription(
                 env.DB,

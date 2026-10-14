@@ -18,6 +18,8 @@ import type {
   WorkOSUserSummary,
 } from "@/lib/subscription-types"
 import styles from "./subscription-dashboard.module.css"
+import { AdminSubscriptionRequests } from "./admin-subscription-requests"
+import { AdminSubscriptionReminders } from "./admin-subscription-reminders"
 
 const day = 86_400_000
 const durationPresets = [7, 14, 30, 90, 365]
@@ -29,7 +31,11 @@ type DialogAction =
   | "reset-device"
   | "update-notes"
   | "details"
-type PendingDialog = { user: WorkOSUserSummary; action: DialogAction }
+type PendingDialog = {
+  user: WorkOSUserSummary
+  action: DialogAction
+  deviceId?: string
+}
 type UserPage = {
   users: WorkOSUserSummary[]
   nextCursor: string | null
@@ -436,13 +442,13 @@ export function SubscriptionDashboard() {
     [handleError]
   )
   const openDialog = useCallback(
-    (user: WorkOSUserSummary, action: DialogAction) => {
+    (user: WorkOSUserSummary, action: DialogAction, deviceId?: string) => {
       listRequest.current?.abort()
       listRequest.current = null
       detailsRequest.current?.abort()
       detailsRequest.current = null
       setLoading(false)
-      setDialog({ user, action })
+      setDialog({ user, action, deviceId })
       setDialogError("")
       setNotice("")
       setPreviewNow(Date.now())
@@ -533,6 +539,9 @@ export function SubscriptionDashboard() {
         userId: dialog.user.id,
         expectedRevision: dialog.user.subscription?.revision ?? 0,
         reason: reason.trim(),
+        ...(dialog.action === "reset-device" && dialog.deviceId
+          ? { deviceId: dialog.deviceId }
+          : {}),
         ...(timed
           ? expiryMode === "date"
             ? { endsAt: explicitExpiry }
@@ -653,10 +662,12 @@ export function SubscriptionDashboard() {
                 </button>
                 <button
                   type="button"
-                  disabled={actionsDisabled || !user.subscription.device}
+                  disabled={
+                    actionsDisabled || !user.subscription.devices.length
+                  }
                   onClick={() => openDialog(user, "reset-device")}
                 >
-                  Reset Mac
+                  Reset all Macs
                 </button>
               </>
             )}
@@ -697,7 +708,7 @@ export function SubscriptionDashboard() {
           <p className={styles.eyebrow}>Administration · manual access</p>
           <h1>Subscriptions</h1>
           <p>
-            Manage trials, subscription expiry, and access to one Mac per
+            Manage trials, subscription expiry, and access to two Macs per
             account.
           </p>
         </div>
@@ -777,6 +788,14 @@ export function SubscriptionDashboard() {
           </div>
         </dl>
       </section>
+      <AdminSubscriptionRequests
+        disabled={actionsDisabled}
+        onReview={(user) => openDialog(user, "details")}
+      />
+      <AdminSubscriptionReminders
+        disabled={actionsDisabled}
+        onReview={(user) => openDialog(user, "details")}
+      />
       <section
         className={styles.tableSection}
         aria-labelledby="users-title"
@@ -953,13 +972,20 @@ export function SubscriptionDashboard() {
                     )}
                   </td>
                   <td>
-                    {user.subscription?.device ? (
+                    {user.subscription?.devices.length ? (
                       <>
-                        <span>Assigned</span>
+                        <span>
+                          {user.subscription.devices.length}/
+                          {user.subscription.deviceLimit} assigned
+                        </span>
                         <small>
-                          Since{" "}
+                          Latest{" "}
                           <DateTime
-                            value={user.subscription.device.activatedAt}
+                            value={Math.max(
+                              ...user.subscription.devices.map(
+                                (device) => device.activatedAt
+                              )
+                            )}
                           />
                         </small>
                       </>
@@ -1004,7 +1030,7 @@ export function SubscriptionDashboard() {
         )}
       </section>
       <footer className={styles.footer}>
-        One Mac per account. Dates use your browser’s time zone. Each
+        Up to two Macs per account. Dates use your browser’s time zone. Each
         subscription day adds 24 hours.
       </footer>
       {dialog && (
@@ -1038,7 +1064,9 @@ export function SubscriptionDashboard() {
                 : dialog.action === "extend"
                   ? "Extend subscription"
                   : dialog.action === "reset-device"
-                    ? "Reset Mac assignment?"
+                    ? dialog.deviceId
+                      ? "Reset this Mac assignment?"
+                      : "Reset all Mac assignments?"
                     : dialog.action === "update-notes"
                       ? "Edit account notes"
                       : `${dialog.action === "revoke" ? "Revoke" : "Restore"} access?`}
@@ -1164,8 +1192,9 @@ export function SubscriptionDashboard() {
                     <div className={styles.detailSection}>
                       <h3>Mac assignments</h3>
                       <p>
-                        One current Mac assignment is allowed. Resetting lets
-                        the account sign in on another Mac.
+                        Up to two current Mac assignments are allowed. Reset a
+                        chosen Mac to release its slot, or reset all Macs from
+                        the account actions.
                       </p>
                       {details.devices.length ? (
                         <ol className={styles.devices}>
@@ -1186,6 +1215,23 @@ export function SubscriptionDashboard() {
                               <small>
                                 Assigned <DateTime value={device.activatedAt} />
                               </small>
+                              {device.current && (
+                                <button
+                                  type="button"
+                                  className={styles.quiet}
+                                  disabled={actionsDisabled}
+                                  onClick={() =>
+                                    openDialog(
+                                      dialog.user,
+                                      "reset-device",
+                                      device.id
+                                    )
+                                  }
+                                  aria-label={`Reset Mac ${device.id}`}
+                                >
+                                  Reset this Mac
+                                </button>
+                              )}
                             </li>
                           ))}
                         </ol>
@@ -1344,7 +1390,7 @@ export function SubscriptionDashboard() {
                     <p>
                       {dialog.action === "extend"
                         ? `Adds time after ${dialog.user.subscription && dialog.user.subscription.endsAt > previewNow ? "the current expiry" : "now"}. Subscription type stays unchanged.`
-                        : `Starts a ${subscriptionType(selectedType).toLowerCase()} subscription now. Existing Mac assignment stays in place.`}
+                        : `Starts a ${subscriptionType(selectedType).toLowerCase()} subscription now. Existing Mac assignments stay in place.`}
                       {dialog.user.subscription?.status === "revoked" &&
                         (dialog.action === "extend"
                           ? " Access stays revoked; restore it separately."
@@ -1356,8 +1402,8 @@ export function SubscriptionDashboard() {
               {dialog.action === "revoke" && (
                 <p>
                   Revoke access for this account. The app will lose access when
-                  it next checks its subscription. Its expiry and Mac assignment
-                  stay recorded.
+                  it next checks its subscription. Its expiry and Mac
+                  assignments stay recorded.
                 </p>
               )}
               {dialog.action === "restore" && (
@@ -1367,15 +1413,25 @@ export function SubscriptionDashboard() {
                   {dialog.user.subscription &&
                   dialog.user.subscription.endsAt <= previewNow
                     ? " Its expiry has passed, so access will stay expired until you extend it."
-                    : " Its existing Mac assignment stays in place."}
+                    : " Its existing Mac assignments stay in place."}
                 </p>
               )}
               {dialog.action === "reset-device" && (
                 <p>
-                  Release the current Mac assignment{" "}
-                  <code>{dialog.user.subscription?.device?.id}</code>. The
-                  account can then sign in on another Mac. Its subscription
-                  type, status, and expiry stay the same.
+                  {dialog.deviceId ? (
+                    <>
+                      Release the chosen Mac assignment{" "}
+                      <code>{dialog.deviceId}</code>. Other connected Macs stay
+                      assigned.
+                    </>
+                  ) : (
+                    <>
+                      Release all current Mac assignments. Both Macs must sign
+                      in again to reconnect.
+                    </>
+                  )}{" "}
+                  The account can then use an available slot on another Mac. Its
+                  subscription type, status, and expiry stay the same.
                 </p>
               )}
               <div className={styles.formFields}>
@@ -1431,7 +1487,9 @@ export function SubscriptionDashboard() {
                       : dialog.action === "restore"
                         ? "Restore subscription"
                         : dialog.action === "reset-device"
-                          ? "Reset Mac assignment"
+                          ? dialog.deviceId
+                            ? "Reset Mac assignment"
+                            : "Reset all Mac assignments"
                           : dialog.action === "update-notes"
                             ? "Save notes"
                             : dialog.action === "extend"

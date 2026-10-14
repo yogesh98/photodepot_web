@@ -373,7 +373,7 @@ test("localhost signup, trial, Mac pairing, admin revocation and replacement use
   assert.equal(before.billingMode, "manual")
   assert.equal(before.overview.activeTrials, 1)
   assert.equal(before.overview.assignedMacs, 1)
-  assert.equal(before.users[0].subscription.device.id, firstMac.deviceId)
+  assert.equal(before.users[0].subscription.devices[0].id, firstMac.deviceId)
   const revoked = await admin("revoke", 2, cookie, {
     reason: "Local revocation test",
   })
@@ -389,7 +389,7 @@ test("localhost signup, trial, Mac pairing, admin revocation and replacement use
   const reset = await admin("reset-device", 4, cookie, {
     reason: "Local replacement Mac test",
   })
-  assert.equal(reset.device, null)
+  assert.deepEqual(reset.devices, [])
   assert.equal(reset.bindingRevision, 2)
   assert.equal((await verifyMac(firstMac, "revoked")).revision, 5)
   assert.equal((await pairing(firstMac, "poll", started.pairingId)).status, 409)
@@ -425,7 +425,7 @@ test("localhost signup, trial, Mac pairing, admin revocation and replacement use
   assert.equal(historyResponse.status, 200)
   const history = await historyResponse.json()
   assert.equal(history.subscription.endsAt, trial.endsAt)
-  assert.equal(history.subscription.device.id, replacement.deviceId)
+  assert.equal(history.subscription.devices[0].id, replacement.deviceId)
   assert.equal(history.devices.length, 2)
   assert.equal(history.devices.filter((device) => device.current).length, 1)
   const audit = await listSubscriptionAudit(env.DB, customerId)

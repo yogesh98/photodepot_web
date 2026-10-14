@@ -372,9 +372,16 @@ export async function handleAdminLogin(request: Request, env: Env) {
 export async function handleAccountLogin(request: Request, env: Env) {
   if (request.method !== "GET") return methodNotAllowed("GET")
   const code = new URL(request.url).searchParams.get("code")
-  if (!code || !/^[A-Za-z0-9_-]{43}$/.test(code))
+  if (code === null) return beginLogin(request, env, "account", "/account")
+  if (!/^[A-Za-z0-9_-]{43}$/.test(code))
     return json({ error: "Invalid Mac sign-in request." }, 400)
   return beginLogin(request, env, "account", `/account/activate?code=${code}`)
+}
+function validAccountReturnPath(value: string | undefined) {
+  return (
+    value === "/account" ||
+    /^\/account\/activate\?code=[A-Za-z0-9_-]{43}$/.test(value ?? "")
+  )
 }
 async function beginLogin(
   request: Request,
@@ -448,9 +455,7 @@ export async function handleAdminCallback(request: Request, env: Env) {
       transaction.origin !== config.origin ||
       !transaction.codeVerifier ||
       (config.audience === "account" &&
-        !/^\/account\/activate\?code=[A-Za-z0-9_-]{43}$/.test(
-          transaction.returnPath ?? ""
-        )) ||
+        !validAccountReturnPath(transaction.returnPath)) ||
       query.has("error") ||
       !query.get("code") ||
       query.get("code")!.length > 2000
@@ -492,9 +497,7 @@ export async function handleAdminCallback(request: Request, env: Env) {
       } else {
         if (
           config.audience === "account" &&
-          !/^\/account\/activate\?code=[A-Za-z0-9_-]{43}$/.test(
-            transaction.returnPath ?? ""
-          )
+          !validAccountReturnPath(transaction.returnPath)
         )
           throw new errors.JWTClaimValidationFailed(
             "Invalid account sign-in target",

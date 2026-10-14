@@ -111,6 +111,7 @@ before(async () => {
   await migrate("0004_account_devices.sql")
   await migrate("0005_account_pairings.sql")
   await migrate("0006_subscription_management.sql")
+  await migrate("0007_two_mac_assignments.sql")
 })
 
 after(async () => {
@@ -476,7 +477,8 @@ test("initial signup trials last exactly seven days and concurrent deliveries cr
   assert.equal(trial.endsAt, now + 7 * day)
   assert.equal(trial.revision, 1)
   assert.equal(trial.notes, "")
-  assert.equal(trial.device, null)
+  assert.deepEqual(trial.devices, [])
+  assert.equal(trial.deviceLimit, 2)
   const audit = await listSubscriptionAudit(database, userId)
   assert.equal(audit.length, 1)
   assert.equal(audit[0].action, "initial-trial")
@@ -693,14 +695,9 @@ test("overview includes all subscriptions and classifies expiration boundaries i
   await database.batch([
     database
       .prepare(
-        "INSERT INTO account_devices (device_id,user_id,public_key,binding_revision,activated_at) VALUES (?,'user_overview_standard','private-device-key',1,?)"
+        "INSERT INTO account_devices (device_id,user_id,public_key,binding_revision,activated_at,active) VALUES (?,'user_overview_standard','private-device-key',1,?,1)"
       )
       .bind(deviceId, now),
-    database
-      .prepare(
-        "UPDATE subscriptions SET current_device_id = ? WHERE user_id = 'user_overview_standard'"
-      )
-      .bind(deviceId),
   ])
   const result = await getSubscriptionOverview(database, now)
   for (const [field, added] of Object.entries({
@@ -721,11 +718,14 @@ test("overview includes all subscriptions and classifies expiration boundaries i
     "user_overview_standard",
     now
   )
-  assert.deepEqual(subscription.device, {
-    id: deviceId,
-    bindingRevision: 1,
-    activatedAt: now,
-  })
+  assert.deepEqual(subscription.devices, [
+    {
+      id: deviceId,
+      bindingRevision: 1,
+      assignmentRevision: 1,
+      activatedAt: now,
+    },
+  ])
   assert.equal(
     JSON.stringify(subscription).includes("private-device-key"),
     false

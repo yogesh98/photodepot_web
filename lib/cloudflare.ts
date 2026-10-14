@@ -11,6 +11,9 @@ export interface Env {
   WORKOS_REDIRECT_URI?: string
   WORKOS_WEBHOOK_SECRET?: string
   PHOTODEPOT_ENVIRONMENT?: string
+  PHOTODEPOT_REMINDER_TOKEN?: string
+  RESEND_API_KEY?: string
+  PHOTODEPOT_EMAIL_FROM?: string
 }
 
 export const privateHeaders = {

@@ -523,10 +523,7 @@ test("Mac reset retains prior identity proofs, expiry and type while advancing t
   const deviceId = "b".repeat(64)
   await env.DB.batch([
     env.DB.prepare(
-      "UPDATE subscriptions SET current_device_id = ? WHERE user_id = ?"
-    ).bind(deviceId, "user_api_trial"),
-    env.DB.prepare(
-      "INSERT INTO account_devices (device_id, user_id, public_key, binding_revision, activated_at) VALUES (?, ?, ?, 1, ?)"
+      "INSERT INTO account_devices (device_id, user_id, public_key, binding_revision, activated_at, active) VALUES (?, ?, ?, 1, ?, 1)"
     ).bind(deviceId, "user_api_trial", "fixture-public-key", Date.now()),
   ])
   const original = await env.DB.prepare(
@@ -545,11 +542,11 @@ test("Mac reset retains prior identity proofs, expiry and type while advancing t
   assert.equal(reset.endsAt, original.end_at)
   assert.equal(reset.revision, 2)
   const row = await env.DB.prepare(
-    "SELECT current_device_id, binding_revision FROM subscriptions WHERE user_id = ?"
+    "SELECT binding_revision FROM subscriptions WHERE user_id = ?"
   )
     .bind("user_api_trial")
     .first()
-  assert.deepEqual(row, { current_device_id: null, binding_revision: 2 })
+  assert.deepEqual(row, { binding_revision: 2 })
   assert.equal(await count("account_devices"), 1)
   const history = await (
     await api(undefined, "?userId=user_api_trial&history=1")
@@ -721,24 +718,30 @@ test("Mac assignment details exclude signing keys and reset reasons appear along
   const activatedAt = Date.now()
   await env.DB.batch([
     env.DB.prepare(
-      "UPDATE subscriptions SET current_device_id = ? WHERE user_id = ?"
-    ).bind(deviceId, "user_api_trial"),
-    env.DB.prepare(
-      "INSERT INTO account_devices (device_id,user_id,public_key,binding_revision,activated_at) VALUES (?,?,?,1,?)"
+      "INSERT INTO account_devices (device_id,user_id,public_key,binding_revision,activated_at,active) VALUES (?,?,?,1,?,1)"
     ).bind(deviceId, "user_api_trial", "secret-signing-key", activatedAt),
   ])
   const page = await (await api()).json()
-  assert.deepEqual(page.users[0].subscription.device, {
-    id: deviceId,
-    bindingRevision: 1,
-    activatedAt,
-  })
+  assert.deepEqual(page.users[0].subscription.devices, [
+    {
+      id: deviceId,
+      bindingRevision: 1,
+      assignmentRevision: 1,
+      activatedAt,
+    },
+  ])
   assert.equal(page.overview.assignedMacs, 1)
   const before = await (
     await api(undefined, "?history=1&userId=user_api_trial")
   ).json()
   assert.deepEqual(before.devices, [
-    { id: deviceId, bindingRevision: 1, activatedAt, current: true },
+    {
+      id: deviceId,
+      bindingRevision: 1,
+      assignmentRevision: 1,
+      activatedAt,
+      current: true,
+    },
   ])
   assert.equal(JSON.stringify(before).includes("secret-signing-key"), false)
   const reset = await api({
@@ -748,12 +751,18 @@ test("Mac assignment details exclude signing keys and reset reasons appear along
     reason: "Customer replaced their Mac",
   })
   assert.equal(reset.status, 200)
-  assert.equal((await reset.json()).subscription.device, null)
+  assert.deepEqual((await reset.json()).subscription.devices, [])
   const after = await (
     await api(undefined, "?history=1&userId=user_api_trial")
   ).json()
   assert.deepEqual(after.devices, [
-    { id: deviceId, bindingRevision: 1, activatedAt, current: false },
+    {
+      id: deviceId,
+      bindingRevision: 1,
+      assignmentRevision: 1,
+      activatedAt,
+      current: false,
+    },
   ])
   assert.equal(
     after.audit.find((entry) => entry.action === "reset-device").reason,
@@ -785,5 +794,107 @@ test("invalid notes, reasons and exact expiry fields fail before contacting Work
   )
   assert.equal(userRequests.length, 0)
   assert.equal(await count("subscriptions"), 0)
+  assert.equal(await count("subscription_audit"), 0)
+})
+
+test("targeted admin reset keeps the second Mac active and rejects an unknown or other account's assignment", async () => {
+  await api(setBody())
+  await api(setBody("user_api_regular", { type: "regular" }))
+  const firstMac = "a".repeat(64),
+    otherMac = "b".repeat(64),
+    foreignMac = "c".repeat(64)
+  const now = Date.now()
+  await env.DB.batch([
+    env.DB.prepare(
+      "INSERT INTO account_devices (device_id,user_id,public_key,binding_revision,activated_at,active) VALUES (?,'user_api_trial','first-public-key',1,?,1)"
+    ).bind(firstMac, now),
+    env.DB.prepare(
+      "INSERT INTO account_devices (device_id,user_id,public_key,binding_revision,activated_at,active) VALUES (?,'user_api_trial','other-public-key',1,?,1)"
+    ).bind(otherMac, now),
+    env.DB.prepare(
+      "INSERT INTO account_devices (device_id,user_id,public_key,binding_revision,activated_at,active) VALUES (?,'user_api_regular','foreign-public-key',1,?,1)"
+    ).bind(foreignMac, now),
+  ])
+  const original = (await (await api()).json()).users.find(
+    (user) => user.id === "user_api_trial"
+  ).subscription
+  assert.equal(original.devices.length, 2)
+  assert.equal(original.deviceLimit, 2)
+  for (const deviceId of ["d".repeat(64), foreignMac]) {
+    const rejected = await api({
+      action: "reset-device",
+      userId: "user_api_trial",
+      expectedRevision: 1,
+      deviceId,
+    })
+    assert.equal(rejected.status, 409)
+  }
+  assert.equal(await count("subscription_audit"), 2)
+  const reset = await api({
+    action: "reset-device",
+    userId: "user_api_trial",
+    expectedRevision: 1,
+    deviceId: firstMac,
+    reason: "Retired one Mac",
+  })
+  assert.equal(reset.status, 200)
+  const changed = (await reset.json()).subscription
+  assert.equal(changed.bindingRevision, original.bindingRevision)
+  assert.equal(changed.revision, 2)
+  assert.equal(changed.type, original.type)
+  assert.equal(changed.endsAt, original.endsAt)
+  assert.deepEqual(
+    changed.devices.map(({ id }) => id),
+    [otherMac]
+  )
+  const history = await (
+    await api(undefined, "?history=1&userId=user_api_trial")
+  ).json()
+  assert.equal(history.devices.find(({ id }) => id === firstMac).current, false)
+  assert.equal(
+    history.devices.find(({ id }) => id === firstMac).assignmentRevision,
+    2
+  )
+  assert.equal(history.devices.find(({ id }) => id === otherMac).current, true)
+  assert.equal(
+    history.audit.find(({ action }) => action === "reset-device").reason,
+    "Retired one Mac"
+  )
+  const foreign = (await (await api()).json()).users.find(
+    (user) => user.id === "user_api_regular"
+  ).subscription
+  assert.deepEqual(
+    foreign.devices.map(({ id }) => id),
+    [foreignMac]
+  )
+  const global = await api({
+    action: "reset-device",
+    userId: "user_api_trial",
+    expectedRevision: 2,
+  })
+  assert.equal(global.status, 200)
+  const allReset = (await global.json()).subscription
+  assert.deepEqual(allReset.devices, [])
+  assert.equal(allReset.bindingRevision, original.bindingRevision + 1)
+})
+
+test("admin device identifiers are validated before WorkOS lookup and only accepted for reset", async () => {
+  for (const deviceId of [null, 123, "invalid", "a".repeat(63), "A".repeat(64)])
+    assert.equal(
+      (
+        await api({
+          action: "reset-device",
+          userId: "user_api_trial",
+          expectedRevision: 1,
+          deviceId,
+        })
+      ).status,
+      400
+    )
+  assert.equal(
+    (await api(setBody(undefined, { deviceId: "a".repeat(64) }))).status,
+    400
+  )
+  assert.equal(userRequests.length, 0)
   assert.equal(await count("subscription_audit"), 0)
 })

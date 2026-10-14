@@ -2,6 +2,8 @@ import type { PagesFunction } from "@cloudflare/workers-types"
 import type { Env } from "../lib/cloudflare.ts"
 import {
   authenticateLicenseAdmin,
+  authenticateWorkOSAccount,
+  accountAuthPage,
   adminAuthPage,
   withAdminSession,
   type AdminAuth,
@@ -11,6 +13,34 @@ import {
 export const onRequest: PagesFunction<Env> = async (context) => {
   const path = new URL(context.request.url).pathname
   let adminAuth: AdminAuth | undefined
+  const accountPage =
+    ["/account", "/account/", "/account.html", "/account.txt"].includes(path) ||
+    path.startsWith("/account/__next.")
+  if (accountPage) {
+    const auth = await authenticateWorkOSAccount(
+      context.request as unknown as Request,
+      context.env
+    )
+    if (auth instanceof Response) {
+      if (
+        auth.status === 401 &&
+        ["GET", "HEAD"].includes(context.request.method)
+      )
+        return new Response(null, {
+          status: 302,
+          headers: {
+            Location: "/api/account/auth/login",
+            "Cache-Control": "private, no-store",
+            "Referrer-Policy": "no-referrer",
+            "X-Robots-Tag": "noindex, nofollow",
+          },
+        }) as unknown as Awaited<ReturnType<PagesFunction<Env>>>
+      return accountAuthPage(auth) as unknown as Awaited<
+        ReturnType<PagesFunction<Env>>
+      >
+    }
+    adminAuth = auth
+  }
   if (path === "/admin" || path.startsWith("/admin/")) {
     const auth = await authenticateLicenseAdmin(
       context.request as unknown as Request,
@@ -38,7 +68,7 @@ export const onRequest: PagesFunction<Env> = async (context) => {
     adminAuth = auth
   }
   const response = await context.next()
-  if (path === "/admin" || path.startsWith("/admin/")) {
+  if (accountPage || path === "/admin" || path.startsWith("/admin/")) {
     response.headers.set("Cache-Control", "private, no-store")
     response.headers.set("X-Robots-Tag", "noindex, nofollow")
     // Native POST forms need their same-origin Origin header for CSRF checks.

@@ -34,6 +34,9 @@ let platform, database, env, originalFetch, oldSubscription
 let requestCount = 0
 let sequence = 0
 const users = new Map()
+const migratedMac = device(),
+  migratedPreviousMac = device()
+const migratedUserId = "user_before_two_mac_migration"
 
 before(async () => {
   platform = await getPlatformProxy({
@@ -87,7 +90,44 @@ before(async () => {
   for (const filename of [
     "0005_account_pairings.sql",
     "0006_subscription_management.sql",
+    "0007_two_mac_assignments.sql",
   ]) {
+    if (filename === "0007_two_mac_assignments.sql") {
+      await database.batch([
+        database
+          .prepare(
+            "INSERT INTO subscriptions (id,user_id,type,status,started_at,end_at,updated_at,revision,binding_revision,current_device_id,notes) VALUES ('before-two-mac-migration',?,'regular','active',?,?,?,7,4,?,'Retained notes')"
+          )
+          .bind(
+            migratedUserId,
+            epoch,
+            epoch + 86_400_000,
+            epoch,
+            migratedMac.deviceId
+          ),
+        database
+          .prepare(
+            "INSERT INTO account_devices (device_id,user_id,public_key,binding_revision,activated_at) VALUES (?,?,?,4,?)"
+          )
+          .bind(
+            migratedMac.deviceId,
+            migratedUserId,
+            migratedMac.publicKeyEncoded,
+            epoch
+          ),
+        database
+          .prepare(
+            "INSERT INTO account_devices (device_id,user_id,public_key,binding_revision,activated_at) VALUES (?,?,?,3,?)"
+          )
+          .bind(
+            migratedPreviousMac.deviceId,
+            migratedUserId,
+            migratedPreviousMac.publicKeyEncoded,
+            epoch - 100
+          ),
+      ])
+      users.set(migratedUserId, { emailVerified: true })
+    }
     const sql = await readFile(
       new URL(`../migrations/${filename}`, import.meta.url),
       "utf8"
@@ -109,7 +149,8 @@ before(async () => {
     revision: 1,
     notes: "",
     bindingRevision: 1,
-    device: null,
+    devices: [],
+    deviceLimit: 2,
   }
   originalFetch = globalThis.fetch
   globalThis.fetch = async (url, options) => {
@@ -242,16 +283,17 @@ test("account device migration preserves subscriptions and grants no Mac assignm
     oldSubscription
   )
   const row = await database
-    .prepare(
-      "SELECT current_device_id, binding_revision FROM subscriptions WHERE user_id = ?"
-    )
+    .prepare("SELECT binding_revision FROM subscriptions WHERE user_id = ?")
     .bind(oldSubscription.userId)
     .first()
-  assert.deepEqual(row, { current_device_id: null, binding_revision: 1 })
+  assert.deepEqual(row, { binding_revision: 1 })
   assert.equal(
     (
       await database
-        .prepare("SELECT count(*) AS count FROM account_devices")
+        .prepare(
+          "SELECT count(*) AS count FROM account_devices WHERE user_id = ?"
+        )
+        .bind(oldSubscription.userId)
         .first()
     ).count,
     0
@@ -271,46 +313,113 @@ test("account device migration preserves subscriptions and grants no Mac assignm
   )
 })
 
-test("concurrent Mac sign-ins claim one slot, while reconnecting the same Mac is idempotent", async () => {
-  const userId = "user_one_mac"
-  const subscription = await assign(userId)
-  const macs = Array.from({ length: 6 }, device)
-  const results = await Promise.all(macs.map((mac) => bind(userId, mac)))
-  assert.equal(results.filter(Boolean).length, 1)
-  const index = results.findIndex(Boolean)
-  const current = results[index]
-  assert.equal(current.userId, userId)
-  assert.equal(current.publicKey, macs[index].publicKeyEncoded)
-  assert.equal(current.currentDeviceId, macs[index].deviceId)
-  assert.equal(current.bindingRevision, current.currentBindingRevision)
-  assert.equal(current.subscription.id, subscription.id)
-  assert.equal(current.subscription.revision, 2)
-  assert.deepEqual(await bind(userId, macs[index], epoch + 100), current)
-  assert.equal((await listSubscriptionAudit(database, userId)).length, 2)
+test("two-Mac migration preserves the current single Mac, notes and old revoked signing identities", async (t) => {
+  t.mock.method(Date, "now", () => epoch)
+  const subscription = await getSubscription(database, migratedUserId, epoch)
+  assert.equal(subscription.deviceLimit, 2)
+  assert.equal(subscription.revision, 7)
+  assert.equal(subscription.bindingRevision, 4)
+  assert.equal(subscription.notes, "Retained notes")
+  assert.deepEqual(subscription.devices, [
+    {
+      id: migratedMac.deviceId,
+      bindingRevision: 4,
+      assignmentRevision: 1,
+      activatedAt: epoch,
+    },
+  ])
   assert.equal(
-    await bindSubscriptionDevice(
-      database,
-      {
-        userId,
-        deviceId: macs[index].deviceId,
-        publicKey: macs[index].publicKeyEncoded,
-        expectedBindingRevision: current.currentBindingRevision + 1,
-      },
-      epoch + 200
-    ),
-    null
+    (await getSubscriptionDevice(database, migratedMac.deviceId, epoch)).active,
+    true
+  )
+  assert.equal(
+    (await getSubscriptionDevice(database, migratedPreviousMac.deviceId, epoch))
+      .active,
+    false
+  )
+  assert.equal(
+    (await receipt(await verifyRequest(migratedMac))).status,
+    "active"
+  )
+  assert.equal(
+    (await receipt(await verifyRequest(migratedPreviousMac))).status,
+    "revoked"
+  )
+  const auditBefore = await listSubscriptionAudit(database, migratedUserId)
+  assert.deepEqual(
+    (await bind(migratedUserId, migratedMac)).subscription,
+    subscription
   )
   assert.deepEqual(
-    await getSubscriptionDevice(database, macs[index].deviceId, epoch),
-    current
+    await listSubscriptionAudit(database, migratedUserId),
+    auditBefore
   )
-  assert.equal((await listSubscriptionAudit(database, userId)).length, 2)
-  for (const [other, mac] of macs.entries())
-    if (other !== index)
-      assert.equal(
-        await getSubscriptionDevice(database, mac.deviceId, epoch),
-        null
+})
+
+test("concurrent Mac sign-ins claim exactly two slots and reconnecting either current Mac is idempotent", async () => {
+  const userId = "user_two_macs"
+  const subscription = await assign(userId)
+  const macs = Array.from({ length: 8 }, device)
+  const results = await Promise.all(macs.map((mac) => bind(userId, mac)))
+  const winners = results.flatMap((result, index) =>
+    result ? [{ result, mac: macs[index] }] : []
+  )
+  assert.equal(winners.length, 2)
+  const currentSubscription = await getSubscription(database, userId, epoch)
+  assert.equal(currentSubscription.revision, 3)
+  assert.equal(currentSubscription.deviceLimit, 2)
+  assert.deepEqual(
+    currentSubscription.devices.map(({ id }) => id).sort(),
+    winners.map(({ mac }) => mac.deviceId).sort()
+  )
+  for (const { result, mac } of winners) {
+    assert.equal(result.userId, userId)
+    assert.equal(result.publicKey, mac.publicKeyEncoded)
+    assert.equal(result.active, true)
+    assert.equal(result.bindingRevision, result.currentBindingRevision)
+    assert.equal(result.subscription.id, subscription.id)
+    const reconnected = await bind(userId, mac, epoch + 100)
+    assert.equal(reconnected.active, true)
+    assert.deepEqual(reconnected.subscription, currentSubscription)
+    assert.deepEqual(
+      await getSubscriptionDevice(database, mac.deviceId, epoch),
+      reconnected
+    )
+    assert.equal(
+      await bindSubscriptionDevice(
+        database,
+        {
+          userId,
+          deviceId: mac.deviceId,
+          publicKey: mac.publicKeyEncoded,
+          expectedBindingRevision: result.currentBindingRevision + 1,
+        },
+        epoch + 200
+      ),
+      null
+    )
+  }
+  assert.equal((await listSubscriptionAudit(database, userId)).length, 3)
+  for (const mac of macs.filter(
+    (mac) => !winners.some((winner) => winner.mac === mac)
+  ))
+    assert.equal(
+      await getSubscriptionDevice(database, mac.deviceId, epoch),
+      null
+    )
+  await assert.rejects(
+    database
+      .prepare(
+        "INSERT INTO account_devices (device_id,user_id,public_key,binding_revision,activated_at,active) VALUES (?,?,?,1,?,1)"
       )
+      .bind("f".repeat(64), userId, "cannot-bypass-slots", epoch)
+      .run(),
+    /two connected Macs/
+  )
+  assert.equal(
+    (await getSubscription(database, userId, epoch)).devices.length,
+    2
+  )
 })
 
 test("a Mac cannot silently move between accounts, including after the old account resets it", async () => {
@@ -355,17 +464,18 @@ test("device reset rejects stale revisions and retains prior keys so replacement
     oldMac.deviceId,
     epoch + 100
   )
-  assert.equal(old.currentDeviceId, null)
+  assert.equal(old.active, false)
   assert.equal(old.publicKey, oldMac.publicKeyEncoded)
   assert.ok(old.bindingRevision < old.currentBindingRevision)
   const replacement = await bind(userId, newMac, epoch + 200)
   assert.equal(replacement.subscription.revision, 4)
-  assert.equal(replacement.currentDeviceId, newMac.deviceId)
+  assert.equal(replacement.active, true)
+  assert.equal(replacement.subscription.devices[0].id, newMac.deviceId)
   assert.equal(await bind(userId, oldMac, epoch + 300), null)
   assert.equal(
     (await getSubscriptionDevice(database, oldMac.deviceId, epoch + 300))
-      .currentDeviceId,
-    newMac.deviceId
+      .active,
+    false
   )
   assert.equal(first.subscription.id, replacement.subscription.id)
   assert.deepEqual(
@@ -667,4 +777,195 @@ test("a subscription-bound Mac cannot activate a legacy license key, including a
       .first(),
     null
   )
+})
+
+test("an individual reset invalidates only that Mac, preserves the other slot and rejects unauthorized or stale resets", async (t) => {
+  t.mock.method(Date, "now", () => epoch)
+  const userId = "user_individual_reset"
+  const unrelatedUser = "user_individual_reset_other"
+  await assign(userId)
+  await assign(unrelatedUser)
+  const firstMac = device(),
+    otherMac = device(),
+    replacementMac = device()
+  await bind(userId, firstMac)
+  await bind(userId, otherMac)
+  const before = await getSubscription(database, userId, epoch)
+  assert.equal(before.devices.length, 2)
+  await assert.rejects(
+    resetSubscriptionDevice(
+      database,
+      unrelatedUser,
+      1,
+      actor,
+      epoch,
+      "Wrong account",
+      firstMac.deviceId
+    ),
+    SubscriptionConflictError
+  )
+  await assert.rejects(
+    resetSubscriptionDevice(
+      database,
+      userId,
+      2,
+      actor,
+      epoch,
+      "Stale revision",
+      firstMac.deviceId
+    ),
+    SubscriptionConflictError
+  )
+  assert.deepEqual(await getSubscription(database, userId, epoch), before)
+  assert.equal((await listSubscriptionAudit(database, unrelatedUser)).length, 1)
+  const reset = await resetSubscriptionDevice(
+    database,
+    userId,
+    3,
+    actor,
+    epoch + 1,
+    "Lost Mac",
+    firstMac.deviceId
+  )
+  assert.equal(reset.revision, 4)
+  assert.equal(reset.bindingRevision, before.bindingRevision)
+  assert.deepEqual(
+    reset.devices.map(({ id }) => id),
+    [otherMac.deviceId]
+  )
+  const old = await getSubscriptionDevice(database, firstMac.deviceId, epoch)
+  assert.equal(old.active, false)
+  assert.equal(old.assignmentRevision, 2)
+  assert.equal(old.bindingRevision, old.currentBindingRevision)
+  assert.equal(old.publicKey, firstMac.publicKeyEncoded)
+  assert.equal(
+    (await getSubscriptionDevice(database, otherMac.deviceId, epoch)).active,
+    true
+  )
+  assert.equal((await receipt(await verifyRequest(firstMac))).status, "revoked")
+  assert.equal((await receipt(await verifyRequest(otherMac))).status, "active")
+  assert.equal(await bind(userId, firstMac), null)
+  const replacement = await bind(userId, replacementMac, epoch + 2)
+  assert.equal(replacement.subscription.revision, 5)
+  assert.deepEqual(
+    replacement.subscription.devices.map(({ id }) => id).sort(),
+    [otherMac.deviceId, replacementMac.deviceId].sort()
+  )
+  assert.equal((await receipt(await verifyRequest(firstMac))).status, "revoked")
+  assert.equal((await receipt(await verifyRequest(otherMac))).status, "active")
+  await assert.rejects(
+    resetSubscriptionDevice(
+      database,
+      userId,
+      5,
+      actor,
+      epoch + 3,
+      "Already reset",
+      firstMac.deviceId
+    ),
+    SubscriptionConflictError
+  )
+  assert.equal((await listSubscriptionAudit(database, userId)).length, 5)
+})
+
+test("an individual reset audit failure rolls back the Mac epoch and leaves both assignments active", async () => {
+  const userId = "user_individual_reset_atomic"
+  await assign(userId)
+  const firstMac = device(),
+    secondMac = device()
+  await bind(userId, firstMac)
+  await bind(userId, secondMac)
+  const before = await getSubscription(database, userId, epoch)
+  await database
+    .prepare(
+      `CREATE TRIGGER reject_individual_reset_audit BEFORE INSERT ON subscription_audit
+    WHEN NEW.action = 'reset-device' AND NEW.reason = 'reject-single-reset'
+    BEGIN SELECT RAISE(ABORT, 'single reset audit unavailable'); END`
+    )
+    .run()
+  try {
+    await assert.rejects(
+      resetSubscriptionDevice(
+        database,
+        userId,
+        3,
+        actor,
+        epoch + 1,
+        "reject-single-reset",
+        firstMac.deviceId
+      ),
+      /single reset audit unavailable/
+    )
+    assert.deepEqual(await getSubscription(database, userId, epoch), before)
+    const current = await getSubscriptionDevice(
+      database,
+      firstMac.deviceId,
+      epoch
+    )
+    assert.equal(current.assignmentRevision, 1)
+    assert.equal(current.active, true)
+    assert.equal((await listSubscriptionAudit(database, userId)).length, 3)
+  } finally {
+    await database.prepare("DROP TRIGGER reject_individual_reset_audit").run()
+  }
+})
+
+test("live verification rechecks resets, revocation and expiration after an in-flight WorkOS lookup", async (t) => {
+  let currentTime = epoch
+  t.mock.method(Date, "now", () => currentTime)
+  const savedFetch = globalThis.fetch
+  for (const action of ["individual-reset", "reset-all", "revoke", "expire"]) {
+    currentTime = epoch
+    const userId = `user_verify_race_${action.replaceAll("-", "_")}`
+    await assign(userId, { endsAt: epoch + 100 })
+    const mac = device()
+    await bind(userId, mac)
+    const otherMac = action === "individual-reset" ? device() : null
+    if (otherMac) await bind(userId, otherMac)
+    const original = await getSubscription(database, userId, epoch)
+    let latest = original
+    globalThis.fetch = async (...args) => {
+      const response = await savedFetch(...args)
+      if (action === "expire") currentTime = epoch + 100
+      else if (action === "revoke")
+        latest = await changeSubscription(
+          database,
+          userId,
+          "revoke",
+          original.revision,
+          actor,
+          undefined,
+          epoch
+        )
+      else
+        latest = await resetSubscriptionDevice(
+          database,
+          userId,
+          original.revision,
+          actor,
+          epoch,
+          "Changed during verification",
+          action === "individual-reset" ? mac.deviceId : undefined
+        )
+      return response
+    }
+    try {
+      const response = await verifyRequest(mac)
+      assert.equal(response.status, 200)
+      const payload = await receipt(response)
+      assert.equal(payload.status, "revoked", action)
+      assert.equal(payload.revision, latest.revision, action)
+      assert.equal(payload.issuedAt, currentTime)
+      if (otherMac) {
+        const other = await getSubscriptionDevice(
+          database,
+          otherMac.deviceId,
+          currentTime
+        )
+        assert.equal(other.active, true)
+      }
+    } finally {
+      globalThis.fetch = savedFetch
+    }
+  }
 })

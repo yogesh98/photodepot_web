@@ -10,6 +10,7 @@ import type {
 const millisecondsPerDay = 24 * 60 * 60 * 1000
 const maximumTimestamp = 8_640_000_000_000_000
 export const INITIAL_TRIAL_DAYS = 7
+export const SUBSCRIPTION_DEVICE_LIMIT = 2
 
 export interface SubscriptionRow {
   id: string
@@ -21,9 +22,8 @@ export interface SubscriptionRow {
   updated_at: number
   revision: number
   notes: string
-  current_device_id: string | null
   binding_revision: number
-  current_device_activated_at?: number | null
+  current_devices_json?: string
 }
 
 export class SubscriptionConflictError extends Error {
@@ -101,21 +101,21 @@ export function subscriptionSummary(
     revision: row.revision,
     notes: row.notes,
     bindingRevision: row.binding_revision,
-    device:
-      row.current_device_id && row.current_device_activated_at != null
-        ? {
-            id: row.current_device_id,
-            bindingRevision: row.binding_revision,
-            activatedAt: row.current_device_activated_at,
-          }
-        : null,
+    devices: JSON.parse(row.current_devices_json ?? "[]"),
+    deviceLimit: SUBSCRIPTION_DEVICE_LIMIT,
   }
 }
 
-const subscriptionQuery = `SELECT s.*, d.activated_at AS current_device_activated_at
-  FROM subscriptions s LEFT JOIN account_devices d
-    ON d.device_id = s.current_device_id AND d.user_id = s.user_id
-    AND d.binding_revision = s.binding_revision`
+export const subscriptionSelectFields = `s.*, (
+  SELECT COALESCE(json_group_array(json_object('id', mac.device_id,
+    'bindingRevision', mac.binding_revision, 'assignmentRevision', mac.assignment_revision,
+    'activatedAt', mac.activated_at)), '[]')
+  FROM (SELECT device_id, binding_revision, assignment_revision, activated_at FROM account_devices
+    WHERE user_id = s.user_id AND active = 1 AND binding_revision = s.binding_revision
+    ORDER BY activated_at, device_id) mac
+  ) AS current_devices_json`
+
+export const subscriptionQuery = `SELECT ${subscriptionSelectFields} FROM subscriptions s`
 
 export async function listSubscriptions(
   database: D1Database,
@@ -174,7 +174,8 @@ export async function getSubscriptionOverview(
        COALESCE(SUM(status = 'active' AND end_at <= ?), 0) AS expired,
        COALESCE(SUM(status = 'revoked'), 0) AS revoked,
        COALESCE(SUM(status = 'active' AND end_at > ? AND end_at <= ?), 0) AS expiringSoon,
-       COALESCE(SUM(current_device_id IS NOT NULL), 0) AS assignedMacs
+       (SELECT COUNT(*) FROM account_devices d JOIN subscriptions owner ON owner.user_id = d.user_id
+         WHERE d.active = 1 AND d.binding_revision = owner.binding_revision) AS assignedMacs
        FROM subscriptions`
     )
     .bind(now, now, now, now, now, expiringAt)

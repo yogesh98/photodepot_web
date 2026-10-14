@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import {
   createPrivateKey,
   createPublicKey,
@@ -43,6 +43,16 @@ export async function setupDevelopment(root, desktopDirectory) {
     ].join("\n")
   )
   const settings = parseEnv(await readFile(path, "utf8"))
+  if (!settings.PHOTODEPOT_REMINDER_TOKEN) {
+    settings.PHOTODEPOT_REMINDER_TOKEN = randomBytes(48).toString("base64url")
+    await writeFile(
+      path,
+      Object.entries(settings)
+        .map(([name, value]) => `${name}=${JSON.stringify(value)}`)
+        .join("\n") + "\n",
+      { mode: 0o600 }
+    )
+  }
   validateDevelopmentSettings(settings, false)
   const privateKey = createPrivateKey({
     key: Buffer.from(settings.PHOTODEPOT_LICENSE_SIGNING_PRIVATE_KEY, "base64"),
@@ -163,9 +173,14 @@ export async function main(args = process.argv.slice(2), root = repository) {
     )
     return
   }
+  if (command === "reminders") {
+    const settings = parseEnv(await readFile(join(root, secretsName), "utf8"))
+    console.log(await localReminderTick(settings))
+    return
+  }
   if (!["dev", "migrate"].includes(command))
     throw new Error(
-      "Usage: subscription-development.mjs setup --desktop-dir PATH | migrate | dev"
+      "Usage: subscription-development.mjs setup --desktop-dir PATH | migrate | dev | reminders"
     )
   const { runtime, persist } = await prepareDevelopment(root, command === "dev")
   const cli =
@@ -182,6 +197,51 @@ export async function main(args = process.argv.slice(2), root = repository) {
           "--persist-to",
           persist,
         ]
+  if (command === "dev") {
+    const settings = parseEnv(await readFile(join(root, secretsName), "utf8"))
+    const child = spawn(
+      process.execPath,
+      [resolve(root, "node_modules/wrangler/bin/wrangler.js"), ...cli],
+      {
+        cwd: runtime,
+        stdio: "inherit",
+        env: { ...process.env, WRANGLER_LOG_PATH: join(runtime, "logs") },
+      }
+    )
+    let running = false
+    const tick = async () => {
+      if (running) return
+      running = true
+      try {
+        await localReminderTick(settings)
+      } catch {
+        /* Local startup/network failure retries on the next tick. */
+      } finally {
+        running = false
+      }
+    }
+    const first = setTimeout(tick, 8_000),
+      timer = setInterval(tick, 60_000)
+    const stop = () => child.kill("SIGINT")
+    process.once("SIGINT", stop)
+    process.once("SIGTERM", stop)
+    try {
+      await new Promise((resolve, reject) => {
+        child.once("error", reject)
+        child.once("exit", (code, signal) =>
+          code === 0 || signal
+            ? resolve()
+            : reject(new Error("Local subscription dev failed."))
+        )
+      })
+    } finally {
+      clearTimeout(first)
+      clearInterval(timer)
+      process.removeListener("SIGINT", stop)
+      process.removeListener("SIGTERM", stop)
+    }
+    return
+  }
   // Pages reads settings before --cwd middleware runs. Start in the isolated
   // directory so every configuration lookup uses the same authority.
   const child = spawnSync(
@@ -196,6 +256,30 @@ export async function main(args = process.argv.slice(2), root = repository) {
   if (child.error) throw child.error
   if (child.status !== 0)
     throw new Error(`Local subscription ${command} failed.`)
+}
+
+export async function localReminderTick(settings, transport = fetch) {
+  if (
+    !settings.PHOTODEPOT_REMINDER_TOKEN ||
+    settings.PHOTODEPOT_REMINDER_TOKEN.length < 32
+  )
+    throw new Error(
+      "Run subscriptions:setup to create the local reminder scheduler token."
+    )
+  const response = await transport(
+    "http://localhost:8788/api/internal/subscription-reminders",
+    {
+      method: "POST",
+      redirect: "error",
+      signal: AbortSignal.timeout(180_000),
+      headers: {
+        Authorization: `Bearer ${settings.PHOTODEPOT_REMINDER_TOKEN}`,
+      },
+    }
+  )
+  if (!response.ok)
+    throw new Error(`Local reminders unavailable (${response.status})`)
+  return response.json()
 }
 
 if (
