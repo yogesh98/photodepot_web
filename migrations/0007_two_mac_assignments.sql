@@ -19,19 +19,21 @@ CREATE INDEX account_devices_active ON account_devices (user_id, active, binding
 
 -- The API checks capacity inside its transaction; these constraints also protect
 -- the invariant if another writer ever inserts or reactivates a device directly.
+-- Parenthesize CASE expressions: remote D1's statement splitter mistakes a bare
+-- CASE END for the trigger terminator, although local SQLite accepts both forms.
 CREATE TRIGGER account_devices_two_slot_insert BEFORE INSERT ON account_devices
 WHEN NEW.active = 1 AND NEW.binding_revision = (SELECT binding_revision FROM subscriptions WHERE user_id = NEW.user_id)
 BEGIN
-  SELECT CASE WHEN (SELECT COUNT(*) FROM account_devices d JOIN subscriptions s ON s.user_id = d.user_id
+  SELECT (CASE WHEN (SELECT COUNT(*) FROM account_devices d JOIN subscriptions s ON s.user_id = d.user_id
     WHERE d.user_id = NEW.user_id AND d.device_id != NEW.device_id AND d.active = 1 AND d.binding_revision = s.binding_revision) >= 2
-    THEN RAISE(ABORT, 'Account already has two connected Macs') END;
+    THEN RAISE(ABORT, 'Account already has two connected Macs') END);
 END;
 CREATE TRIGGER account_devices_two_slot_update BEFORE UPDATE OF active, binding_revision, user_id ON account_devices
 WHEN NEW.active = 1 AND NEW.binding_revision = (SELECT binding_revision FROM subscriptions WHERE user_id = NEW.user_id)
 BEGIN
-  SELECT CASE WHEN (SELECT COUNT(*) FROM account_devices d JOIN subscriptions s ON s.user_id = d.user_id
+  SELECT (CASE WHEN (SELECT COUNT(*) FROM account_devices d JOIN subscriptions s ON s.user_id = d.user_id
     WHERE d.user_id = NEW.user_id AND d.device_id != NEW.device_id AND d.active = 1 AND d.binding_revision = s.binding_revision) >= 2
-    THEN RAISE(ABORT, 'Account already has two connected Macs') END;
+    THEN RAISE(ABORT, 'Account already has two connected Macs') END);
 END;
 
 -- Legacy bindings omit the active column. Admit them only when the old backend
