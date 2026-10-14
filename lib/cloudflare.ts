@@ -3,7 +3,9 @@ import type { D1Database, R2Bucket } from "@cloudflare/workers-types"
 export interface Env {
   DOWNLOADS: R2Bucket
   DB: D1Database
-  PHOTODEPOT_DOWNLOAD_PASSWORD?: string
+  PHOTODEPOT_LICENSE_SIGNING_PRIVATE_KEY?: string
+  PHOTODEPOT_ACCESS_ISSUER?: string
+  PHOTODEPOT_ACCESS_AUDIENCE?: string
 }
 
 export const privateHeaders = {
@@ -55,13 +57,4 @@ export async function readJson(request: Request) {
 
 export function sameOrigin(request: Request) {
   return request.headers.get("origin") === new URL(request.url).origin
-}
-
-export function cookieValue(request: Request, name: string) {
-  return request.headers
-    .get("cookie")
-    ?.split(";")
-    .map((part) => part.trim())
-    .find((part) => part.startsWith(`${name}=`))
-    ?.slice(name.length + 1)
 }

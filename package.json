@@ -18,7 +18,6 @@
     "functions:build": "wrangler pages functions build --outdir .wrangler/functions --compatibility-date 2026-10-08 --compatibility-flags nodejs_compat",
     "cf:login": "wrangler login --scopes account:read user:read workers:write d1:write pages:write zone:read",
     "cf:setup": "node scripts/cloudflare.mjs setup",
-    "cf:password": "wrangler pages secret put PHOTODEPOT_DOWNLOAD_PASSWORD --project-name photodepot-web",
     "db:migrate": "wrangler d1 migrations apply DB --remote",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
     "waitlist:export": "wrangler d1 execute DB --remote --command \"SELECT * FROM waitlist ORDER BY id\" --json",

@@ -1,4 +1,8 @@
-import type { Architecture } from "./download-auth.ts"
+export type Architecture = "arm64" | "x64"
+
+export function isArchitecture(value: string): value is Architecture {
+  return value === "arm64" || value === "x64"
+}
 
 // Versioned R2 object keys, shared by the API and release upload script.
 export const DOWNLOAD_FILES: Record<Architecture, string> = {

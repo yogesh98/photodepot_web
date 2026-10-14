@@ -10,7 +10,7 @@ export function DownloadActions() {
 
   return (
     <>
-      <DownloadButtons waitlistHandle={waitlistHandle} />
+      <DownloadButtons />
       <WaitlistButton handle={waitlistHandle} />
     </>
   )

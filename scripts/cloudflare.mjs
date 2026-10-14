@@ -68,7 +68,7 @@ async function setup() {
     ])
   wrangler(["d1", "migrations", "apply", "DB", "--remote"])
   console.log(
-    "Resources ready. Keep the R2 bucket private; set the Pages password secret and upload installers before deployment."
+    "Resources ready. Keep the R2 bucket private and upload installers before deployment."
   )
 }
 
