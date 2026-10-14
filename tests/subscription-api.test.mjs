@@ -631,14 +631,8 @@ test("dashboard overview counts the whole subscription database rather than the 
     asOf: now,
     expiringWithinDays: 7,
   })
-  assert.equal(page.environment, "production")
   assert.equal(page.billingMode, "manual")
-  assert.equal(page.trialDays, 7)
-  const development = await handleAdminSubscriptions(
-    request("", undefined, { cookie: await cookie() }),
-    { ...env, PHOTODEPOT_ENVIRONMENT: "development" }
-  )
-  assert.equal((await development.json()).environment, "development")
+  assert.equal("trialDays" in page, false)
 })
 
 test("exact grant and extension dates, administrator notes and reasons are persisted with guarded audits", async (t) => {

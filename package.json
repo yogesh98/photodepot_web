@@ -25,10 +25,6 @@
     "downloads:upload": "node scripts/cloudflare.mjs upload",
     "downloads:upload:local": "node scripts/cloudflare.mjs upload --local",
     "deploy": "pnpm build && pnpm functions:build && node scripts/cloudflare.mjs deploy",
-    "subscriptions:setup": "node scripts/subscription-development.mjs setup",
-    "subscriptions:migrate": "node scripts/subscription-development.mjs migrate",
-    "subscriptions:dev": "pnpm build && pnpm subscriptions:migrate && node scripts/subscription-development.mjs dev",
-    "subscriptions:reminders": "node scripts/subscription-development.mjs reminders",
     "reminders:build": "wrangler deploy --config wrangler.reminders.jsonc --dry-run --outdir .wrangler/reminders-build",
     "reminders:deploy": "wrangler deploy --config wrangler.reminders.jsonc"
   },

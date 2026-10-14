@@ -39,7 +39,6 @@ type PendingDialog = {
 type UserPage = {
   users: WorkOSUserSummary[]
   nextCursor: string | null
-  environment: "production" | "development"
   overview: SubscriptionOverview
 }
 type AccountDetails = {
@@ -246,7 +245,6 @@ function validatePage(result: UserPage) {
   if (
     !Array.isArray(result?.users) ||
     !(result.nextCursor === null || typeof result.nextCursor === "string") ||
-    !["production", "development"].includes(result.environment) ||
     !result.overview
   )
     throw new Error("Unable to read subscription data. Try again.")
@@ -257,9 +255,6 @@ export function SubscriptionDashboard() {
   const [users, setUsers] = useState<WorkOSUserSummary[]>([])
   const [cursor, setCursor] = useState<string | null>(null)
   const [overview, setOverview] = useState<SubscriptionOverview | null>(null)
-  const [environment, setEnvironment] = useState<
-    UserPage["environment"] | null
-  >(null)
   const [hasLoaded, setHasLoaded] = useState(false)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
@@ -337,7 +332,6 @@ export function SubscriptionDashboard() {
         setUsers((previous) => mergeUsers(next ? previous : [], incoming))
         setCursor(nextCursor)
         setOverview(first.overview)
-        setEnvironment(first.environment)
         pageCount.current = next ? pageCount.current + 1 : pages
         setHasLoaded(true)
         setLastUpdated(Date.now())
@@ -683,19 +677,6 @@ export function SubscriptionDashboard() {
           photodepot
         </Link>
         <div className={styles.accountActions}>
-          <span
-            className={
-              environment === "development"
-                ? styles.development
-                : styles.environment
-            }
-          >
-            {environment === "development"
-              ? "Development"
-              : environment === "production"
-                ? "Production"
-                : "Checking environment…"}
-          </span>
           <form action="/api/auth/logout" method="post">
             <button type="submit" className={styles.quiet} disabled={busy}>
               Sign out
@@ -723,15 +704,9 @@ export function SubscriptionDashboard() {
           {loading && hasLoaded ? "Refreshing…" : "Refresh"}
         </button>
       </div>
-      {environment === "development" && (
-        <p className={styles.environmentNotice}>
-          Development environment. Changes apply only to the local development
-          database and app builds connected to this environment.
-        </p>
-      )}
       <p className={styles.policy}>
-        New signups receive a 7-day free trial. Admins manage access manually.
-        No payment is collected.
+        Access is assigned manually by an Owner. Creating an account does not
+        grant access. No payment is collected.
       </p>
       {error && (
         <ErrorMessage message={error} sessionExpired={sessionExpired} />
@@ -753,7 +728,7 @@ export function SubscriptionDashboard() {
       >
         <div className={styles.sectionHeading}>
           <h2 id="overview-title">Access overview</h2>
-          <p>Across all recorded subscriptions in this environment.</p>
+          <p>Across all recorded subscriptions.</p>
         </div>
         <dl className={styles.cards}>
           <div>
@@ -1039,10 +1014,7 @@ export function SubscriptionDashboard() {
           onClose={closeDialog}
         >
           <div className={styles.dialogHeading}>
-            <p className={styles.eyebrow}>
-              {environment === "development" ? "Development" : "Production"} ·
-              account access
-            </p>
+            <p className={styles.eyebrow}>Account access</p>
             <button
               type="button"
               className={styles.quiet}

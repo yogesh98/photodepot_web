@@ -38,7 +38,6 @@ before(async () => {
   })
   env = {
     ...platform.env,
-    PHOTODEPOT_ENVIRONMENT: "production",
     WORKOS_CLIENT_ID: "client_reminder_delivery_guards",
     WORKOS_API_KEY: "sk_test_delivery_guard_fixture",
     WORKOS_REDIRECT_URI: "https://photodepot.app/api/auth/callback",

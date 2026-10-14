@@ -95,8 +95,8 @@ signs are literal; there is no Next.js-style variable expansion.
 
 ### Downloads and releases
 
-Version 0.2.0 provides account sign-in, seven-day trials, and up to two connected
-Macs. Both signed, notarized installers are published together.
+Version 0.2.0 provides account sign-in, administrator-assigned subscriptions, and
+up to two connected Macs. Both signed, notarized installers are published together.
 
 For that release, keep DMGs in the ignored `downloads/` folder, **outside `public/`**:
 
@@ -195,7 +195,7 @@ and static asset leakage prevention.
 The dashboard and customer account browser tests run against the built site and
 isolated mock APIs. They cover manual grants, extensions, notes, revocation,
 restoration, individual Mac resets, customer requests, admin review, reminder
-previews, filtering, pagination, stale edits, session errors, and mobile keyboard
+delivery settings, filtering, pagination, stale edits, session errors, and mobile keyboard
 access. Run them separately with an LTS Node.js release:
 
 ```sh
@@ -220,7 +220,7 @@ Photography credits are in `public/photography/pexels/README.md`; the Inter font
 
 ## Account subscriptions
 
-Subscription administration is available at `/admin/subscriptions`. Each new account automatically receives a seven-day trial starting at its WorkOS signup timestamp. The signed `user.created` notification activates the trial immediately; successful verified account sign-in provides the same idempotent fallback. Neither path renews an expired trial or overwrites an admin grant or revocation. Signups never receive administration membership. Only the `owner` role in `WORKOS_ADMIN_ORGANIZATION_ID` can manage access. See [subscription setup and protocol](deploy/LICENSES.md).
+Subscription administration is available at `/admin/subscriptions`. Creating an account or signing in does not grant access. An Owner must manually assign Trial or Standard access to each approved account. Signups never receive administration membership. Only the `owner` role in `WORKOS_ADMIN_ORGANIZATION_ID` can manage access. See [subscription setup and protocol](deploy/LICENSES.md).
 
 Set `WORKOS_CLIENT_ID`, `WORKOS_ADMIN_ORGANIZATION_ID`,
 `WORKOS_REDIRECT_URI=https://photodepot.app/api/auth/callback`, and a random
@@ -228,13 +228,12 @@ Set `WORKOS_CLIENT_ID`, `WORKOS_ADMIN_ORGANIZATION_ID`,
 The server uses PKCE and encrypted HttpOnly session cookies. Add the server-only
 encrypted `WORKOS_API_KEY` secret for listing users and checking account status.
 Never include the key in browser assets or desktop builds. Apply D1
-migrations through `0009` before starting the updated backend. Register a WorkOS
-`user.created` webhook at `https://photodepot.app/api/account/webhook` and store its
-signing secret as `WORKOS_WEBHOOK_SECRET`. The handler validates the signature and
-bounded raw request body before granting access. Without a webhook, signup during
-desktop sign-in still activates the trial through the authenticated callback.
+migrations through `0009` before starting the updated backend. The existing
+`https://photodepot.app/api/account/webhook` endpoint still acknowledges signed
+WorkOS notifications when `WORKOS_WEBHOOK_SECRET` is configured, but it does not
+read or change subscriptions. A webhook is not required for manual access grants.
 
-The dashboard shows its environment, whole-database subscription totals, trials,
+The dashboard shows whole-database subscription totals, trials,
 expirations in the next seven days, and Mac assignments. Search and status/type
 filters apply to loaded WorkOS users, with explicit pagination. Admins can grant
 Trial or Standard access by duration or exact end date, extend, revoke, restore,
@@ -277,50 +276,12 @@ Admin reviews use revision checks and retain a separate administrator audit.
 
 The admin dashboard lists active trials and standard subscriptions ending within
 seven days. Trial reminder messages are prepared once per trial term during the
-final 48 hours. The queue also shows delivery status, development previews, and
+final 48 hours. The queue also shows delivery status, message history, and
 failed or uncertain attempts. Select **Check reminders now** to process due
 trials; this uses the same routine as the scheduled worker.
 
-Development always saves previews and sends no email. Production delivery stays
-disabled until a provider and sender are configured; no production email settings
-or scheduled worker are deployed by this change. The optional Resend adapter,
-worker setup, and hourly due-reminder checks are documented in
+Email delivery is disabled until a provider and sender are configured.
+The optional Resend adapter, worker setup, and hourly due-reminder
+checks are documented in
 [the reminder worker guide](workers/README.md). Standard plans appear in the
 renewal queue but do not receive the trial email.
-
-### Local subscription development
-
-Run from this website repository, passing the actual desktop checkout directory:
-
-```sh
-pnpm subscriptions:setup --desktop-dir /path/to/photodepot
-```
-
-This creates untracked `.dev.vars.development` containing a new server signing key
-and cookie secret, and writes the matching public key and localhost URL to the
-desktop's `.env.development`. Re-running retains both identities and refuses to
-overwrite a different desktop authority. Add your **WorkOS Development** client
-ID, API key (`sk_test_…`), and admin organization ID to `.dev.vars.development`.
-Register `http://localhost:8788/api/auth/callback` in that WorkOS environment and
-assign your administrator the `owner` role in the configured organization. Keep
-Member as the default role. These are real WorkOS sessions; there is no dev login
-bypass. A localhost webhook is optional because the signup callback grants trials.
-
-```sh
-# Website: builds assets, applies local migrations, starts http://localhost:8788
-pnpm subscriptions:dev
-# Desktop: in its checkout, opens a build using .env.development
-pnpm dev:subscriptions
-```
-
-Visit `http://localhost:8788/admin/subscriptions` to edit local access. The dev
-dashboard uses a dedicated local D1 database under
-`.wrangler/subscription-development/state`, a local R2 binding, and its own
-Wrangler working directory. It never loads the production `.dev.vars` file.
-The desktop has separate user data and a separate Mac identity; packaged dev
-builds also have a distinct name and app ID. Production remains the default
-profile for releases. Dev trials and admin mutations do not change production.
-The local development server checks due trial reminders every minute and saves
-their previews. Visit `/account` to submit a local customer request and
-`/admin/subscriptions` to review it or inspect the reminder preview; no email is
-sent from this environment.

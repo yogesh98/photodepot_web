@@ -20,7 +20,6 @@ import {
   changeSubscription,
   getSubscription,
   getSubscriptionOverview,
-  INITIAL_TRIAL_DAYS,
   listSubscriptionAudit,
   listSubscriptions,
   setSubscription,
@@ -31,7 +30,6 @@ import {
   listSubscriptionDevices,
   resetSubscriptionDevice,
 } from "../../../lib/subscription-devices.ts"
-import { subscriptionEnvironment } from "../../../lib/subscription-environment.ts"
 
 export async function handleAdminSubscriptions(request: Request, env: Env) {
   const auth = await authenticateLicenseAdmin(request, env)
@@ -41,7 +39,6 @@ export async function handleAdminSubscriptions(request: Request, env: Env) {
 
 async function authorized(request: Request, env: Env, auth: AdminAuth) {
   try {
-    const environment = subscriptionEnvironment(env)
     if (request.method === "GET") {
       const query = new URL(request.url).searchParams
       const now = Date.now()
@@ -80,9 +77,7 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
         })),
         nextCursor: page.nextCursor,
         overview,
-        environment,
         billingMode: "manual",
-        trialDays: INITIAL_TRIAL_DAYS,
       })
     }
     if (request.method !== "POST") {

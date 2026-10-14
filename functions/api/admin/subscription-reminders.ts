@@ -52,7 +52,7 @@ export async function handleAdminReminders(request: Request, env: Env) {
         : json(
             {
               error:
-                "Reminder queue is unavailable. Configure delivery settings for production sending.",
+                "Reminder queue is unavailable. Configure email delivery settings to send reminders.",
             },
             503
           )

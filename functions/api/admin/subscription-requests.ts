@@ -11,7 +11,6 @@ import {
   type Env,
 } from "../../../lib/cloudflare.ts"
 import { listSubscriptions } from "../../../lib/subscription-store.ts"
-import { subscriptionEnvironment } from "../../../lib/subscription-environment.ts"
 import { getWorkOSUser } from "../../../lib/workos-users.ts"
 import {
   AccountRequestConflictError,
@@ -28,7 +27,6 @@ export async function handleAdminSubscriptionRequests(
   const auth = await authenticateLicenseAdmin(request, env)
   if (auth instanceof Response) return auth
   try {
-    const environment = subscriptionEnvironment(env)
     if (request.method === "GET") {
       const query = new URL(request.url).searchParams
       if (query.has("requestId")) {
@@ -76,7 +74,6 @@ export async function handleAdminSubscriptionRequests(
       return withAdminSession(
         json({
           ...queue,
-          environment,
           requests: queue.requests.map((item) => ({
             ...item,
             subscription: subscriptions.get(item.userId) ?? null,

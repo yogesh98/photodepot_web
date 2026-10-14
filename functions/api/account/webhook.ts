@@ -1,8 +1,6 @@
 import { WorkOS } from "@workos-inc/node"
 import type { PagesFunction } from "@cloudflare/workers-types"
 import { BodyError, json, readText, type Env } from "../../../lib/cloudflare.ts"
-import { activateSignupTrial } from "../../../lib/subscription-signup.ts"
-import { subscriptionEnvironment } from "../../../lib/subscription-environment.ts"
 
 export async function handleAccountWebhook(request: Request, env: Env) {
   if (request.method !== "POST") {
@@ -17,12 +15,10 @@ export async function handleAccountWebhook(request: Request, env: Env) {
   const signature = request.headers.get("workos-signature")
   if (!signature) return json({ error: "Invalid notification." }, 401)
   try {
-    subscriptionEnvironment(env)
     const payload = await readText(request)
-    let event
     try {
       // Verify the exact body bytes, including whitespace, before trusting a user ID.
-      event = await new WorkOS({
+      await new WorkOS({
         clientId: env.WORKOS_CLIENT_ID,
       }).webhooks.constructEvent({
         payload,
@@ -32,14 +28,14 @@ export async function handleAccountWebhook(request: Request, env: Env) {
     } catch {
       return json({ error: "Invalid notification." }, 401)
     }
-    if (event.event !== "user.created") return json({ received: true })
-    await activateSignupTrial(env.DB, event.data)
+    // Acknowledge existing webhook deliveries. Access is granted only by
+    // an Owner; neither signup notifications nor account sign-in grant access.
     return json({ received: true })
   } catch (error) {
     if (error instanceof BodyError)
       return json({ error: "Invalid notification." }, error.status)
-    console.error("Signup subscription service unavailable")
-    return json({ error: "Signup subscription service unavailable." }, 503)
+    console.error("Account notification service unavailable")
+    return json({ error: "Account notification service unavailable." }, 503)
   }
 }
 

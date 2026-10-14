@@ -4,7 +4,6 @@ import { after, before, test } from "node:test"
 import { getPlatformProxy, unstable_splitSqlQuery } from "wrangler"
 import {
   changeSubscription,
-  ensureInitialTrial,
   getSubscriptionOverview,
   getSubscription,
   listSubscriptionAudit,
@@ -461,108 +460,6 @@ test("subscription lookup limits SQL parameters, deduplicates users and returns 
   assert.deepEqual(result.get(users[0]), { ...first, status: "expired" })
   assert.deepEqual(result.get(users.at(-1)), last)
   assert.equal(result.has(users[1]), false)
-})
-
-test("initial signup trials last exactly seven days and concurrent deliveries create one audited grant", async () => {
-  const userId = "user_signup_trial"
-  const results = await Promise.all(
-    Array.from({ length: 8 }, () =>
-      ensureInitialTrial(database, userId, now, now + 100)
-    )
-  )
-  assert.ok(results.every((result) => result.id === results[0].id))
-  const trial = results[0]
-  assert.equal(trial.type, "trial")
-  assert.equal(trial.startsAt, now)
-  assert.equal(trial.endsAt, now + 7 * day)
-  assert.equal(trial.revision, 1)
-  assert.equal(trial.notes, "")
-  assert.deepEqual(trial.devices, [])
-  assert.equal(trial.deviceLimit, 2)
-  const audit = await listSubscriptionAudit(database, userId)
-  assert.equal(audit.length, 1)
-  assert.equal(audit[0].action, "initial-trial")
-  assert.equal(audit[0].actor, "system:signup")
-  assert.equal(audit[0].reason, "")
-  const repeated = await ensureInitialTrial(
-    database,
-    userId,
-    now + day,
-    now + 7 * day
-  )
-  assert.deepEqual(repeated, { ...trial, status: "expired" })
-  assert.equal((await listSubscriptionAudit(database, userId)).length, 1)
-})
-
-test("signup delivery never replaces expired trials, revoked access or administrator grants", async () => {
-  const expired = await ensureInitialTrial(
-    database,
-    "user_signup_old",
-    now - 30 * day,
-    now
-  )
-  assert.equal(expired.status, "expired")
-  assert.equal(expired.endsAt, now - 23 * day)
-  for (const status of ["regular", "revoked", "expired"]) {
-    const userId = `user_signup_existing_${status}`
-    let original = await set(userId, {
-      type: "regular",
-      notes: "Admin decision",
-    })
-    if (status === "revoked")
-      original = await changeSubscription(
-        database,
-        userId,
-        "revoke",
-        1,
-        actor,
-        undefined,
-        now
-      )
-    const at = status === "expired" ? now + 31 * day : now
-    const before = await getSubscription(database, userId, at)
-    const auditsBefore = await listSubscriptionAudit(database, userId)
-    assert.deepEqual(await ensureInitialTrial(database, userId, at, at), before)
-    assert.deepEqual(
-      await listSubscriptionAudit(database, userId),
-      auditsBefore
-    )
-    assert.equal(before.id, original.id)
-  }
-})
-
-test("failed automatic trial audits roll back access and invalid signup dates never write", async () => {
-  await database
-    .prepare(
-      `CREATE TRIGGER reject_initial_trial_audit BEFORE INSERT ON subscription_audit
-     WHEN NEW.action = 'initial-trial' BEGIN SELECT RAISE(ABORT, 'initial audit unavailable'); END`
-    )
-    .run()
-  try {
-    await assert.rejects(
-      ensureInitialTrial(database, "user_signup_atomic", now, now),
-      /initial audit unavailable/
-    )
-    assert.equal(
-      await getSubscription(database, "user_signup_atomic", now),
-      null
-    )
-    assert.deepEqual(
-      await listSubscriptionAudit(database, "user_signup_atomic"),
-      []
-    )
-  } finally {
-    await database.prepare("DROP TRIGGER reject_initial_trial_audit").run()
-  }
-  for (const startedAt of [Number.NaN, -1, now + 1, 8_640_000_000_000_000])
-    await assert.rejects(
-      ensureInitialTrial(database, "user_signup_invalid", startedAt, now),
-      TypeError
-    )
-  assert.equal(
-    await getSubscription(database, "user_signup_invalid", now),
-    null
-  )
 })
 
 test("administrator notes and action reasons preserve access and participate in revision guards", async () => {

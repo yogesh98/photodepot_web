@@ -99,8 +99,12 @@ const rows = () =>
     .all()
     .then((result) => result.results)
 
-test("only active trials in the next48h get one term-specific message; repeated development runs only preview", async () => {
-  const dev = { ...env, PHOTODEPOT_ENVIRONMENT: "development" }
+test("absent mail settings disable delivery; configured mail only sends one message per active trial in the next 48h", async () => {
+  const unconfigured = {
+    ...env,
+    RESEND_API_KEY: undefined,
+    PHOTODEPOT_EMAIL_FROM: undefined,
+  }
   await grant("user_due", now + 2 * day)
   await grant("user_later", now + 2 * day + 1)
   await grant("user_regular", now + day, "regular")
@@ -116,25 +120,39 @@ test("only active trials in the next48h get one term-specific message; repeated 
     now
   )
   const unexpected = () => {
-    throw new Error("Dev must never send mail")
+    throw new Error("Unconfigured delivery must never send mail")
   }
-  const result = await runSubscriptionReminders(dev, { now, fetch: unexpected })
-  assert.equal(result.preview, 1)
+  await assert.rejects(
+    runSubscriptionReminders(unconfigured, { now, fetch: unexpected }),
+    /not configured/
+  )
+  assert.deepEqual(await rows(), [])
+  assert.deepEqual(lookups, [])
+  const disabledQueue = await subscriptionReminderQueue(unconfigured, now)
+  assert.equal(disabledQueue.mode, "disabled")
+  assert.deepEqual(disabledQueue.outbox, [])
+
+  const transport = async (url) => {
+    assert.equal(url, "https://api.resend.com/emails")
+    return Response.json({ id: "email_sent" })
+  }
+  const result = await runSubscriptionReminders(env, { now, fetch: transport })
+  assert.equal(result.sent, 1)
   assert.equal(
-    (await runSubscriptionReminders(dev, { now, fetch: unexpected })).processed,
+    (await runSubscriptionReminders(env, { now, fetch: unexpected })).processed,
     0
   )
   const [mail] = await rows()
-  assert.equal(mail.status, "preview")
-  assert.equal(mail.attempts, 0)
+  assert.equal(mail.status, "sent")
+  assert.equal(mail.attempts, 1)
   assert.ok(mail.message.includes("https://photodepot.app/account"))
   assert.ok(mail.message.includes("No payment"))
   assert.equal(mail.recipient, "user_due@example.test")
-  const queue = await subscriptionReminderQueue(dev, now)
-  assert.equal(queue.mode, "preview")
+  const queue = await subscriptionReminderQueue(env, now)
+  assert.equal(queue.mode, "resend")
   assert.equal(queue.upcoming.length, 3)
 })
-test("concurrent production jobs send once, preserve provider idempotency, and wait for acknowledgement", async () => {
+test("concurrent jobs with configured mail send once, preserve provider idempotency, and wait for acknowledgement", async () => {
   await grant("user_due")
   const messages = []
   const transport = async (url, options) => {
@@ -337,7 +355,7 @@ test("a changed account email cancels an uncertain delivery instead of sending t
   assert.equal(result.cancelled, 1)
   assert.equal(sent, false)
 })
-test("known provider rejection is visible and missing production settings fail closed", async () => {
+test("known provider rejection is visible", async () => {
   await grant("user_due")
   assert.equal(
     (
@@ -352,9 +370,37 @@ test("known provider rejection is visible and missing production settings fail c
     (await rows())[0].last_error,
     "Email provider rejected delivery (422)"
   )
-  await assert.rejects(
-    runSubscriptionReminders({ ...env, RESEND_API_KEY: "" }, { now }),
-    /not configured/
+})
+test("missing or incomplete mail settings fail closed without enqueuing messages or provider requests", async () => {
+  await grant("user_unconfigured")
+  for (const settings of [
+    { RESEND_API_KEY: undefined, PHOTODEPOT_EMAIL_FROM: undefined },
+    { RESEND_API_KEY: undefined },
+    { PHOTODEPOT_EMAIL_FROM: undefined },
+  ]) {
+    const unconfigured = { ...env, ...settings }
+    await assert.rejects(
+      runSubscriptionReminders(unconfigured, {
+        now,
+        fetch: () => {
+          throw new Error(
+            "Unconfigured delivery must never contact the email provider"
+          )
+        },
+      }),
+      /not configured/
+    )
+    assert.deepEqual(await rows(), [])
+  }
+  assert.deepEqual(lookups, [])
+  assert.equal(
+    (
+      await subscriptionReminderQueue(
+        { ...env, RESEND_API_KEY: undefined },
+        now
+      )
+    ).mode,
+    "disabled"
   )
 })
 test("internal triggers require a dedicated secret and scheduler obeys bounded batches/redirect rules", async () => {
@@ -377,7 +423,7 @@ test("internal triggers require a dedicated secret and scheduler obeys bounded b
           method: "POST",
           headers: { authorization: `Bearer ${token}` },
         }),
-        { ...env, PHOTODEPOT_ENVIRONMENT: "development" }
+        env
       )
     ).status,
     200

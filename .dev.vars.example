@@ -14,10 +14,9 @@ WORKOS_REDIRECT_URI="https://photodepot.app/api/auth/callback"
 # Generate a random secret of at least 32 characters; never use a sample password.
 # Store it as an encrypted Pages secret in production and do not commit .dev.vars.
 WORKOS_COOKIE_PASSWORD=""
-# Production signup webhook signing secret. Local dev uses .dev.vars.development.
+# Optional compatibility webhook signing secret; notifications do not grant access.
 WORKOS_WEBHOOK_SECRET=""
-PHOTODEPOT_ENVIRONMENT="production"
-# Production reminder delivery: verified sender and a server-only sending API key.
+# Reminder delivery: verified sender and a server-only sending API key.
 RESEND_API_KEY=""
 PHOTODEPOT_EMAIL_FROM="Photodepot <hello@photodepot.app>"
 # Same random secret (32+ characters) in Pages and the scheduled reminder Worker.

@@ -20,6 +20,7 @@ import {
   getSubscription,
   listSubscriptionAudit,
   changeSubscription,
+  setSubscription,
 } from "../lib/subscription-store.ts"
 
 const origin = "https://photodepot.app"
@@ -348,7 +349,6 @@ test("all customer portal shell URLs require a verified account session and keep
   }
 })
 test("reminder queues and manual checks require Owner cookies and same-origin mutations", async () => {
-  const dev = { ...env, PHOTODEPOT_ENVIRONMENT: "development" }
   for (const cookie of [
     undefined,
     await sessionCookie(),
@@ -356,7 +356,7 @@ test("reminder queues and manual checks require Owner cookies and same-origin mu
   ]) {
     const denied = await handleAdminReminders(
       request("/api/admin/subscription-reminders", cookie),
-      dev
+      env
     )
     assert.ok([401, 403].includes(denied.status))
   }
@@ -366,10 +366,10 @@ test("reminder queues and manual checks require Owner cookies and same-origin mu
   })
   const queue = await handleAdminReminders(
     request("/api/admin/subscription-reminders", owner),
-    dev
+    env
   )
   assert.equal(queue.status, 200)
-  assert.equal((await queue.json()).mode, "preview")
+  assert.equal((await queue.json()).mode, "disabled")
   const make = (originHeader) =>
     new Request(`${origin}/api/admin/subscription-reminders`, {
       method: "POST",
@@ -381,35 +381,63 @@ test("reminder queues and manual checks require Owner cookies and same-origin mu
       body: JSON.stringify({ action: "run" }),
     })
   assert.equal(
-    (await handleAdminReminders(make("https://attacker.example"), dev)).status,
+    (await handleAdminReminders(make("https://attacker.example"), env)).status,
     403
   )
-  assert.equal((await handleAdminReminders(make(origin), dev)).status, 200)
+  assert.equal((await handleAdminReminders(make(origin), env)).status, 503)
 })
-test("account callback activates signup trial once and preserves an admin revocation on later sign-in", async () => {
-  let flow = await beginAccount()
-  assert.equal(
-    (await callback(flow.cookie, flow.transaction.state)).status,
-    303
-  )
-  const trial = await getSubscription(env.DB, user.id)
-  assert.equal(trial.type, "trial")
-  assert.equal(trial.startsAt, Date.parse(user.created_at))
-  assert.equal(trial.endsAt - trial.startsAt, 7 * 86_400_000)
-  const revoked = await changeSubscription(
-    env.DB,
-    user.id,
-    "revoke",
-    trial.revision,
-    "owner@example.test"
-  )
-  flow = await beginAccount()
-  assert.equal(
-    (await callback(flow.cookie, flow.transaction.state)).status,
-    303
-  )
-  assert.deepEqual(await getSubscription(env.DB, user.id), revoked)
-  assert.equal((await listSubscriptionAudit(env.DB, user.id)).length, 2)
+test("successful account sign-in and later logins never grant a subscription", async () => {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const flow = await beginAccount()
+    const response = await callback(flow.cookie, flow.transaction.state)
+    assert.equal(response.status, 303)
+    assert.ok(responseCookie(response, "__Host-photodepot-account"))
+    assert.equal(await getSubscription(env.DB, user.id), null)
+    assert.deepEqual(await listSubscriptionAudit(env.DB, user.id), [])
+  }
+})
+test("account sign-in preserves Owner-assigned Trial and Standard grants and revocations", async () => {
+  let expectedRevision = 0
+  for (const type of ["trial", "regular"]) {
+    const assigned = await setSubscription(
+      env.DB,
+      {
+        userId: user.id,
+        type,
+        endsAt: Date.now() + 3 * 86_400_000,
+        expectedRevision,
+      },
+      "owner@example.test"
+    )
+    let flow = await beginAccount()
+    assert.equal(
+      (await callback(flow.cookie, flow.transaction.state)).status,
+      303
+    )
+    assert.deepEqual(await getSubscription(env.DB, user.id), assigned)
+    assert.equal(
+      (await listSubscriptionAudit(env.DB, user.id)).length,
+      assigned.revision
+    )
+    const revoked = await changeSubscription(
+      env.DB,
+      user.id,
+      "revoke",
+      assigned.revision,
+      "owner@example.test"
+    )
+    flow = await beginAccount()
+    assert.equal(
+      (await callback(flow.cookie, flow.transaction.state)).status,
+      303
+    )
+    assert.deepEqual(await getSubscription(env.DB, user.id), revoked)
+    assert.equal(
+      (await listSubscriptionAudit(env.DB, user.id)).length,
+      revoked.revision
+    )
+    expectedRevision = revoked.revision
+  }
 })
 test("account callback rejects unverified email and tokens bound to another client or user", async () => {
   for (const mismatch of ["unverified", "client", "user"]) {

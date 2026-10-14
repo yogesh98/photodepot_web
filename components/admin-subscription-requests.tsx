@@ -264,7 +264,7 @@ export function AdminSubscriptionRequests({
         <p className={styles.updated}>
           Showing up to {queue.limit}{" "}
           {includeClosed ? "oldest recorded" : "oldest open"} requests.{" "}
-          {queue.openCount} open across this environment.
+          {queue.openCount} open across all accounts.
         </p>
       )}
       {!queue?.requests.length ? (

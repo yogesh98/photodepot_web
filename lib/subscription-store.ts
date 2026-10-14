@@ -9,7 +9,7 @@ import type {
 
 const millisecondsPerDay = 24 * 60 * 60 * 1000
 const maximumTimestamp = 8_640_000_000_000_000
-export const INITIAL_TRIAL_DAYS = 7
+export const SUBSCRIPTION_EXPIRING_DAYS = 7
 export const SUBSCRIPTION_DEVICE_LIMIT = 2
 
 export interface SubscriptionRow {
@@ -163,7 +163,7 @@ export async function getSubscriptionOverview(
   validateTimestamp(now)
   const expiringAt = Math.min(
     maximumTimestamp,
-    now + INITIAL_TRIAL_DAYS * millisecondsPerDay
+    now + SUBSCRIPTION_EXPIRING_DAYS * millisecondsPerDay
   )
   const row = await database
     .prepare(
@@ -181,53 +181,7 @@ export async function getSubscriptionOverview(
     .bind(now, now, now, now, now, expiringAt)
     .first<Omit<SubscriptionOverview, "asOf" | "expiringWithinDays">>()
   if (!row) throw new Error("Subscription overview is unavailable")
-  return { ...row, asOf: now, expiringWithinDays: INITIAL_TRIAL_DAYS }
-}
-
-/**
- * Signup owns the trial clock. Repeated callbacks/webhooks cannot restart it,
- * and an existing manual grant, expired term, or revocation always wins.
- */
-export async function ensureInitialTrial(
-  database: D1Database,
-  userId: string,
-  startedAt: number,
-  now = Date.now()
-): Promise<SubscriptionSummary> {
-  validateUserId(userId)
-  validateTimestamp(startedAt)
-  validateTimestamp(now)
-  if (
-    startedAt > now ||
-    startedAt > maximumTimestamp - INITIAL_TRIAL_DAYS * millisecondsPerDay
-  )
-    throw new TypeError("Invalid signup date.")
-  const endsAt = startedAt + INITIAL_TRIAL_DAYS * millisecondsPerDay
-  const results = await database.batch<SubscriptionRow>([
-    database
-      .prepare(
-        `INSERT INTO subscriptions (id, user_id, type, status, started_at, end_at, updated_at, revision)
-         VALUES (?, ?, 'trial', 'active', ?, ?, ?, 1)
-         ON CONFLICT(user_id) DO NOTHING`
-      )
-      .bind(randomUUID(), userId, startedAt, endsAt, now),
-    database
-      .prepare(
-        `INSERT INTO subscription_audit (id, subscription_id, action, actor, created_at, detail)
-         SELECT ?, id, 'initial-trial', 'system:signup', ?, ? FROM subscriptions
-         WHERE user_id = ? AND revision = 1 AND changes() = 1`
-      )
-      .bind(
-        randomUUID(),
-        now,
-        `Automatic ${INITIAL_TRIAL_DAYS}-day signup trial until ${new Date(endsAt).toISOString()}`,
-        userId
-      ),
-    database.prepare(`${subscriptionQuery} WHERE s.user_id = ?`).bind(userId),
-  ])
-  const row = results[2].results[0]
-  if (!row) throw new Error("Initial subscription is unavailable")
-  return subscriptionSummary(row, now)
+  return { ...row, asOf: now, expiringWithinDays: SUBSCRIPTION_EXPIRING_DAYS }
 }
 
 async function mutateWithAudit(

@@ -207,7 +207,6 @@ export function CustomerAccountPage() {
       if (
         !data?.user?.email ||
         !Array.isArray(data.requests) ||
-        !["development", "production"].includes(data.environment) ||
         (data.subscription && !Array.isArray(data.subscription.devices))
       )
         throw new Error("Unable to read your account. Please try again.")
@@ -316,9 +315,6 @@ export function CustomerAccountPage() {
           photodepot
         </Link>
         <div className={styles.headerActions}>
-          {account?.environment === "development" && (
-            <span className={styles.environment}>Development</span>
-          )}
           <form action="/api/account/auth/logout" method="post">
             <button type="submit" className={styles.quiet} disabled={busy}>
               Sign out
@@ -344,12 +340,6 @@ export function CustomerAccountPage() {
           {loading ? "Refreshing…" : "Refresh"}
         </button>
       </div>
-      {account?.environment === "development" && (
-        <p className={styles.environmentNotice}>
-          You’re viewing the development environment. Requests and subscriptions
-          here affect development builds only.
-        </p>
-      )}
       {error && (
         <p role="alert" className={styles.error}>
           {error}
@@ -539,8 +529,9 @@ export function CustomerAccountPage() {
         </>
       )}
       <footer className={styles.footer}>
-        Dates are shown in your browser’s time zone. New accounts receive a
-        7-day free trial.
+        Access is assigned manually by the Photodepot administrator. Creating an
+        account does not grant access. Dates are shown in your browser’s time
+        zone.
       </footer>
       {form && (
         <RequestDialog
