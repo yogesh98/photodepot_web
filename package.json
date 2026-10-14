@@ -49,6 +49,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.3.6",
     "jsonc-parser": "^3.3.1",
+    "miniflare": "5.20261006.1-alpha",
     "prettier": "^3.9.9",
     "prettier-plugin-tailwindcss": "^0.8.1",
     "tailwindcss": "^4",

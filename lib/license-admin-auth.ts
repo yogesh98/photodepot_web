@@ -52,7 +52,7 @@ export async function authenticateLicenseAdmin(
       const timeout = setTimeout(() => controller.abort(), 5000)
       try {
         const response = await fetch(`${issuer}/cdn-cgi/access/certs`, {
-          redirect: "error",
+          redirect: "manual",
           signal: controller.signal,
         })
         if (!response.ok)
