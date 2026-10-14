@@ -42,6 +42,7 @@ const jwk = {
   use: "sig",
 }
 const signupAt = Date.now() - 1000
+const grantedUntil = Date.now() + 14 * day
 let platform,
   env,
   originalFetch,
@@ -86,7 +87,6 @@ before(async () => {
   })
   env = {
     ...platform.env,
-    PHOTODEPOT_ENVIRONMENT: "development",
     WORKOS_CLIENT_ID: clientId,
     WORKOS_ADMIN_ORGANIZATION_ID: organizationId,
     WORKOS_COOKIE_PASSWORD: cookiePassword,
@@ -218,7 +218,7 @@ function receipt(envelope, device, status) {
   const payload = JSON.parse(bytes)
   assert.equal(payload.deviceId, device.deviceId)
   assert.equal(payload.status, status)
-  assert.equal(payload.subscriptionEndsAt, signupAt + 7 * day)
+  assert.equal(payload.subscriptionEndsAt, grantedUntil)
   assert.ok(payload.expiresAt > payload.issuedAt)
   assert.ok(payload.expiresAt - payload.issuedAt <= LICENSE_GRACE_MS)
   for (const field of [
@@ -324,7 +324,10 @@ async function admin(action, expectedRevision, cookie, values = {}) {
     ),
     env
   )
-  assert.equal(response.status, 200)
+  assert.equal(
+    response.status,
+    action === "set" && expectedRevision === 0 ? 201 : 200
+  )
   return (await response.json()).subscription
 }
 async function approve(started, cookie) {
@@ -338,16 +341,47 @@ async function approve(started, cookie) {
   assert.equal(response.status, 200)
 }
 
-test("localhost signup, trial, Mac pairing, admin revocation and replacement use one isolated subscription authority", async () => {
+test("signup and login require an Owner grant before Mac pairing, revocation and replacement", async () => {
   const firstMac = mac()
   const startResponse = await pairing(firstMac)
   assert.equal(startResponse.status, 201)
   const started = await startResponse.json()
   assert.equal(new URL(started.approvalUrl).origin, origin)
   const accountCookie = await signIn(started)
-  const trial = await getSubscription(env.DB, customerId)
-  assert.equal(trial.startsAt, signupAt)
-  assert.equal(trial.endsAt, signupAt + 7 * day)
+  assert.equal(await getSubscription(env.DB, customerId), null)
+  await signIn(started)
+  assert.equal(await getSubscription(env.DB, customerId), null)
+  assert.deepEqual(await listSubscriptionAudit(env.DB, customerId), [])
+  const blocked = await handleAccountApproval(
+    new Request(started.approvalUrl, {
+      method: "POST",
+      headers: { origin, cookie: accountCookie },
+    }),
+    env
+  )
+  assert.equal(blocked.status, 403)
+  assert.equal((await blocked.text()).includes("Approve Mac sign-in"), false)
+  const pending = await pairing(firstMac, "poll", started.pairingId)
+  assert.equal(pending.status, 200)
+  assert.deepEqual(await pending.json(), { status: "pending" })
+  assert.equal(await getSubscription(env.DB, customerId), null)
+
+  const cookie = await ownerCookie()
+  const ungranted = await (
+    await handleAdminSubscriptions(
+      request("/api/admin/subscriptions", undefined, cookie),
+      env
+    )
+  ).json()
+  assert.equal(ungranted.users[0].subscription, null)
+  assert.equal(ungranted.overview.totalSubscriptions, 0)
+  const trial = await admin("set", 0, cookie, {
+    type: "trial",
+    endsAt: grantedUntil,
+    reason: "Owner-approved alpha access",
+  })
+  assert.ok(trial.startsAt > signupAt)
+  assert.equal(trial.endsAt, grantedUntil)
   assert.equal(trial.type, "trial")
   assert.equal(trial.revision, 1)
   await approve(started, accountCookie)
@@ -363,14 +397,12 @@ test("localhost signup, trial, Mac pairing, admin revocation and replacement use
   assert.ok(firstReceipt.expiresAt <= trial.endsAt)
   assert.equal((await verifyMac(firstMac, "active")).revision, 2)
 
-  const cookie = await ownerCookie()
   const before = await (
     await handleAdminSubscriptions(
       request("/api/admin/subscriptions", undefined, cookie),
       env
     )
   ).json()
-  assert.equal(before.environment, "development")
   assert.equal(before.billingMode, "manual")
   assert.equal(before.overview.activeTrials, 1)
   assert.equal(before.overview.assignedMacs, 1)
@@ -380,7 +412,7 @@ test("localhost signup, trial, Mac pairing, admin revocation and replacement use
   })
   assert.equal(revoked.status, "revoked")
   assert.equal((await verifyMac(firstMac, "revoked")).revision, 3)
-  // A second authenticated callback cannot revive a revoked trial.
+  // Signing in again cannot revive a revoked Owner grant.
   await signIn(started)
   assert.deepEqual(await getSubscription(env.DB, customerId), revoked)
   const restored = await admin("restore", 3, cookie)
@@ -431,9 +463,18 @@ test("localhost signup, trial, Mac pairing, admin revocation and replacement use
   assert.equal(history.devices.filter((device) => device.current).length, 1)
   const audit = await listSubscriptionAudit(env.DB, customerId)
   assert.equal(audit.length, 6)
+  assert.equal(audit.filter((entry) => entry.action === "set").length, 1)
   assert.equal(
-    audit.filter((entry) => entry.action === "initial-trial").length,
-    1
+    audit.find((entry) => entry.action === "set").actor,
+    "owner@example.test"
+  )
+  assert.equal(
+    audit.find((entry) => entry.action === "set").reason,
+    "Owner-approved alpha access"
+  )
+  assert.equal(
+    audit.some((entry) => entry.action === "initial-trial"),
+    false
   )
   assert.equal(
     audit.filter((entry) => entry.action === "bind-device").length,

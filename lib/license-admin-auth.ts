@@ -9,7 +9,6 @@ import {
   type JWTPayload,
 } from "jose"
 import { json, privateHeaders, sameOrigin, type Env } from "./cloudflare.ts"
-import { activateSignupTrial } from "./subscription-signup.ts"
 
 const sessionLifetime = 7 * 24 * 60 * 60
 const loginLifetime = 10 * 60
@@ -508,8 +507,6 @@ export async function handleAdminCallback(request: Request, env: Env) {
           config.audience === "account"
             ? transaction.returnPath!
             : "/admin/subscriptions"
-        if (config.audience === "account")
-          await activateSignupTrial(env.DB, result.user)
         response = redirect(returnPath, 303)
         response.headers.append(
           "Set-Cookie",

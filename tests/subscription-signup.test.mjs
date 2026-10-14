@@ -4,7 +4,6 @@ import { readFile, readdir } from "node:fs/promises"
 import { after, before, beforeEach, test } from "node:test"
 import { getPlatformProxy, unstable_splitSqlQuery } from "wrangler"
 import { handleAccountWebhook } from "../functions/api/account/webhook.ts"
-import { activateSignupTrial } from "../lib/subscription-signup.ts"
 import {
   getSubscription,
   listSubscriptionAudit,
@@ -91,19 +90,18 @@ function notification(data = user(), options = {}) {
     body: payload,
   })
 }
-test("signed signup grants exactly seven days from signup without requiring an admin or verified email", async () => {
-  const customer = user()
-  const response = await handleAccountWebhook(notification(customer), env)
-  assert.equal(response.status, 200)
-  assert.equal(response.headers.get("cache-control"), "private, no-store")
-  const trial = await getSubscription(env.DB, customer.id)
-  assert.equal(trial.type, "trial")
-  assert.equal(trial.status, "active")
-  assert.equal(trial.startsAt, Date.parse(customer.created_at))
-  assert.equal(trial.endsAt - trial.startsAt, 7 * day)
-  assert.equal((await listSubscriptionAudit(env.DB, customer.id)).length, 1)
+test("signed signup notifications never grant alpha access, even for verified accounts", async () => {
+  for (const verified of [false, true]) {
+    const customer = { ...user(), email_verified: verified }
+    const response = await handleAccountWebhook(notification(customer), env)
+    assert.equal(response.status, 200)
+    assert.equal(response.headers.get("cache-control"), "private, no-store")
+    assert.deepEqual(await response.json(), { received: true })
+    assert.equal(await getSubscription(env.DB, customer.id), null)
+    assert.deepEqual(await listSubscriptionAudit(env.DB, customer.id), [])
+  }
 })
-test("parallel delivery, retry and sign-in fallback never extend or duplicate a trial", async () => {
+test("parallel signup delivery and retries never create a subscription or audit", async () => {
   const customer = user()
   const responses = await Promise.all(
     Array.from({ length: 4 }, () =>
@@ -111,22 +109,28 @@ test("parallel delivery, retry and sign-in fallback never extend or duplicate a 
     )
   )
   assert.ok(responses.every((response) => response.status === 200))
-  const trial = await getSubscription(env.DB, customer.id)
-  await activateSignupTrial(env.DB, {
-    id: customer.id,
-    createdAt: customer.created_at,
-  })
-  assert.deepEqual(await getSubscription(env.DB, customer.id), trial)
-  assert.equal((await listSubscriptionAudit(env.DB, customer.id)).length, 1)
-})
-test("a late signup event retains the original expired term and cannot replace a revoked or manual grant", async () => {
-  const customer = user(new Date(Date.now() - 10 * day).toISOString())
   assert.equal(
     (await handleAccountWebhook(notification(customer), env)).status,
     200
   )
-  const trial = await getSubscription(env.DB, customer.id)
-  assert.equal(trial.status, "expired")
+  assert.equal(await getSubscription(env.DB, customer.id), null)
+  assert.deepEqual(await listSubscriptionAudit(env.DB, customer.id), [])
+})
+test("signup notifications preserve manually granted trials, revocations and standard access", async () => {
+  const customer = user(new Date(Date.now() - 10 * day).toISOString())
+  const trial = await setSubscription(
+    env.DB,
+    {
+      userId: customer.id,
+      type: "trial",
+      endsAt: Date.now() + 3 * day,
+      expectedRevision: 0,
+    },
+    "owner@example.test"
+  )
+  await handleAccountWebhook(notification(customer), env)
+  assert.deepEqual(await getSubscription(env.DB, customer.id), trial)
+  assert.equal((await listSubscriptionAudit(env.DB, customer.id)).length, 1)
   const revoked = await changeSubscription(
     env.DB,
     customer.id,
@@ -136,6 +140,7 @@ test("a late signup event retains the original expired term and cannot replace a
   )
   await handleAccountWebhook(notification(customer), env)
   assert.deepEqual(await getSubscription(env.DB, customer.id), revoked)
+  assert.equal((await listSubscriptionAudit(env.DB, customer.id)).length, 2)
   const manual = await setSubscription(
     env.DB,
     {
@@ -148,8 +153,9 @@ test("a late signup event retains the original expired term and cannot replace a
   )
   await handleAccountWebhook(notification(customer), env)
   assert.deepEqual(await getSubscription(env.DB, customer.id), manual)
+  assert.equal((await listSubscriptionAudit(env.DB, customer.id)).length, 3)
 })
-test("invalid signatures, stale deliveries, altered bodies and invalid signup dates never grant access", async () => {
+test("invalid signatures, stale deliveries and altered bodies are rejected without granting access", async () => {
   for (const options of [
     { secret: "wrong" },
     { timestamp: Date.now() - 600_000 },
@@ -160,20 +166,6 @@ test("invalid signatures, stale deliveries, altered bodies and invalid signup da
       (await handleAccountWebhook(notification(user(), options), env)).status,
       401
     )
-  assert.equal(
-    (await handleAccountWebhook(notification(user("invalid-date")), env))
-      .status,
-    503
-  )
-  assert.equal(
-    (
-      await handleAccountWebhook(
-        notification(user(new Date(Date.now() + day).toISOString())),
-        env
-      )
-    ).status,
-    503
-  )
   assert.equal(await getSubscription(env.DB, "user_signup_customer"), null)
   assert.equal(
     (
@@ -184,6 +176,30 @@ test("invalid signatures, stale deliveries, altered bodies and invalid signup da
     ).status,
     503
   )
+})
+test("signup acknowledgement does not depend on the subscription database or signup date", async () => {
+  const unavailableDatabase = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error("Signup must not access the subscription database")
+      },
+    }
+  )
+  for (const createdAt of [
+    "invalid-date",
+    new Date(Date.now() + day).toISOString(),
+  ])
+    assert.equal(
+      (
+        await handleAccountWebhook(notification(user(createdAt)), {
+          ...env,
+          DB: unavailableDatabase,
+        })
+      ).status,
+      200
+    )
+  assert.equal(await getSubscription(env.DB, "user_signup_customer"), null)
 })
 test("other signed events are acknowledged without changing subscriptions; method and size are bounded", async () => {
   assert.equal(

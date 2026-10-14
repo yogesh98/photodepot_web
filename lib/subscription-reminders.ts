@@ -2,7 +2,6 @@ import { createHash, randomUUID } from "node:crypto"
 import type { Env } from "./cloudflare.ts"
 import { getSubscription, listSubscriptions } from "./subscription-store.ts"
 import { getWorkOSUser } from "./workos-users.ts"
-import { subscriptionEnvironment } from "./subscription-environment.ts"
 
 const day = 86_400_000
 const reminderWindow = 2 * day
@@ -37,8 +36,7 @@ interface ReminderRow {
   last_error: string
 }
 
-export function reminderMode(env: Env): "preview" | "resend" | "disabled" {
-  if (subscriptionEnvironment(env) === "development") return "preview"
+export function reminderMode(env: Env): "resend" | "disabled" {
   return env.RESEND_API_KEY && env.PHOTODEPOT_EMAIL_FROM ? "resend" : "disabled"
 }
 
@@ -110,7 +108,6 @@ export async function runSubscriptionReminders(
   const result = {
     processed: 0,
     sent: 0,
-    preview: 0,
     deferred: 0,
     failed: 0,
     cancelled: 0,
@@ -202,11 +199,6 @@ export async function runSubscriptionReminders(
         .first()
       if (!prepared) {
         result.deferred++
-        continue
-      }
-      if (mode === "preview") {
-        await finish(env, row, "preview", now)
-        result.preview++
         continue
       }
       // Recheck immediately before transmission so an admin change during lookup
@@ -430,7 +422,6 @@ export async function subscriptionReminderQueue(env: Env, now = Date.now()) {
     "SELECT * FROM subscription_reminders ORDER BY updated_at DESC,id DESC LIMIT 100"
   ).all<ReminderRow>()
   return {
-    environment: subscriptionEnvironment(env),
     mode: reminderMode(env),
     upcoming,
     outbox: rows.results.map((row) => ({

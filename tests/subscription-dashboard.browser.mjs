@@ -98,7 +98,6 @@ function fixtures() {
   })
   return {
     users,
-    environment: "development",
     requests: [],
     failNext: null,
     listFailure: false,
@@ -115,6 +114,7 @@ function fixtures() {
     requestHistoryFailure: null,
     requestHistoryStarted: [],
     requestHistoryResponses: [],
+    reminderMode: "disabled",
   }
 }
 
@@ -180,10 +180,10 @@ async function handleApi(request, response, url) {
         audit: [
           {
             id: "audit_test",
-            action: "auto-trial",
-            actor: "system",
+            action: "set",
+            actor: "owner@example.test",
             createdAt: Date.now(),
-            detail: "Activated 7-day signup trial",
+            detail: "Assigned 7-day trial",
             reason: "Browser test history reason",
           },
         ],
@@ -194,8 +194,6 @@ async function handleApi(request, response, url) {
       users: secondPage ? state.users.slice(3) : state.users.slice(0, 3),
       nextCursor: secondPage ? null : "user_cara",
       overview: overview(),
-      environment: state.environment,
-      trialDays: 7,
       billingMode: "manual",
     })
   }
@@ -281,7 +279,6 @@ function customerRequest(item) {
 function customerAccount() {
   const subscription = state.users[0].subscription
   return {
-    environment: state.environment,
     user: { email: state.users[0].email },
     subscription: subscription
       ? {
@@ -376,7 +373,6 @@ async function requestsApi(request, response, url) {
       })
     }
     return respond(response, 200, {
-      environment: state.environment,
       requests: state.accountRequests
         .filter(
           (item) =>
@@ -433,14 +429,18 @@ async function remindersApi(request, response) {
   if (request.method === "POST") {
     const body = await bodyOf(request)
     assert.equal(body.action, "run")
+    if (state.reminderMode === "disabled")
+      return respond(response, 503, {
+        error: "Reminder delivery is not configured.",
+      })
     state.reminderRuns++
     state.reminderOutbox = [
       {
-        id: "reminder_preview",
+        id: "reminder_sent",
         userId: "user_alice",
         endsAt: state.users[0].subscription.endsAt,
-        status: "preview",
-        attempts: 0,
+        status: "sent",
+        attempts: 1,
         updatedAt: Date.now(),
         subject: "Your Photodepot trial ends soon",
         recipient: "alice@example.test",
@@ -449,8 +449,20 @@ async function remindersApi(request, response) {
     ]
   }
   respond(response, 200, {
-    environment: state.environment,
-    mode: "preview",
+    ...(request.method === "POST"
+      ? {
+          result: {
+            processed: 1,
+            sent: 1,
+            deferred: 0,
+            failed: 0,
+            cancelled: 0,
+            uncertain: 0,
+            remaining: false,
+          },
+        }
+      : {}),
+    mode: state.reminderMode,
     upcoming: [
       {
         subscription: state.users[0].subscription,
@@ -576,10 +588,12 @@ async function loadAll() {
   ).toBeVisible()
 }
 
-test("environment, overview, loaded-account filters, and pagination are accurate", async () => {
-  await expect(page.getByText("Development", { exact: true })).toBeVisible()
+test("manual access policy, overview, loaded-account filters, and pagination are accurate", async () => {
   await expect(
-    page.getByText(/only to the local development database/)
+    page.getByText(/Access is assigned manually by an Owner/)
+  ).toBeVisible()
+  await expect(
+    page.getByText(/Creating an account does not grant access/)
   ).toBeVisible()
   await expect(page.getByText("1 trial · 1 standard")).toBeVisible()
   await expect(
@@ -619,12 +633,6 @@ test("environment, overview, loaded-account filters, and pagination are accurate
     path: join(screenshots, "subscriptions-desktop.png"),
     fullPage: true,
   })
-  state.environment = "production"
-  await page.getByRole("button", { name: "Refresh", exact: true }).click()
-  await expect(page.getByText("Production", { exact: true })).toBeVisible()
-  await expect(
-    page.getByText(/only to the local development database/)
-  ).toHaveCount(0)
 })
 
 test("grants support 7-day trials, standard presets, custom durations, and exact expiry", async () => {
@@ -1064,7 +1072,7 @@ test("the admin request queue reviews requests without mutating subscription acc
   })
 })
 
-test("request conflicts require refresh and daily reminder checks show previews", async () => {
+test("request conflicts require refresh and daily reminder checks require configured delivery", async () => {
   state.accountRequests = [
     {
       id: "request_00000000-0000-4000-8000-000000000002",
@@ -1106,20 +1114,33 @@ test("request conflicts require refresh and daily reminder checks show previews"
     .selectOption("reject")
   await page.getByRole("button", { name: "Save review", exact: true }).click()
   assert.equal(state.accountRequests[0].status, "rejected")
-  await expect(page.getByText(/No email is sent/)).toBeVisible()
+  await expect(page.getByText(/Email delivery is disabled/)).toBeVisible()
+  await expect(
+    page.getByRole("button", { name: "Check reminders now", exact: true })
+  ).toBeDisabled()
+  assert.equal(state.reminderRuns, 0)
+  state.reminderMode = "resend"
+  await page
+    .getByRole("button", { name: "Refresh renewal queue", exact: true })
+    .click()
+  await expect(page.getByText(/Reminder delivery is configured/)).toBeVisible()
+  const runResponse = page.waitForResponse(
+    (response) =>
+      response.url().endsWith("/api/admin/subscription-reminders") &&
+      response.request().method() === "POST"
+  )
   await page
     .getByRole("button", { name: "Check reminders now", exact: true })
     .click()
   await expect(
-    page.getByText("Reminder history and previews (1)", { exact: true })
+    page.getByText("Reminder history (1)", { exact: true })
   ).toBeVisible()
-  await page
-    .getByText("Reminder history and previews (1)", { exact: true })
-    .click()
+  await page.getByText("Reminder history (1)", { exact: true }).click()
   await expect(
     page.getByText("Your Photodepot trial ends soon", { exact: true })
   ).toBeVisible()
-  await expect(page.getByText("preview", { exact: true })).toBeVisible()
+  await expect(page.getByText("sent", { exact: true })).toBeVisible()
+  assert.equal((await (await runResponse).json()).result.sent, 1)
   assert.equal(state.reminderRuns, 1)
 })
 

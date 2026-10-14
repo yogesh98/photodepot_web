@@ -6,14 +6,11 @@ One trial-ending reminder is eligible in the final 48 hours of each active trial
 term. The hourly scheduler catches newly due terms and retries temporary failures.
 Standard subscriptions are listed in the admin queue but do not receive trial mail.
 
-Development always previews messages in the admin reminder outbox, even if a mail
-API key is present. `subscriptions:dev` checks due reminders every minute locally.
-Run `pnpm subscriptions:setup --desktop-dir /path/to/photodepot` again after updating
-to create a dedicated local scheduler token while retaining existing dev keys.
-`pnpm subscriptions:reminders` runs a local check immediately. The dashboard also
-provides a Check reminders action. These paths never send development email.
+Email delivery is disabled until a mail provider and sender are configured.
+The dashboard's **Check reminders now** action processes due reminders using the
+same routine as the scheduled Worker once delivery is configured.
 
-Production delivery uses [Resend](https://resend.com/docs/api-reference/emails/send-email).
+Email delivery uses [Resend](https://resend.com/docs/api-reference/emails/send-email).
 Configure these encrypted/server-only settings in the website Pages project:
 
 - `RESEND_API_KEY`: a sending API key for a verified sender domain.
@@ -34,8 +31,7 @@ pnpm exec wrangler secret put PHOTODEPOT_REMINDER_TOKEN --config wrangler.remind
 
 Enter the token through the prompt, not as a command argument. The scheduler does
 not send until website delivery settings and the matching Worker token are present.
-Check the actual environment-specific origin in `wrangler.reminders.jsonc` before
-deploying. No scheduler has been deployed as part of local development setup.
+Check the website origin in `wrangler.reminders.jsonc` before deploying.
 
 Delivery is keyed by subscription ID and exact term end, preventing repeat reminders
 on sign-in, retries, and unrelated admin edits. Concurrent jobs claim rows atomically;

@@ -11,7 +11,6 @@ import {
   type Env,
 } from "../../../lib/cloudflare.ts"
 import { getSubscription } from "../../../lib/subscription-store.ts"
-import { subscriptionEnvironment } from "../../../lib/subscription-environment.ts"
 import {
   AccountRequestLimitError,
   createAccountRequest,
@@ -23,7 +22,6 @@ export async function handleAccountSubscription(request: Request, env: Env) {
   const auth = await authenticateWorkOSAccount(request, env)
   if (auth instanceof Response) return auth
   try {
-    const environment = subscriptionEnvironment(env)
     if (!["GET", "POST"].includes(request.method)) {
       const response = json({ error: "Method not allowed." }, 405)
       response.headers.set("Allow", "GET, POST")
@@ -98,7 +96,6 @@ export async function handleAccountSubscription(request: Request, env: Env) {
       : null
     return withAdminSession(
       json({
-        environment,
         user: { email: auth.email },
         subscription: safeSubscription,
         requests: await listAccountRequests(env.DB, auth.userId),

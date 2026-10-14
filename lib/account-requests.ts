@@ -42,13 +42,11 @@ export interface CustomerSubscription {
   devices: { id: string; activatedAt: number }[]
 }
 export interface CustomerAccount {
-  environment: "production" | "development"
   user: { email: string }
   subscription: CustomerSubscription | null
   requests: CustomerRequest[]
 }
 export interface AdminRequestQueue {
-  environment: "production" | "development"
   requests: (AccountRequest & {
     subscription: SubscriptionSummary | null
     user: Omit<WorkOSUserSummary, "subscription"> | null

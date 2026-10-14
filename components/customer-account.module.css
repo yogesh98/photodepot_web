@@ -28,14 +28,6 @@
   font-weight: 600;
   letter-spacing: -1.3px;
 }
-.environment {
-  padding: 5px 9px;
-  border: 1px solid #cdd4f5;
-  border-radius: 4px;
-  background: #edf0ff;
-  color: #414b84;
-  font-size: 11px;
-}
 .heading {
   align-items: start;
   padding: 42px 0 28px;
@@ -220,8 +212,7 @@
   overflow-wrap: anywhere;
 }
 .error,
-.notice,
-.environmentNotice {
+.notice {
   padding: 14px 18px;
   border: 1px solid #e7d0c6;
   border-radius: 4px;
@@ -238,11 +229,6 @@
   background: #eaf4ee;
   border-color: #c4dccd;
   color: #286142;
-}
-.environmentNotice {
-  background: #edf0ff;
-  border-color: #cdd4f5;
-  color: #414b84;
 }
 .footer {
   border-top: 1px solid #dedbd3;

@@ -8,8 +8,7 @@ import type {
 import styles from "./subscription-dashboard.module.css"
 
 type ReminderQueue = {
-  environment: "development" | "production"
-  mode: "preview" | "resend" | "disabled"
+  mode: "resend" | "disabled"
   upcoming: {
     subscription: SubscriptionSummary
     user: Omit<WorkOSUserSummary, "subscription"> | null
@@ -158,11 +157,9 @@ export function AdminSubscriptionReminders({
         </div>
       </div>
       <p className={styles.updated}>
-        {queue?.mode === "preview"
-          ? "Development preview: reminder messages are saved below. No email is sent."
-          : queue?.mode === "resend"
-            ? "Reminder delivery is configured. Due trials are processed by the scheduled hourly check."
-            : "Email delivery is disabled. Review upcoming renewals and configure delivery to send trial reminders."}
+        {queue?.mode === "resend"
+          ? "Reminder delivery is configured. Due trials are processed by the scheduled hourly check."
+          : "Email delivery is disabled. Review upcoming renewals and configure delivery to send trial reminders."}
       </p>
       {queue && (
         <p className={styles.updated}>
@@ -236,9 +233,7 @@ export function AdminSubscriptionReminders({
       )}
       {!!queue?.outbox.length && (
         <details className={styles.reminderHistory}>
-          <summary>
-            Reminder history and previews ({queue.outbox.length})
-          </summary>
+          <summary>Reminder history ({queue.outbox.length})</summary>
           <ul className={styles.queueList}>
             {queue.outbox.map((item) => (
               <li key={item.id}>
@@ -263,7 +258,7 @@ export function AdminSubscriptionReminders({
                   <p className={styles.queueContext}>{item.error}</p>
                 )}
                 {item.text && (
-                  <pre className={styles.reminderPreview}>{item.text}</pre>
+                  <pre className={styles.reminderMessage}>{item.text}</pre>
                 )}
                 {item.status === "uncertain" && (
                   <p className={styles.queueContext}>

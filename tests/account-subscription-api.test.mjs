@@ -96,7 +96,6 @@ before(async () => {
     WORKOS_ADMIN_ORGANIZATION_ID: organization,
     WORKOS_COOKIE_PASSWORD: password,
     WORKOS_REDIRECT_URI: `${origin}/api/auth/callback`,
-    PHOTODEPOT_ENVIRONMENT: "development",
   }
   for (const filename of (
     await readdir(new URL("../migrations/", import.meta.url))
@@ -192,7 +191,6 @@ test("customer GET shows only the authenticated account and no administrator dat
   assert.equal(response.headers.get("cache-control"), "private, no-store")
   const account = await response.json()
   assert.equal(account.user.email, "user_dashboard_customer@example.test")
-  assert.equal(account.environment, "development")
   assert.equal(account.subscription.deviceLimit, 2)
   assert.deepEqual(
     account.subscription.devices.map((device) => device.id),
@@ -505,7 +503,7 @@ test("admin request queue uses live account metadata, deduplicates lookups and m
   assert.equal(unavailable.status, 503)
 })
 
-test("invalid subscription environment prevents customer requests and administrator reviews", async () => {
+test("former profile settings do not alter customer requests or Owner reviews", async () => {
   const bindings = { ...env, PHOTODEPOT_ENVIRONMENT: "staging" }
   const customer = await cookie()
   const write = await handleAccountSubscription(
@@ -514,12 +512,8 @@ test("invalid subscription environment prevents customer requests and administra
     }),
     bindings
   )
-  assert.equal(write.status, 503)
-  const { request: created } = await createAccountRequest(env.DB, {
-    userId: "user_dashboard_customer",
-    email: "customer@example.test",
-    action: "renewal",
-  })
+  assert.equal(write.status, 201)
+  const { request: created } = await write.json()
   const review = await handleAdminSubscriptionRequests(
     request(
       "/api/admin/subscription-requests",
@@ -532,6 +526,11 @@ test("invalid subscription environment prevents customer requests and administra
     ),
     bindings
   )
-  assert.equal(review.status, 503)
-  assert.equal((await getAccountRequest(env.DB, created.id)).revision, 1)
+  assert.equal(review.status, 200)
+  assert.deepEqual(await getAccountRequest(env.DB, created.id), {
+    ...created,
+    ...(await review.json()).request,
+    status: "resolved",
+    revision: 2,
+  })
 })
