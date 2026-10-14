@@ -18,6 +18,8 @@ export function LandingSections({
     const page = root?.parentElement
     const header = page?.querySelector("header")
     if (!root || !page || !header) return
+    const documentRoot = root.ownerDocument.documentElement
+    documentRoot.dataset.landingScrollbar = ""
 
     const sections = Array.from(root.children).filter(
       (element): element is HTMLElement =>
@@ -35,9 +37,12 @@ export function LandingSections({
       }
       if (!active) return
 
-      page!.style.setProperty(
-        "--header-background",
-        getComputedStyle(active).backgroundColor
+      const background = getComputedStyle(active).backgroundColor
+      page!.style.setProperty("--header-background", background)
+      // Native page scrolling paints its scrollbar on the document root.
+      documentRoot.style.setProperty(
+        "--landing-scrollbar-background",
+        background
       )
       page!.dataset.headerSection = active.id
     }
@@ -60,6 +65,8 @@ export function LandingSections({
       cancelAnimationFrame(frame)
       page.style.removeProperty("--header-background")
       delete page.dataset.headerSection
+      documentRoot.style.removeProperty("--landing-scrollbar-background")
+      delete documentRoot.dataset.landingScrollbar
     }
   }, [])
 

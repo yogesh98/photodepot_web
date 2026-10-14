@@ -8,6 +8,42 @@ html {
   scroll-behavior: smooth;
 }
 
+/* Keep the native scrollbar on the landing section's surface. */
+html[data-landing-scrollbar] {
+  --landing-scrollbar-thumb: color-mix(
+    in srgb,
+    var(--brand-ink) 65%,
+    transparent
+  );
+  scrollbar-color: var(--landing-scrollbar-thumb)
+    var(--landing-scrollbar-background, var(--brand-paper));
+}
+/* The viewport theme must not carry into independently scrolling dialogs. */
+html[data-landing-scrollbar] body {
+  scrollbar-color: auto;
+}
+@media (min-width: 761px) and (pointer: fine) {
+  html[data-landing-scrollbar] {
+    scrollbar-width: thin;
+  }
+  @supports not (scrollbar-color: #151613 #f7f6f2) {
+    html[data-landing-scrollbar]::-webkit-scrollbar {
+      width: 10px;
+    }
+  }
+}
+@supports not (scrollbar-color: #151613 #f7f6f2) {
+  html[data-landing-scrollbar]::-webkit-scrollbar-track {
+    background: var(--landing-scrollbar-background, var(--brand-paper));
+  }
+  html[data-landing-scrollbar]::-webkit-scrollbar-thumb {
+    border: 2px solid transparent;
+    border-radius: 10px;
+    background: var(--landing-scrollbar-thumb);
+    background-clip: padding-box;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;

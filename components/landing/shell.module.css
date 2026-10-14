@@ -67,9 +67,6 @@
   border-color: var(--art-ink);
   color: var(--art-paper);
 }
-.page[data-header-section="waitlist"] .header {
-  background: var(--art-paper);
-}
 .page[data-header-section="waitlist"] .waitlist:hover {
   background: #35332e;
   border-color: #35332e;
