@@ -268,14 +268,15 @@ export function DaylightLanding() {
         </div>
         <div className={styles.heroCopy}>
           <h1 id="daylight-title">
-            <span>ALWAYS</span>
+            <span>SHAPE</span>
             <span>YOUR</span>
             <span ref={visionRef} className={styles.visionLine}>
               VISION<span className={styles.orange}>.</span>
             </span>
           </h1>
           <p className={styles.heroSubtext} style={{ width: visionWidth }}>
-            But twice as fast<span className={styles.orange}>.</span>
+            Now twice as fast and with your team
+            <span className={styles.orange}>.</span>
           </p>
         </div>
         <a href="#workflow" className={styles.scrollHint}>
