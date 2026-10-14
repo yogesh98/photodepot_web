@@ -11,6 +11,7 @@ import { ArrowDown, ArrowUpRight, UsersRound } from "lucide-react"
 import { useEffect, useRef, useState, useSyncExternalStore } from "react"
 import { LandingWaitlistTrigger } from "@/components/landing-waitlist"
 import { LandingSections } from "./sections"
+import { useLandingViewport } from "./scroll-area"
 import { collaborationPhotograph, photographs } from "./photography"
 import demoAssets from "./demo-assets.json"
 import {
@@ -36,10 +37,15 @@ function DemoMedia({
   sizes: string
   id?: string
 }) {
+  const viewport = useLandingViewport()
   const mediaRef = useRef<HTMLDivElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
-  const visible = useInView(mediaRef, { amount: 0.1 })
-  const nearby = useInView(mediaRef, { margin: "800px 0px", once: true })
+  const visible = useInView(mediaRef, { root: viewport, amount: 0.1 })
+  const nearby = useInView(mediaRef, {
+    root: viewport,
+    margin: "800px 0px",
+    once: true,
+  })
   const reducedMotion = useDemoReducedMotion()
   const [loadedVideo, setLoadedVideo] = useState<{
     source: string
@@ -174,6 +180,7 @@ const getHeroPhotos = () => {
 }
 
 export function DaylightLanding() {
+  const viewport = useLandingViewport()
   // The static HTML and hydration agree; each browser visit then selects a pair.
   const heroPhotoIndices = useSyncExternalStore(
     subscribeToHero,
@@ -188,7 +195,10 @@ export function DaylightLanding() {
   const workflowRef = useRef<HTMLElement>(null)
   const visionRef = useRef<HTMLSpanElement>(null)
   const [visionWidth, setVisionWidth] = useState<number>()
-  const workflowVisible = useInView(workflowRef, { amount: 0.1 })
+  const workflowVisible = useInView(workflowRef, {
+    root: viewport,
+    amount: 0.1,
+  })
 
   useEffect(() => {
     const vision = visionRef.current

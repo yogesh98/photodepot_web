@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, type ReactNode } from "react"
 import { cn } from "@/lib/utils"
+import { useLandingViewport } from "./scroll-area"
 import styles from "./shell.module.css"
 
 export function LandingSections({
@@ -12,14 +13,14 @@ export function LandingSections({
   className?: string
 }) {
   const main = useRef<HTMLElement>(null)
+  const viewport = useLandingViewport()
 
   useEffect(() => {
     const root = main.current
+    const scroller = viewport.current
     const page = root?.parentElement
     const header = page?.querySelector("header")
-    if (!root || !page || !header) return
-    const documentRoot = root.ownerDocument.documentElement
-    documentRoot.dataset.landingScrollbar = ""
+    if (!root || !page || !header || !scroller) return
 
     const sections = Array.from(root.children).filter(
       (element): element is HTMLElement =>
@@ -27,65 +28,42 @@ export function LandingSections({
     )
     let frame = 0
 
-    function updateSurfaces() {
+    function updateHeader() {
       frame = 0
-      const headerBottom = header!.getBoundingClientRect().bottom
-      const surfaces = sections.map((section) => ({
-        section,
-        bounds: section.getBoundingClientRect(),
-        background: getComputedStyle(section).backgroundColor,
-      }))
-      let active = surfaces[0]
-      for (const surface of surfaces) {
-        if (surface.bounds.top > headerBottom + 1) break
-        active = surface
+      const boundary = header!.getBoundingClientRect().bottom + 1
+      let active = sections[0]
+      for (const section of sections) {
+        if (section.getBoundingClientRect().top > boundary) break
+        active = section
       }
       if (!active) return
 
-      page!.style.setProperty("--header-background", active.background)
-      page!.dataset.headerSection = active.section.id
-      documentRoot.style.setProperty(
-        "--landing-scrollbar-color",
-        active.background
+      page!.style.setProperty(
+        "--header-background",
+        getComputedStyle(active).backgroundColor
       )
-
-      // Classic scrollbar gutters reveal the root canvas, not child sections.
-      // Mirror the visible surfaces there, including the sticky header.
-      const stops = [`${active.background} 0px ${headerBottom}px`]
-      for (const { bounds, background } of surfaces) {
-        const top = Math.max(headerBottom, bounds.top)
-        const bottom = Math.min(window.innerHeight, bounds.bottom)
-        if (bottom > top) stops.push(`${background} ${top}px ${bottom}px`)
-      }
-      documentRoot.style.setProperty(
-        "--landing-scrollbar-background",
-        `linear-gradient(to bottom, ${stops.join(", ")})`
-      )
+      page!.dataset.headerSection = active.id
     }
 
     function scheduleUpdate() {
-      if (!frame) frame = requestAnimationFrame(updateSurfaces)
+      if (!frame) frame = requestAnimationFrame(updateHeader)
     }
 
     const resize = new ResizeObserver(scheduleUpdate)
+    resize.observe(scroller)
     resize.observe(header)
     sections.forEach((section) => resize.observe(section))
-    window.addEventListener("scroll", scheduleUpdate, { passive: true })
-    window.addEventListener("resize", scheduleUpdate)
-    updateSurfaces()
+    scroller.addEventListener("scroll", scheduleUpdate, { passive: true })
+    updateHeader()
 
     return () => {
-      window.removeEventListener("scroll", scheduleUpdate)
-      window.removeEventListener("resize", scheduleUpdate)
+      scroller.removeEventListener("scroll", scheduleUpdate)
       resize.disconnect()
       cancelAnimationFrame(frame)
       page.style.removeProperty("--header-background")
       delete page.dataset.headerSection
-      documentRoot.style.removeProperty("--landing-scrollbar-background")
-      documentRoot.style.removeProperty("--landing-scrollbar-color")
-      delete documentRoot.dataset.landingScrollbar
     }
-  }, [])
+  }, [viewport])
 
   return (
     <main

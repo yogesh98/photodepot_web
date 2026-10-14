@@ -1,23 +1,23 @@
 # photodepot website
 
 The homepage at `/` uses the **Daylight** design: warm white backgrounds, dark
-type, curated photograph pairs, and full-screen sections that snap vertically
-as you scroll. The header stays visible while each section fills the remaining
-viewport; shorter screens can scroll through content that needs extra room.
-Desktop wheel and trackpad gestures advance one section at a time, pausing at
-the edge of taller content until a fresh gesture. Small screens (760px wide or
-less) and devices with a coarse pointer use normal scrolling without section
-snapping or automatic section navigation.
+type, curated photograph pairs, and sections that fill at least the space below
+the header. A full-height flex layout contains a native scrolling viewport
+managed by Base UI Scroll Area. Its transparent overlay scrollbar floats over
+the section backgrounds and fades when idle. Wheel, trackpad, touch, and keyboard
+scrolling work normally at every screen size, including through taller sections.
+The sticky header follows the active section's background color.
 It uses Photodepot’s gallery mark and outlined wordmark, orange (`#ff5a22`),
 ink (`#151613`), warm paper (`#f7f6f2`), and locally hosted Inter.
 Seven curated Pexels photographs cover portraiture, bridal detail, architecture,
-aerial and underwater photography, sculptural still life, and teams. Framer Motion and CSS
-transitions respect reduced-motion preferences. Previous concept preview URLs
-redirect to the homepage.
+aerial and underwater photography, sculptural still life, and teams. Framer Motion,
+CSS transitions, smooth anchor scrolling, scrollbar fading, and demo playback
+respect reduced-motion preferences. Previous concept preview URLs redirect to
+the homepage.
 
-The landing page foregrounds collaboration with dedicated sections linked from
-the header: one Mac hosts, approved reviewers cull and organize from their own
-Macs on the same local network, and changes are shared across the project.
+The landing page foregrounds collaboration with dedicated sections: one Mac
+hosts, approved reviewers cull and organize from their own Macs on the same
+local network, and changes are shared across the project.
 Ingest and export remain with the host. The complete Ingest, Cull, Organize, and
 Export workflow is also explained. Joining the waitlist
 is its only call to action. The original download page lives at `/tester`, with
