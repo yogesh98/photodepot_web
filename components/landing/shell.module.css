@@ -1,3 +1,42 @@
+.scrollArea {
+  display: flex;
+  flex-direction: column;
+  height: 100svh;
+  height: 100dvh;
+  overflow: hidden;
+}
+.scrollViewport {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  scroll-behavior: smooth;
+  overscroll-behavior-y: contain;
+}
+.scrollViewport:focus-visible {
+  outline: 2px solid var(--brand-ink);
+  outline-offset: -2px;
+}
+.scrollbar {
+  z-index: 20;
+  width: 12px;
+  padding: 3px;
+  background: transparent;
+  opacity: 0;
+  transition: opacity 180ms ease 350ms;
+}
+.scrollbar[data-scrolling],
+.scrollbar:hover,
+.scrollbar:focus-within,
+.scrollbar:active {
+  opacity: 1;
+  transition-delay: 0ms;
+}
+.scrollThumb {
+  width: 100%;
+  min-height: 32px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--brand-ink) 65%, transparent);
+}
 .page {
   --header-height: 88px;
   --section-height: calc(100svh - var(--header-height));
@@ -14,6 +53,7 @@
 }
 .sectionsFrame {
   min-width: 0;
+  scroll-margin-top: var(--header-height);
 }
 .sectionsFrame:focus-visible {
   outline: 2px solid var(--art-ink);
@@ -106,6 +146,10 @@
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .scrollViewport {
+    scroll-behavior: auto;
+  }
+  .scrollbar,
   .page a,
   .page button {
     transition: none;

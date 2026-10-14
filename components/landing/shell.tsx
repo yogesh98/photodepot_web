@@ -4,18 +4,19 @@ import { ArrowUpRight } from "lucide-react"
 import type { ReactNode } from "react"
 import { LandingWaitlist } from "@/components/landing-waitlist"
 import { WaitlistTrigger } from "@/components/waitlist-button"
+import { LandingScrollArea } from "./scroll-area"
 import styles from "./shell.module.css"
 
 export function LandingShell({ children }: { children: ReactNode }) {
   return (
     <LandingWaitlist>
-      <div className={styles.page}>
+      <LandingScrollArea>
         <a href="#main" className={styles.skip}>
           Skip to content
         </a>
         <header className={styles.header}>
           <Link
-            href="/"
+            href="/#vision"
             className={styles.wordmark}
             aria-label="Photodepot home"
           >
@@ -35,7 +36,7 @@ export function LandingShell({ children }: { children: ReactNode }) {
           </WaitlistTrigger>
         </header>
         {children}
-      </div>
+      </LandingScrollArea>
     </LandingWaitlist>
   )
 }
