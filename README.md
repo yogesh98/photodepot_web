@@ -21,7 +21,8 @@ Macs on the same local network, and changes are shared across the project.
 Ingest and export remain with the host. The complete Ingest, Cull, Organize, and
 Export workflow is also explained. Joining the waitlist
 is its only call to action. The original download page lives at `/tester`, with
-its password-protected Apple Silicon and Intel downloads.
+its public Apple Silicon and Intel downloads. A license key is required in the
+desktop app to open or create local projects.
 
 Screenshots show the actual Photodepot desktop app in light mode with demo
 media. Capture and media provenance are documented in
@@ -38,7 +39,8 @@ Video and poster URLs use content-hashed filenames through the generated
 The frontend is a Next.js static export hosted on Cloudflare Pages. Pages
 Functions handle `/api/waitlist` and `/api/download/arm64` or `/api/download/x64`.
 Installers live in a **private R2 Standard bucket**; the waitlist lives in D1.
-Only `/api/*` invokes Functions, so website assets use free static hosting.
+Only `/api/*` and the protected `/admin` routes invoke Functions, so other website
+assets use free static hosting.
 The canonical production domain is **photodepot.app**.
 
 The homepage uses a deterministic photo pair in the static HTML, then selects a
@@ -60,8 +62,10 @@ pnpm downloads:upload:local
 pnpm preview
 ```
 
-Set `PHOTODEPOT_DOWNLOAD_PASSWORD` in the ignored `.dev.vars` file. Local secrets
-are server-only; never prefix them with `NEXT_PUBLIC_`. Wrangler keeps local D1
+Downloads do not require a password or cookie. Configure license signing and
+admin Access settings in the ignored `.dev.vars` file when testing licensing;
+see `deploy/LICENSES.md`. Local secrets are server-only; never prefix them with
+`NEXT_PUBLIC_`. Wrangler keeps local D1
 and R2 data in ignored `.wrangler/state/`. Local preview normally runs at
 `http://localhost:8788`. Rebuild and restart it after source changes.
 
@@ -77,7 +81,6 @@ in the dashboard first. Authorize the official Cloudflare CLI:
 ```sh
 pnpm cf:login
 pnpm cf:setup
-pnpm cf:password
 pnpm downloads:upload
 pnpm run deploy
 ```
@@ -86,14 +89,9 @@ pnpm run deploy
 Direct Upload project `photodepot-web`, saves the real D1 ID in `wrangler.jsonc`,
 and applies migrations. The setup/upload/deploy script defaults to this project's
 Cloudflare account; set `CLOUDFLARE_ACCOUNT_ID` to override it for another account.
-Secret values stay in local files or Cloudflare Pages Secrets, outside Git and
-the static build. Changing a password requires deploying again for the changed
-secret to reach the running Functions.
-
-For a new installation, enter the production download password at the
-`cf:password` prompt. During this migration, the existing local password is
-reused without printing its value. In `.dev.vars`, dollar signs are literal;
-there is no Next.js-style variable expansion.
+License secret values stay in local files or Cloudflare Pages Secrets, outside
+Git and the static build. Downloads require no secret. In `.dev.vars`, dollar
+signs are literal; there is no Next.js-style variable expansion.
 
 ### Downloads and releases
 
@@ -109,17 +107,16 @@ future files over 300 MiB require an S3 multipart upload tool.
 
 Keep the R2 development URL and custom-domain access **disabled**. R2 is accessed
 through the `DOWNLOADS` binding, so no S3 credentials are needed in the website.
-The Functions issue an architecture-scoped, signed, HttpOnly cookie for five
-minutes after password verification. HTTPS cookies are Secure and SameSite
-Strict. Password rotation invalidates existing tokens. R2 responses stream
-without buffering the installer and support authenticated HEAD and single-byte
-ranges. Restarting a download after access expires requires unlocking it again.
+The public download buttons link directly to `GET /api/download/arm64` and
+`GET /api/download/x64`. Functions stream the private R2 objects without buffering
+the installer and support HEAD and single-byte ranges. Download requests require
+no password, cookie, license key or D1 access; project access is controlled by the
+desktop license feature. Missing or unavailable installer storage returns users
+to `/tester` with a download error. Admin license management remains protected
+by Cloudflare Access. The old `download_attempts` table is retained by the
+historical migration and is no longer used.
 
-D1 atomically enforces eight password attempts per client IP per ten minutes
-across Function instances. Cloudflare's `CF-Connecting-IP` supplies the client
-address; only a password-keyed HMAC of it is stored. Expired limiter rows are
-cleaned up in bounded batches. Missing secrets, files, or storage keep downloads
-closed. Builds and deploys reject installers, SQLite databases, environment
+Builds and deploys reject installers, SQLite databases, environment
 files, and assets over Pages' 25 MiB file limit.
 
 ### Waitlist
@@ -181,9 +178,10 @@ pnpm functions:build
 ```
 
 Tests use Node's built-in runner and Cloudflare's local D1/R2 runtime. API test
-bindings are isolated and do not access production storage. Tests cover cookie
-scope, expiration and rotation; concurrent rate limits; R2 streaming and ranges;
-D1 persistence and duplicates; and static asset leakage prevention.
+bindings are isolated and do not access production storage. Tests cover public R2
+streaming, HEAD and ranges; unavailable storage and invalid requests; D1 waitlist
+persistence and duplicates; license administration and verification; and static
+asset leakage prevention.
 Brand assets are copied from the sibling `photodepot/build/brand` directory:
 the canonical SVG lockup is used in both headers, the 1024-pixel app icon is used
 on `/tester` and in social previews, and the ICO and simplified SVG supply browser
@@ -191,3 +189,9 @@ icons. The app icon also supplies the Apple touch icon. Regenerate the sibling
 media kit with `pnpm brand:generate` before copying updated exports here.
 Photography credits are in `public/photography/pexels/README.md`; the Inter font license is in
 `app/fonts/OFL.txt`.
+
+## Licenses
+
+Manual license administration is available at `/admin/licenses` after Cloudflare Access, D1 and signing secrets are configured. See [licensing setup and protocol](deploy/LICENSES.md) before deploying a licensed desktop build. Production migration, Access configuration, secrets and deployment are separate release steps.
+
+Revocation and Mac resets update the server immediately. The desktop saves the latest signed license state and applies local access restrictions after the app is closed and reopened. An admitted session keeps its ongoing work, hosting, and collaboration until quit. Closing a project or window does not end that session. Offline launches still use the 48-hour/10-startup allowance; joining a licensed host remains available without a local license.

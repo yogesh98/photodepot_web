@@ -11,6 +11,7 @@ test("static deployment rejects installers, private data and oversized assets", 
     for (const name of [
       "installer.dmg",
       "Installer.DMG",
+      "installer.pkg",
       "waitlist.sqlite",
       "waitlist.sqlite-wal",
       ".env.local",

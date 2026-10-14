@@ -1,6 +1,13 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { downloadRange } from "../lib/download-files.ts"
+import { downloadRange, isArchitecture } from "../lib/download-files.ts"
+
+test("only supported installer architectures are accepted", () => {
+  assert.equal(isArchitecture("arm64"), true)
+  assert.equal(isArchitecture("x64"), true)
+  for (const value of ["../../private", "ARM64", "arm64.dmg", ""])
+    assert.equal(isArchitecture(value), false)
+})
 
 test("single byte ranges support offsets, suffixes, open ends, and clamping", () => {
   assert.deepEqual(downloadRange("bytes=2-5", 10), { offset: 2, length: 4 })

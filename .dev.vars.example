@@ -1,2 +1,8 @@
 # Local Pages Functions secrets. Keep the real .dev.vars file out of Git.
-PHOTODEPOT_DOWNLOAD_PASSWORD="replace-with-your-local-test-password"
+# License API: base64 DER PKCS8 Ed25519 private signing key, never a browser env var.
+# Generate with scripts/generate-license-keypair.mjs; use a separate test pair locally.
+PHOTODEPOT_LICENSE_SIGNING_PRIVATE_KEY=""
+# Cloudflare Zero Trust Access application (JWT issuer + Application Audience AUD).
+# No local bypass exists. Both settings are required for /admin/* and /api/admin/*.
+PHOTODEPOT_ACCESS_ISSUER="https://your-team.cloudflareaccess.com"
+PHOTODEPOT_ACCESS_AUDIENCE="replace-with-application-audience-aud"

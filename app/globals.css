@@ -379,10 +379,6 @@ html[data-landing-scrollbar] body {
   border: 1px solid var(--border);
   background: var(--muted);
 }
-.dialog-eyebrow {
-  margin-bottom: 9px;
-  letter-spacing: 1.6px;
-}
 .dialog-title {
   font-size: 23px;
   font-weight: 500;
@@ -394,18 +390,11 @@ html[data-landing-scrollbar] body {
   font-size: 13px;
   line-height: 1.7;
 }
-.password-form {
-  display: flex;
-  flex-direction: column;
-  margin-top: 26px;
-}
-.password-form label,
 .waitlist-field label {
   margin-bottom: 8px;
   font-size: 11px;
   font-weight: 500;
 }
-.password-form input,
 .waitlist-field input {
   width: 100%;
   height: 46px;
@@ -416,13 +405,9 @@ html[data-landing-scrollbar] body {
   background: var(--background);
   font-size: 13px;
 }
-.password-form input:focus,
 .waitlist-field input:focus {
   border-color: var(--ring);
   box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring), transparent 80%);
-}
-.password-form input[aria-invalid="true"] {
-  border-color: var(--destructive);
 }
 .password-error {
   margin-top: 8px;
@@ -433,16 +418,6 @@ html[data-landing-scrollbar] body {
   height: 46px;
   gap: 8px;
   margin-top: 16px;
-  font-size: 12px;
-}
-.download-invite {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  margin-top: 20px;
-  color: var(--muted-foreground);
   font-size: 12px;
 }
 .waitlist-dialog {
@@ -533,9 +508,6 @@ html[data-landing-scrollbar] body {
   }
   .password-dialog {
     padding: 30px 24px;
-  }
-  .dialog-eyebrow {
-    font-size: 9px;
   }
 }
 
