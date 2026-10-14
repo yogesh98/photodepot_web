@@ -156,6 +156,7 @@ export async function handleLicenseRequest(
             status: active ? "active" : "revoked",
             challenge: body.challenge,
             revision: accountDevice.subscription.revision,
+            subscriptionEndsAt: accountDevice.subscription.endsAt,
           },
           now,
           accountDevice.subscription.endsAt

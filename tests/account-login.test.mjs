@@ -1,6 +1,8 @@
 import assert from "node:assert/strict"
 import { createHash, generateKeyPairSync, sign } from "node:crypto"
 import { after, before, beforeEach, test } from "node:test"
+import { readFile, readdir } from "node:fs/promises"
+import { getPlatformProxy, unstable_splitSqlQuery } from "wrangler"
 import { sealData, unsealData } from "iron-session"
 import {
   authenticateLicenseAdmin,
@@ -12,6 +14,11 @@ import {
 } from "../lib/license-admin-auth.ts"
 import { onRequest as loginRoute } from "../functions/api/account/auth/login.ts"
 import { onRequest as logoutRoute } from "../functions/api/account/auth/logout.ts"
+import {
+  getSubscription,
+  listSubscriptionAudit,
+  changeSubscription,
+} from "../lib/subscription-store.ts"
 
 const origin = "https://photodepot.app"
 const clientId = "client_account_flow"
@@ -42,6 +49,7 @@ const jwk = {
   use: "sig",
 }
 let originalFetch,
+  platform,
   expectedVerifier,
   exchanges,
   tokenClaims,
@@ -64,7 +72,27 @@ function jwt(claims = {}) {
   ).toString("base64url")
   return `${header}.${payload}.${sign("RSA-SHA256", Buffer.from(`${header}.${payload}`), rsa.privateKey).toString("base64url")}`
 }
-before(() => {
+before(async () => {
+  platform = await getPlatformProxy({
+    configPath: "wrangler.jsonc",
+    persist: false,
+    remoteBindings: false,
+    envFiles: [],
+  })
+  env.DB = platform.env.DB
+  for (const filename of (
+    await readdir(new URL("../migrations/", import.meta.url))
+  )
+    .filter((name) => name.endsWith(".sql"))
+    .sort()) {
+    const sql = await readFile(
+      new URL(`../migrations/${filename}`, import.meta.url),
+      "utf8"
+    )
+    await env.DB.batch(
+      unstable_splitSqlQuery(sql).map((statement) => env.DB.prepare(statement))
+    )
+  }
   originalFetch = globalThis.fetch
   globalThis.fetch = async (input, options) => {
     const url = String(input)
@@ -92,15 +120,21 @@ before(() => {
     })
   }
 })
-beforeEach(() => {
+beforeEach(async () => {
+  await env.DB.batch(
+    ["DELETE FROM subscription_audit", "DELETE FROM subscriptions"].map((sql) =>
+      env.DB.prepare(sql)
+    )
+  )
   expectedVerifier = undefined
   exchanges = []
   tokenClaims = {}
   returnedUser = { ...user }
   failRefresh = undefined
 })
-after(() => {
+after(async () => {
   globalThis.fetch = originalFetch
+  await platform?.dispose()
 })
 function request(path, cookie, method = "GET", requestOrigin = origin) {
   return new Request(`${requestOrigin}${path}`, {
@@ -252,6 +286,31 @@ test("account sign-in also permits a verified Member but never creates an admin 
     401
   )
 })
+test("account callback activates signup trial once and preserves an admin revocation on later sign-in", async () => {
+  let flow = await beginAccount()
+  assert.equal(
+    (await callback(flow.cookie, flow.transaction.state)).status,
+    303
+  )
+  const trial = await getSubscription(env.DB, user.id)
+  assert.equal(trial.type, "trial")
+  assert.equal(trial.startsAt, Date.parse(user.created_at))
+  assert.equal(trial.endsAt - trial.startsAt, 7 * 86_400_000)
+  const revoked = await changeSubscription(
+    env.DB,
+    user.id,
+    "revoke",
+    trial.revision,
+    "owner@example.test"
+  )
+  flow = await beginAccount()
+  assert.equal(
+    (await callback(flow.cookie, flow.transaction.state)).status,
+    303
+  )
+  assert.deepEqual(await getSubscription(env.DB, user.id), revoked)
+  assert.equal((await listSubscriptionAudit(env.DB, user.id)).length, 2)
+})
 test("account callback rejects unverified email and tokens bound to another client or user", async () => {
   for (const mismatch of ["unverified", "client", "user"]) {
     tokenClaims =
@@ -264,6 +323,7 @@ test("account callback rejects unverified email and tokens bound to another clie
     const { cookie, transaction } = await beginAccount()
     const response = await callback(cookie, transaction.state)
     assert.equal(response.status, 401)
+    assert.equal(await getSubscription(env.DB, user.id), null)
     assert.equal(
       responseCookie(response, "__Host-photodepot-account"),
       undefined

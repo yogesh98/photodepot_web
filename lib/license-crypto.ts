@@ -77,6 +77,7 @@ export function signedReceipt(
     status: "active" | "revoked"
     challenge: string
     revision: number
+    subscriptionEndsAt?: number
   },
   now = Date.now(),
   maxExpiresAt?: number

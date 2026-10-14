@@ -1,10 +1,15 @@
 import { randomUUID } from "node:crypto"
 import type { D1Database } from "@cloudflare/workers-types"
 import { CHALLENGE_PATTERN, parseDevicePublicKey } from "./license-crypto.ts"
-import { SubscriptionConflictError } from "./subscription-store.ts"
+import {
+  SubscriptionConflictError,
+  subscriptionReason,
+  subscriptionSummary,
+  type SubscriptionRow,
+} from "./subscription-store.ts"
 import type {
   SubscriptionSummary,
-  SubscriptionType,
+  SubscriptionDeviceHistory,
 } from "./subscription-types.ts"
 
 export interface SubscriptionDevice {
@@ -17,41 +22,10 @@ export interface SubscriptionDevice {
   subscription: SubscriptionSummary
 }
 
-interface SubscriptionDeviceRow {
-  id: string
-  user_id: string
-  type: SubscriptionType
-  status: "active" | "revoked"
-  started_at: number
-  end_at: number
-  updated_at: number
-  revision: number
-  current_device_id: string | null
-  binding_revision: number
+interface SubscriptionDeviceRow extends SubscriptionRow {
   device_id: string
   public_key: string
   device_binding_revision: number
-}
-
-function subscriptionSummary(
-  row: SubscriptionDeviceRow,
-  now: number
-): SubscriptionSummary {
-  return {
-    id: row.id,
-    userId: row.user_id,
-    type: row.type,
-    status:
-      row.status === "revoked"
-        ? "revoked"
-        : now >= row.end_at
-          ? "expired"
-          : "active",
-    startsAt: row.started_at,
-    endsAt: row.end_at,
-    updatedAt: row.updated_at,
-    revision: row.revision,
-  }
 }
 
 function deviceSummary(
@@ -84,8 +58,11 @@ function validateNow(now: number) {
 }
 
 const deviceQuery = `SELECT s.*, d.device_id, d.public_key,
-  d.binding_revision AS device_binding_revision
+  d.binding_revision AS device_binding_revision,
+  current.activated_at AS current_device_activated_at
   FROM account_devices d JOIN subscriptions s ON s.user_id = d.user_id
+  LEFT JOIN account_devices current ON current.device_id = s.current_device_id
+    AND current.user_id = s.user_id AND current.binding_revision = s.binding_revision
   WHERE d.device_id = ?`
 
 export async function getSubscriptionDevice(
@@ -204,10 +181,12 @@ export async function resetSubscriptionDevice(
   userId: string,
   expectedRevision: number,
   actor: string,
-  now = Date.now()
+  now = Date.now(),
+  reason?: string
 ): Promise<SubscriptionSummary> {
   validateUserId(userId)
   validateNow(now)
+  const normalizedReason = subscriptionReason(reason)
   if (
     !Number.isSafeInteger(expectedRevision) ||
     expectedRevision < 1 ||
@@ -226,13 +205,41 @@ export async function resetSubscriptionDevice(
       .bind(now, userId, expectedRevision),
     database
       .prepare(
-        `INSERT INTO subscription_audit (id, subscription_id, action, actor, created_at, detail)
-         SELECT ?, id, 'reset-device', ?, ?, 'Reset Mac assignment; previous Mac must sign in again'
+        `INSERT INTO subscription_audit (id, subscription_id, action, actor, created_at, detail, reason)
+         SELECT ?, id, 'reset-device', ?, ?, 'Reset Mac assignment; previous Mac must sign in again', ?
          FROM subscriptions WHERE user_id = ? AND revision = ? AND changes() = 1`
       )
-      .bind(randomUUID(), actor, now, userId, expectedRevision + 1),
+      .bind(
+        randomUUID(),
+        actor,
+        now,
+        normalizedReason,
+        userId,
+        expectedRevision + 1
+      ),
   ])
   const row = results[0].results[0]
   if (!row) throw new SubscriptionConflictError()
   return subscriptionSummary(row, now)
+}
+
+/** Includes historical assignment identifiers, never the device signing key. */
+export async function listSubscriptionDevices(
+  database: D1Database,
+  userId: string
+): Promise<SubscriptionDeviceHistory[]> {
+  validateUserId(userId)
+  const rows = await database
+    .prepare(
+      `SELECT d.device_id AS id, d.binding_revision AS bindingRevision,
+       d.activated_at AS activatedAt,
+       (d.device_id = s.current_device_id AND d.binding_revision = s.binding_revision) AS current
+       FROM account_devices d JOIN subscriptions s ON s.user_id = d.user_id
+       WHERE d.user_id = ? ORDER BY d.activated_at DESC, d.device_id`
+    )
+    .bind(userId)
+    .all<
+      Omit<SubscriptionDeviceHistory, "current"> & { current: number | null }
+    >()
+  return rows.results.map((row) => ({ ...row, current: row.current === 1 }))
 }

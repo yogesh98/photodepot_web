@@ -256,6 +256,7 @@ export async function handleAccountPairing(
           status: "active",
           challenge: row.challenge,
           revision: binding.subscription.revision,
+          subscriptionEndsAt: binding.subscription.endsAt,
         },
         Date.now(),
         binding.subscription.endsAt

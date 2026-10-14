@@ -14,6 +14,7 @@
     "format": "prettier --write \"**/*.{ts,tsx}\"",
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/*.test.mjs",
+    "test:dashboard": "node --test tests/subscription-dashboard.browser.mjs",
     "preview": "pnpm build && wrangler pages dev out",
     "functions:build": "wrangler pages functions build --outdir .wrangler/functions --compatibility-date 2026-10-08 --compatibility-flags nodejs_compat",
     "cf:login": "wrangler login --scopes account:read user:read workers:write d1:write pages:write zone:read",
@@ -23,7 +24,10 @@
     "waitlist:export": "wrangler d1 execute DB --remote --command \"SELECT * FROM waitlist ORDER BY id\" --json",
     "downloads:upload": "node scripts/cloudflare.mjs upload",
     "downloads:upload:local": "node scripts/cloudflare.mjs upload --local",
-    "deploy": "pnpm build && pnpm functions:build && node scripts/cloudflare.mjs deploy"
+    "deploy": "pnpm build && pnpm functions:build && node scripts/cloudflare.mjs deploy",
+    "subscriptions:setup": "node scripts/subscription-development.mjs setup",
+    "subscriptions:migrate": "node scripts/subscription-development.mjs migrate",
+    "subscriptions:dev": "pnpm build && pnpm subscriptions:migrate && node scripts/subscription-development.mjs dev"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",
@@ -45,6 +49,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261008.1",
+    "@playwright/test": "1.63.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^22.20.4",
     "@types/react": "^19",

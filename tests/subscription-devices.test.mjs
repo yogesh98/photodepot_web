@@ -64,7 +64,19 @@ before(async () => {
       unstable_splitSqlQuery(source).map((sql) => database.prepare(sql))
     )
   }
-  oldSubscription = await assign("user_before_device_migration")
+  // Seed the prior schema directly, then verify the new migration retains it.
+  await database.batch([
+    database
+      .prepare(
+        "INSERT INTO subscriptions (id,user_id,type,status,started_at,end_at,updated_at,revision) VALUES ('subscription-before-migration','user_before_device_migration','trial','active',?,?,?,1)"
+      )
+      .bind(epoch, epoch + 30 * 86_400_000, epoch),
+    database
+      .prepare(
+        "INSERT INTO subscription_audit (id,subscription_id,action,actor,created_at,detail) VALUES ('audit-before-migration','subscription-before-migration','set',?,?,'Existing trial')"
+      )
+      .bind(actor, epoch),
+  ])
   const source = await readFile(
     new URL("../migrations/0004_account_devices.sql", import.meta.url),
     "utf8"
@@ -72,6 +84,33 @@ before(async () => {
   await database.batch(
     unstable_splitSqlQuery(source).map((sql) => database.prepare(sql))
   )
+  for (const filename of [
+    "0005_account_pairings.sql",
+    "0006_subscription_management.sql",
+  ]) {
+    const sql = await readFile(
+      new URL(`../migrations/${filename}`, import.meta.url),
+      "utf8"
+    )
+    await database.batch(
+      unstable_splitSqlQuery(sql).map((statement) =>
+        database.prepare(statement)
+      )
+    )
+  }
+  oldSubscription = {
+    id: "subscription-before-migration",
+    userId: "user_before_device_migration",
+    type: "trial",
+    status: "active",
+    startsAt: epoch,
+    endsAt: epoch + 30 * 86_400_000,
+    updatedAt: epoch,
+    revision: 1,
+    notes: "",
+    bindingRevision: 1,
+    device: null,
+  }
   originalFetch = globalThis.fetch
   globalThis.fetch = async (url, options) => {
     requestCount++
@@ -217,9 +256,18 @@ test("account device migration preserves subscriptions and grants no Mac assignm
     ).count,
     0
   )
-  assert.equal(
-    (await listSubscriptionAudit(database, oldSubscription.userId)).length,
-    1
+  assert.deepEqual(
+    await listSubscriptionAudit(database, oldSubscription.userId),
+    [
+      {
+        id: "audit-before-migration",
+        action: "set",
+        actor,
+        createdAt: epoch,
+        detail: "Existing trial",
+        reason: "",
+      },
+    ]
   )
 })
 

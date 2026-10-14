@@ -18,12 +18,20 @@ import {
 } from "../../../lib/workos-users.ts"
 import {
   changeSubscription,
+  getSubscription,
+  getSubscriptionOverview,
+  INITIAL_TRIAL_DAYS,
   listSubscriptionAudit,
   listSubscriptions,
   setSubscription,
   SubscriptionConflictError,
+  updateSubscriptionNotes,
 } from "../../../lib/subscription-store.ts"
-import { resetSubscriptionDevice } from "../../../lib/subscription-devices.ts"
+import {
+  listSubscriptionDevices,
+  resetSubscriptionDevice,
+} from "../../../lib/subscription-devices.ts"
+import { subscriptionEnvironment } from "../../../lib/subscription-environment.ts"
 
 export async function handleAdminSubscriptions(request: Request, env: Env) {
   const auth = await authenticateLicenseAdmin(request, env)
@@ -33,21 +41,32 @@ export async function handleAdminSubscriptions(request: Request, env: Env) {
 
 async function authorized(request: Request, env: Env, auth: AdminAuth) {
   try {
+    const environment = subscriptionEnvironment(env)
     if (request.method === "GET") {
       const query = new URL(request.url).searchParams
+      const now = Date.now()
       if (query.has("history")) {
         const userId = query.get("userId") ?? ""
         if (!WORKOS_USER_ID.test(userId))
           return json({ error: "Invalid user." }, 400)
-        return json({ audit: await listSubscriptionAudit(env.DB, userId) })
+        const [subscription, devices, audit] = await Promise.all([
+          getSubscription(env.DB, userId, now),
+          listSubscriptionDevices(env.DB, userId),
+          listSubscriptionAudit(env.DB, userId),
+        ])
+        return json({ subscription, devices, audit })
       }
       const cursor = query.get("cursor") ?? undefined
       if (cursor && !WORKOS_USER_ID.test(cursor))
         return json({ error: "Invalid page." }, 400)
-      const page = await listWorkOSUsers(env, cursor)
+      const [page, overview] = await Promise.all([
+        listWorkOSUsers(env, cursor),
+        getSubscriptionOverview(env.DB, now),
+      ])
       const subscriptions = await listSubscriptions(
         env.DB,
-        page.users.map((user) => user.id)
+        page.users.map((user) => user.id),
+        now
       )
       return json({
         users: page.users.map((user) => ({
@@ -60,6 +79,10 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
           subscription: subscriptions.get(user.id) ?? null,
         })),
         nextCursor: page.nextCursor,
+        overview,
+        environment,
+        billingMode: "manual",
+        trialDays: INITIAL_TRIAL_DAYS,
       })
     }
     if (request.method !== "POST") {
@@ -69,7 +92,13 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
     }
     if (!sameOrigin(request))
       return json({ error: "Invalid request origin." }, 403)
-    if (!request.headers.get("content-type")?.startsWith("application/json"))
+    if (
+      request.headers
+        .get("content-type")
+        ?.split(";")[0]
+        .trim()
+        .toLowerCase() !== "application/json"
+    )
       return json({ error: "Submit JSON." }, 415)
     const supplied = await readJson(request)
     if (!supplied || typeof supplied !== "object" || Array.isArray(supplied))
@@ -81,13 +110,41 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
       !Number.isSafeInteger(body.expectedRevision) ||
       (body.expectedRevision as number) < 0 ||
       (body.expectedRevision as number) >= Number.MAX_SAFE_INTEGER ||
-      !["set", "extend", "revoke", "restore", "reset-device"].includes(
-        body.action as string
-      )
+      ![
+        "set",
+        "extend",
+        "revoke",
+        "restore",
+        "reset-device",
+        "update-notes",
+      ].includes(body.action as string)
     )
       return json({ error: "Invalid subscription action." }, 400)
+    if (
+      body.reason !== undefined &&
+      (typeof body.reason !== "string" || body.reason.length > 1000)
+    )
+      return json({ error: "Enter a reason of at most 1,000 characters." }, 400)
+    if (
+      body.notes !== undefined &&
+      (typeof body.notes !== "string" || body.notes.length > 2000)
+    )
+      return json({ error: "Enter notes of at most 2,000 characters." }, 400)
+    const now = Date.now()
     if (body.action === "set" || body.action === "extend") {
-      if (
+      if (body.endsAt !== undefined) {
+        if (body.durationDays !== undefined)
+          return json(
+            { error: "Choose an expiration date or a number of days." },
+            400
+          )
+        if (
+          !Number.isSafeInteger(body.endsAt) ||
+          (body.endsAt as number) <= now ||
+          (body.endsAt as number) > 8_640_000_000_000_000
+        )
+          return json({ error: "Choose a valid future expiration date." }, 400)
+      } else if (
         !Number.isSafeInteger(body.durationDays) ||
         (body.durationDays as number) < 1 ||
         (body.durationDays as number) > 3650
@@ -100,16 +157,24 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
       body.type !== "regular"
     )
       return json({ error: "Choose Trial or Standard." }, 400)
-    if (body.action === "reset-device" && (body.expectedRevision as number) < 1)
+    if (body.action !== "set" && (body.expectedRevision as number) < 1)
       return json(
-        { error: "Assign a subscription before resetting Mac access." },
+        { error: "Assign a subscription before changing its access or notes." },
+        400
+      )
+    if (body.action === "update-notes" && typeof body.notes !== "string")
+      return json(
+        {
+          error:
+            "Enter administrator notes, or leave them empty to clear them.",
+        },
         400
       )
     const user = await getWorkOSUser(env, body.userId)
     if (!user)
       return json({ error: "This user no longer exists in WorkOS." }, 404)
     const revision = body.expectedRevision as number
-    const now = Date.now()
+    const reason = body.reason as string | undefined
     const subscription =
       body.action === "set"
         ? await setSubscription(
@@ -117,29 +182,45 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
             {
               userId: user.id,
               type: body.type as "trial" | "regular",
-              endsAt: now + (body.durationDays as number) * 86_400_000,
+              endsAt:
+                (body.endsAt as number | undefined) ??
+                now + (body.durationDays as number) * 86_400_000,
               expectedRevision: revision,
+              notes: body.notes as string | undefined,
+              reason,
             },
             auth.email,
             now
           )
-        : body.action === "reset-device"
-          ? await resetSubscriptionDevice(
+        : body.action === "update-notes"
+          ? await updateSubscriptionNotes(
               env.DB,
               user.id,
+              body.notes as string,
               revision,
               auth.email,
-              now
+              now,
+              reason
             )
-          : await changeSubscription(
-              env.DB,
-              user.id,
-              body.action as "extend" | "revoke" | "restore",
-              revision,
-              auth.email,
-              body.durationDays as number | undefined,
-              now
-            )
+          : body.action === "reset-device"
+            ? await resetSubscriptionDevice(
+                env.DB,
+                user.id,
+                revision,
+                auth.email,
+                now,
+                reason
+              )
+            : await changeSubscription(
+                env.DB,
+                user.id,
+                body.action as "extend" | "revoke" | "restore",
+                revision,
+                auth.email,
+                body.durationDays as number | undefined,
+                now,
+                { reason, endsAt: body.endsAt as number | undefined }
+              )
     return json(
       { subscription },
       body.action === "set" && revision === 0 ? 201 : 200
@@ -149,6 +230,7 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
       return json({ error: "Invalid request." }, error.status)
     if (error instanceof SubscriptionConflictError)
       return json({ error: error.message }, 409)
+    if (error instanceof TypeError) return json({ error: error.message }, 400)
     console.error("Subscription administration service unavailable")
     return json(
       {

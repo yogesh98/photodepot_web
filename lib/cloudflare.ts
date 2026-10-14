@@ -9,6 +9,8 @@ export interface Env {
   WORKOS_ADMIN_ORGANIZATION_ID?: string
   WORKOS_COOKIE_PASSWORD?: string
   WORKOS_REDIRECT_URI?: string
+  WORKOS_WEBHOOK_SECRET?: string
+  PHOTODEPOT_ENVIRONMENT?: string
 }
 
 export const privateHeaders = {
@@ -28,7 +30,7 @@ export class BodyError extends Error {
   }
 }
 
-export async function readJson(request: Request) {
+export async function readText(request: Request) {
   const reader = request.body?.getReader()
   if (!reader) throw new BodyError(400)
   try {
@@ -50,11 +52,21 @@ export async function readJson(request: Request) {
       bytes.set(chunk, offset)
       offset += chunk.byteLength
     }
-    return JSON.parse(new TextDecoder().decode(bytes)) as unknown
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+      bytes
+    )
   } catch (error) {
     throw error instanceof BodyError ? error : new BodyError(400)
   } finally {
     reader.releaseLock()
+  }
+}
+
+export async function readJson(request: Request): Promise<unknown> {
+  try {
+    return JSON.parse(await readText(request)) as unknown
+  } catch (error) {
+    throw error instanceof BodyError ? error : new BodyError(400)
   }
 }
 

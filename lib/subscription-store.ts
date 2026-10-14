@@ -2,14 +2,16 @@ import { randomUUID } from "node:crypto"
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types"
 import type {
   SubscriptionAudit,
+  SubscriptionOverview,
   SubscriptionSummary,
   SubscriptionType,
 } from "./subscription-types.ts"
 
 const millisecondsPerDay = 24 * 60 * 60 * 1000
 const maximumTimestamp = 8_640_000_000_000_000
+export const INITIAL_TRIAL_DAYS = 7
 
-interface SubscriptionRow {
+export interface SubscriptionRow {
   id: string
   user_id: string
   type: SubscriptionType
@@ -18,6 +20,10 @@ interface SubscriptionRow {
   end_at: number
   updated_at: number
   revision: number
+  notes: string
+  current_device_id: string | null
+  binding_revision: number
+  current_device_activated_at?: number | null
 }
 
 export class SubscriptionConflictError extends Error {
@@ -41,6 +47,22 @@ function validateTimestamp(value: number) {
     throw new TypeError("Invalid subscription date.")
 }
 
+export function subscriptionReason(value: unknown = ""): string {
+  if (typeof value !== "string" || value.length > 1000)
+    throw new TypeError(
+      "Enter an administrator reason of at most 1,000 characters."
+    )
+  return value.trim()
+}
+
+function subscriptionNotes(value: unknown): string {
+  if (typeof value !== "string" || value.length > 2000)
+    throw new TypeError(
+      "Enter administrator notes of at most 2,000 characters."
+    )
+  return value.trim()
+}
+
 function validateMutation(
   userId: string,
   expectedRevision: number,
@@ -59,7 +81,10 @@ function validateMutation(
     throw new TypeError("Invalid subscription administrator.")
 }
 
-function summary(row: SubscriptionRow, now: number): SubscriptionSummary {
+export function subscriptionSummary(
+  row: SubscriptionRow,
+  now: number
+): SubscriptionSummary {
   return {
     id: row.id,
     userId: row.user_id,
@@ -74,8 +99,23 @@ function summary(row: SubscriptionRow, now: number): SubscriptionSummary {
     endsAt: row.end_at,
     updatedAt: row.updated_at,
     revision: row.revision,
+    notes: row.notes,
+    bindingRevision: row.binding_revision,
+    device:
+      row.current_device_id && row.current_device_activated_at != null
+        ? {
+            id: row.current_device_id,
+            bindingRevision: row.binding_revision,
+            activatedAt: row.current_device_activated_at,
+          }
+        : null,
   }
 }
+
+const subscriptionQuery = `SELECT s.*, d.activated_at AS current_device_activated_at
+  FROM subscriptions s LEFT JOIN account_devices d
+    ON d.device_id = s.current_device_id AND d.user_id = s.user_id
+    AND d.binding_revision = s.binding_revision`
 
 export async function listSubscriptions(
   database: D1Database,
@@ -91,12 +131,12 @@ export async function listSubscriptions(
     const batch = uniqueIds.slice(offset, offset + 90)
     const rows = await database
       .prepare(
-        `SELECT * FROM subscriptions WHERE user_id IN (${batch.map(() => "?").join(", ")})`
+        `${subscriptionQuery} WHERE s.user_id IN (${batch.map(() => "?").join(", ")})`
       )
       .bind(...batch)
       .all<SubscriptionRow>()
     for (const row of rows.results)
-      subscriptions.set(row.user_id, summary(row, now))
+      subscriptions.set(row.user_id, subscriptionSummary(row, now))
   }
   return subscriptions
 }
@@ -109,10 +149,84 @@ export async function getSubscription(
   validateUserId(userId)
   validateTimestamp(now)
   const row = await database
-    .prepare("SELECT * FROM subscriptions WHERE user_id = ?")
+    .prepare(`${subscriptionQuery} WHERE s.user_id = ?`)
     .bind(userId)
     .first<SubscriptionRow>()
-  return row ? summary(row, now) : null
+  return row ? subscriptionSummary(row, now) : null
+}
+
+/** Counts the entire deployment database, independently of WorkOS pagination. */
+export async function getSubscriptionOverview(
+  database: D1Database,
+  now = Date.now()
+): Promise<SubscriptionOverview> {
+  validateTimestamp(now)
+  const expiringAt = Math.min(
+    maximumTimestamp,
+    now + INITIAL_TRIAL_DAYS * millisecondsPerDay
+  )
+  const row = await database
+    .prepare(
+      `SELECT COUNT(*) AS totalSubscriptions,
+       COALESCE(SUM(status = 'active' AND end_at > ?), 0) AS active,
+       COALESCE(SUM(status = 'active' AND end_at > ? AND type = 'trial'), 0) AS activeTrials,
+       COALESCE(SUM(status = 'active' AND end_at > ? AND type = 'regular'), 0) AS activeStandard,
+       COALESCE(SUM(status = 'active' AND end_at <= ?), 0) AS expired,
+       COALESCE(SUM(status = 'revoked'), 0) AS revoked,
+       COALESCE(SUM(status = 'active' AND end_at > ? AND end_at <= ?), 0) AS expiringSoon,
+       COALESCE(SUM(current_device_id IS NOT NULL), 0) AS assignedMacs
+       FROM subscriptions`
+    )
+    .bind(now, now, now, now, now, expiringAt)
+    .first<Omit<SubscriptionOverview, "asOf" | "expiringWithinDays">>()
+  if (!row) throw new Error("Subscription overview is unavailable")
+  return { ...row, asOf: now, expiringWithinDays: INITIAL_TRIAL_DAYS }
+}
+
+/**
+ * Signup owns the trial clock. Repeated callbacks/webhooks cannot restart it,
+ * and an existing manual grant, expired term, or revocation always wins.
+ */
+export async function ensureInitialTrial(
+  database: D1Database,
+  userId: string,
+  startedAt: number,
+  now = Date.now()
+): Promise<SubscriptionSummary> {
+  validateUserId(userId)
+  validateTimestamp(startedAt)
+  validateTimestamp(now)
+  if (
+    startedAt > now ||
+    startedAt > maximumTimestamp - INITIAL_TRIAL_DAYS * millisecondsPerDay
+  )
+    throw new TypeError("Invalid signup date.")
+  const endsAt = startedAt + INITIAL_TRIAL_DAYS * millisecondsPerDay
+  const results = await database.batch<SubscriptionRow>([
+    database
+      .prepare(
+        `INSERT INTO subscriptions (id, user_id, type, status, started_at, end_at, updated_at, revision)
+         VALUES (?, ?, 'trial', 'active', ?, ?, ?, 1)
+         ON CONFLICT(user_id) DO NOTHING`
+      )
+      .bind(randomUUID(), userId, startedAt, endsAt, now),
+    database
+      .prepare(
+        `INSERT INTO subscription_audit (id, subscription_id, action, actor, created_at, detail)
+         SELECT ?, id, 'initial-trial', 'system:signup', ?, ? FROM subscriptions
+         WHERE user_id = ? AND revision = 1 AND changes() = 1`
+      )
+      .bind(
+        randomUUID(),
+        now,
+        `Automatic ${INITIAL_TRIAL_DAYS}-day signup trial until ${new Date(endsAt).toISOString()}`,
+        userId
+      ),
+    database.prepare(`${subscriptionQuery} WHERE s.user_id = ?`).bind(userId),
+  ])
+  const row = results[2].results[0]
+  if (!row) throw new Error("Initial subscription is unavailable")
+  return subscriptionSummary(row, now)
 }
 
 async function mutateWithAudit(
@@ -120,9 +234,10 @@ async function mutateWithAudit(
   mutation: D1PreparedStatement,
   userId: string,
   expectedRevision: number,
-  action: "set" | "revoke" | "restore" | "extend",
+  action: "set" | "revoke" | "restore" | "extend" | "update-notes",
   actor: string,
   detail: string,
+  reason: string,
   now: number
 ): Promise<SubscriptionSummary> {
   // D1 executes a batch as one transaction. changes() observes the immediately
@@ -131,8 +246,8 @@ async function mutateWithAudit(
     mutation,
     database
       .prepare(
-        `INSERT INTO subscription_audit (id, subscription_id, action, actor, created_at, detail)
-         SELECT ?, id, ?, ?, ?, ? FROM subscriptions
+        `INSERT INTO subscription_audit (id, subscription_id, action, actor, created_at, detail, reason)
+         SELECT ?, id, ?, ?, ?, ?, ? FROM subscriptions
          WHERE user_id = ? AND revision = ? AND changes() = 1`
       )
       .bind(
@@ -141,13 +256,16 @@ async function mutateWithAudit(
         actor,
         now,
         detail,
+        reason,
         userId,
         expectedRevision + 1
       ),
+    database.prepare(`${subscriptionQuery} WHERE s.user_id = ?`).bind(userId),
   ])
-  const row = results[0].results[0]
-  if (!row) throw new SubscriptionConflictError()
-  return summary(row, now)
+  if (!results[0].results[0]) throw new SubscriptionConflictError()
+  const row = results[2].results[0]
+  if (!row) throw new Error("Updated subscription is unavailable")
+  return subscriptionSummary(row, now)
 }
 
 export async function setSubscription(
@@ -157,6 +275,8 @@ export async function setSubscription(
     type: SubscriptionType
     endsAt: number
     expectedRevision: number
+    notes?: string
+    reason?: string
   },
   actor: string,
   now = Date.now()
@@ -164,24 +284,27 @@ export async function setSubscription(
   const { userId, type, endsAt, expectedRevision } = values
   validateMutation(userId, expectedRevision, actor, now)
   validateTimestamp(endsAt)
+  const reason = subscriptionReason(values.reason)
+  const notes =
+    values.notes === undefined ? null : subscriptionNotes(values.notes)
   if ((type !== "trial" && type !== "regular") || endsAt <= now)
     throw new TypeError("Choose a subscription type and future expiration.")
   const mutation =
     expectedRevision === 0
       ? database
           .prepare(
-            `INSERT INTO subscriptions (id, user_id, type, status, started_at, end_at, updated_at, revision)
-             VALUES (?, ?, ?, 'active', ?, ?, ?, 1)
+            `INSERT INTO subscriptions (id, user_id, type, status, started_at, end_at, updated_at, revision, notes)
+             VALUES (?, ?, ?, 'active', ?, ?, ?, 1, ?)
              ON CONFLICT(user_id) DO NOTHING RETURNING *`
           )
-          .bind(randomUUID(), userId, type, now, endsAt, now)
+          .bind(randomUUID(), userId, type, now, endsAt, now, notes ?? "")
       : database
           .prepare(
             `UPDATE subscriptions SET type = ?, status = 'active', started_at = ?,
-             end_at = ?, updated_at = ?, revision = revision + 1
+             end_at = ?, updated_at = ?, revision = revision + 1, notes = COALESCE(?, notes)
              WHERE user_id = ? AND revision = ? RETURNING *`
           )
-          .bind(type, now, endsAt, now, userId, expectedRevision)
+          .bind(type, now, endsAt, now, notes, userId, expectedRevision)
   return mutateWithAudit(
     database,
     mutation,
@@ -189,7 +312,8 @@ export async function setSubscription(
     expectedRevision,
     "set",
     actor,
-    `Set ${type} access until ${new Date(endsAt).toISOString()}`,
+    `Set ${type} access until ${new Date(endsAt).toISOString()}${notes !== null ? ` / Notes: ${notes || "(cleared)"}` : ""}`,
+    reason,
     now
   )
 }
@@ -201,40 +325,67 @@ export async function changeSubscription(
   expectedRevision: number,
   actor: string,
   durationDays?: number,
-  now = Date.now()
+  now = Date.now(),
+  options: { reason?: string; endsAt?: number } = {}
 ): Promise<SubscriptionSummary> {
   validateMutation(userId, expectedRevision, actor, now)
+  const reason = subscriptionReason(options.reason)
   if (!["revoke", "restore", "extend"].includes(action))
     throw new TypeError("Invalid subscription action.")
   let mutation: D1PreparedStatement
   let detail: string
   if (action === "extend") {
-    if (
-      !Number.isSafeInteger(durationDays) ||
-      !durationDays ||
-      durationDays < 1 ||
-      !Number.isSafeInteger(durationDays * millisecondsPerDay) ||
-      durationDays * millisecondsPerDay > maximumTimestamp - now
-    )
-      throw new TypeError("Enter a positive whole number of days.")
-    const duration = durationDays * millisecondsPerDay
-    mutation = database
-      .prepare(
-        `UPDATE subscriptions SET end_at = MAX(end_at, ?) + ?, updated_at = ?,
-         revision = revision + 1 WHERE user_id = ? AND revision = ?
-         AND MAX(end_at, ?) <= ? RETURNING *`
+    if (options.endsAt !== undefined) {
+      validateTimestamp(options.endsAt)
+      if (durationDays !== undefined || options.endsAt <= now)
+        throw new TypeError("Choose a future expiration or a number of days.")
+      // Read for a useful validation error; the SQL guard still protects races.
+      const existing = await getSubscription(database, userId, now)
+      if (
+        existing &&
+        existing.revision === expectedRevision &&
+        options.endsAt <= existing.endsAt
       )
-      .bind(
-        now,
-        duration,
-        now,
-        userId,
-        expectedRevision,
-        now,
-        maximumTimestamp - duration
+        throw new TypeError(
+          "The extension must end after the current expiration."
+        )
+      mutation = database
+        .prepare(
+          `UPDATE subscriptions SET end_at = ?, updated_at = ?, revision = revision + 1
+           WHERE user_id = ? AND revision = ? AND end_at < ? RETURNING *`
+        )
+        .bind(options.endsAt, now, userId, expectedRevision, options.endsAt)
+      detail = `Extended access until ${new Date(options.endsAt).toISOString()}`
+    } else {
+      if (
+        !Number.isSafeInteger(durationDays) ||
+        !durationDays ||
+        durationDays < 1 ||
+        !Number.isSafeInteger(durationDays * millisecondsPerDay) ||
+        durationDays * millisecondsPerDay > maximumTimestamp - now
       )
-    detail = `Extended access by ${durationDays} ${durationDays === 1 ? "day" : "days"}`
+        throw new TypeError("Enter a positive whole number of days.")
+      const duration = durationDays * millisecondsPerDay
+      mutation = database
+        .prepare(
+          `UPDATE subscriptions SET end_at = MAX(end_at, ?) + ?, updated_at = ?,
+           revision = revision + 1 WHERE user_id = ? AND revision = ?
+           AND MAX(end_at, ?) <= ? RETURNING *`
+        )
+        .bind(
+          now,
+          duration,
+          now,
+          userId,
+          expectedRevision,
+          now,
+          maximumTimestamp - duration
+        )
+      detail = `Extended access by ${durationDays} ${durationDays === 1 ? "day" : "days"}`
+    }
   } else {
+    if (options.endsAt !== undefined)
+      throw new TypeError("Expiration is only supported for extensions.")
     mutation = database
       .prepare(
         `UPDATE subscriptions SET status = ?, updated_at = ?, revision = revision + 1
@@ -256,6 +407,38 @@ export async function changeSubscription(
     action,
     actor,
     detail,
+    reason,
+    now
+  )
+}
+
+export async function updateSubscriptionNotes(
+  database: D1Database,
+  userId: string,
+  notes: string,
+  expectedRevision: number,
+  actor: string,
+  now = Date.now(),
+  reason?: string
+): Promise<SubscriptionSummary> {
+  validateMutation(userId, expectedRevision, actor, now)
+  const normalizedNotes = subscriptionNotes(notes)
+  const normalizedReason = subscriptionReason(reason)
+  const mutation = database
+    .prepare(
+      `UPDATE subscriptions SET notes = ?, updated_at = ?, revision = revision + 1
+       WHERE user_id = ? AND revision = ? RETURNING *`
+    )
+    .bind(normalizedNotes, now, userId, expectedRevision)
+  return mutateWithAudit(
+    database,
+    mutation,
+    userId,
+    expectedRevision,
+    "update-notes",
+    actor,
+    `Updated administrator notes: ${normalizedNotes || "(cleared)"}`,
+    normalizedReason,
     now
   )
 }
@@ -267,7 +450,7 @@ export async function listSubscriptionAudit(
   validateUserId(userId)
   const rows = await database
     .prepare(
-      `SELECT a.id, a.action, a.actor, a.created_at AS createdAt, a.detail
+      `SELECT a.id, a.action, a.actor, a.created_at AS createdAt, a.detail, a.reason
        FROM subscription_audit a JOIN subscriptions s ON s.id = a.subscription_id
        WHERE s.user_id = ? ORDER BY a.created_at DESC, a.id DESC LIMIT 100`
     )
