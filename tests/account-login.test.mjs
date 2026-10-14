@@ -1,6 +1,8 @@
 import assert from "node:assert/strict"
 import { createHash, generateKeyPairSync, sign } from "node:crypto"
 import { after, before, beforeEach, test } from "node:test"
+import { readFile, readdir } from "node:fs/promises"
+import { getPlatformProxy, unstable_splitSqlQuery } from "wrangler"
 import { sealData, unsealData } from "iron-session"
 import {
   authenticateLicenseAdmin,
@@ -12,6 +14,13 @@ import {
 } from "../lib/license-admin-auth.ts"
 import { onRequest as loginRoute } from "../functions/api/account/auth/login.ts"
 import { onRequest as logoutRoute } from "../functions/api/account/auth/logout.ts"
+import { onRequest as accountMiddleware } from "../functions/_middleware.ts"
+import { handleAdminReminders } from "../functions/api/admin/subscription-reminders.ts"
+import {
+  getSubscription,
+  listSubscriptionAudit,
+  changeSubscription,
+} from "../lib/subscription-store.ts"
 
 const origin = "https://photodepot.app"
 const clientId = "client_account_flow"
@@ -42,6 +51,7 @@ const jwk = {
   use: "sig",
 }
 let originalFetch,
+  platform,
   expectedVerifier,
   exchanges,
   tokenClaims,
@@ -64,7 +74,27 @@ function jwt(claims = {}) {
   ).toString("base64url")
   return `${header}.${payload}.${sign("RSA-SHA256", Buffer.from(`${header}.${payload}`), rsa.privateKey).toString("base64url")}`
 }
-before(() => {
+before(async () => {
+  platform = await getPlatformProxy({
+    configPath: "wrangler.jsonc",
+    persist: false,
+    remoteBindings: false,
+    envFiles: [],
+  })
+  env.DB = platform.env.DB
+  for (const filename of (
+    await readdir(new URL("../migrations/", import.meta.url))
+  )
+    .filter((name) => name.endsWith(".sql"))
+    .sort()) {
+    const sql = await readFile(
+      new URL(`../migrations/${filename}`, import.meta.url),
+      "utf8"
+    )
+    await env.DB.batch(
+      unstable_splitSqlQuery(sql).map((statement) => env.DB.prepare(statement))
+    )
+  }
   originalFetch = globalThis.fetch
   globalThis.fetch = async (input, options) => {
     const url = String(input)
@@ -92,15 +122,21 @@ before(() => {
     })
   }
 })
-beforeEach(() => {
+beforeEach(async () => {
+  await env.DB.batch(
+    ["DELETE FROM subscription_audit", "DELETE FROM subscriptions"].map((sql) =>
+      env.DB.prepare(sql)
+    )
+  )
   expectedVerifier = undefined
   exchanges = []
   tokenClaims = {}
   returnedUser = { ...user }
   failRefresh = undefined
 })
-after(() => {
+after(async () => {
   globalThis.fetch = originalFetch
+  await platform?.dispose()
 })
 function request(path, cookie, method = "GET", requestOrigin = origin) {
   return new Request(`${requestOrigin}${path}`, {
@@ -252,6 +288,129 @@ test("account sign-in also permits a verified Member but never creates an admin 
     401
   )
 })
+test("direct customer portal login uses its own session and a fixed safe return path", async () => {
+  const response = await handleAccountLogin(
+    request("/api/account/auth/login?next=https://attacker.example"),
+    env
+  )
+  assert.equal(response.status, 302)
+  const url = new URL(response.headers.get("location"))
+  assert.equal(url.searchParams.has("organization_id"), false)
+  const cookie = cookiePair(
+    responseCookie(response, "__Host-photodepot-account-login")
+  )
+  const transaction = await unsealData(cookieValue(cookie), {
+    password,
+    ttl: 600,
+  })
+  assert.equal(transaction.returnPath, "/account")
+  expectedVerifier = transaction.codeVerifier
+  const done = await callback(cookie, transaction.state)
+  assert.equal(done.status, 303)
+  assert.equal(done.headers.get("location"), "/account")
+  assert.ok(responseCookie(done, "__Host-photodepot-account"))
+  assert.equal(responseCookie(done, "__Host-photodepot-admin"), undefined)
+})
+test("all customer portal shell URLs require a verified account session and keep private headers", async () => {
+  for (const path of [
+    "/account",
+    "/account/",
+    "/account.html",
+    "/account.txt",
+    "/account/__next._full.txt",
+    "/account/__next.account.__PAGE__.txt",
+    "/account/__next._tree.txt",
+  ]) {
+    let served = false
+    let response = await accountMiddleware({
+      request: request(path),
+      env,
+      next: () => {
+        served = true
+        return new Response("account shell")
+      },
+    })
+    assert.equal(response.status, 302)
+    assert.equal(response.headers.get("location"), "/api/account/auth/login")
+    assert.equal(served, false)
+    response = await accountMiddleware({
+      request: request(path, await sessionCookie()),
+      env,
+      next: () => {
+        served = true
+        return new Response("account shell")
+      },
+    })
+    assert.equal(response.status, 200)
+    assert.equal(served, true)
+    assert.equal(response.headers.get("cache-control"), "private, no-store")
+    assert.equal(response.headers.get("x-robots-tag"), "noindex, nofollow")
+  }
+})
+test("reminder queues and manual checks require Owner cookies and same-origin mutations", async () => {
+  const dev = { ...env, PHOTODEPOT_ENVIRONMENT: "development" }
+  for (const cookie of [
+    undefined,
+    await sessionCookie(),
+    await sessionCookie("admin", { org_id: organizationId, role: "member" }),
+  ]) {
+    const denied = await handleAdminReminders(
+      request("/api/admin/subscription-reminders", cookie),
+      dev
+    )
+    assert.ok([401, 403].includes(denied.status))
+  }
+  const owner = await sessionCookie("admin", {
+    org_id: organizationId,
+    role: "owner",
+  })
+  const queue = await handleAdminReminders(
+    request("/api/admin/subscription-reminders", owner),
+    dev
+  )
+  assert.equal(queue.status, 200)
+  assert.equal((await queue.json()).mode, "preview")
+  const make = (originHeader) =>
+    new Request(`${origin}/api/admin/subscription-reminders`, {
+      method: "POST",
+      headers: {
+        cookie: owner,
+        origin: originHeader,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ action: "run" }),
+    })
+  assert.equal(
+    (await handleAdminReminders(make("https://attacker.example"), dev)).status,
+    403
+  )
+  assert.equal((await handleAdminReminders(make(origin), dev)).status, 200)
+})
+test("account callback activates signup trial once and preserves an admin revocation on later sign-in", async () => {
+  let flow = await beginAccount()
+  assert.equal(
+    (await callback(flow.cookie, flow.transaction.state)).status,
+    303
+  )
+  const trial = await getSubscription(env.DB, user.id)
+  assert.equal(trial.type, "trial")
+  assert.equal(trial.startsAt, Date.parse(user.created_at))
+  assert.equal(trial.endsAt - trial.startsAt, 7 * 86_400_000)
+  const revoked = await changeSubscription(
+    env.DB,
+    user.id,
+    "revoke",
+    trial.revision,
+    "owner@example.test"
+  )
+  flow = await beginAccount()
+  assert.equal(
+    (await callback(flow.cookie, flow.transaction.state)).status,
+    303
+  )
+  assert.deepEqual(await getSubscription(env.DB, user.id), revoked)
+  assert.equal((await listSubscriptionAudit(env.DB, user.id)).length, 2)
+})
 test("account callback rejects unverified email and tokens bound to another client or user", async () => {
   for (const mismatch of ["unverified", "client", "user"]) {
     tokenClaims =
@@ -264,6 +423,7 @@ test("account callback rejects unverified email and tokens bound to another clie
     const { cookie, transaction } = await beginAccount()
     const response = await callback(cookie, transaction.state)
     assert.equal(response.status, 401)
+    assert.equal(await getSubscription(env.DB, user.id), null)
     assert.equal(
       responseCookie(response, "__Host-photodepot-account"),
       undefined
@@ -324,7 +484,7 @@ test("missing, forged, expired and mismatched account transactions never exchang
   }
   assert.equal(exchanges.length, 0)
 })
-test("account transactions cannot return outside the exact Mac activation route", async () => {
+test("account transactions cannot return outside the portal or exact Mac activation route", async () => {
   const { transaction } = await beginAccount()
   for (const returnPath of [
     undefined,

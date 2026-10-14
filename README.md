@@ -21,10 +21,9 @@ local network, and changes are shared across the project.
 Ingest and export remain with the host. The complete Ingest, Cull, Organize, and
 Export workflow is also explained. Joining the waitlist
 is its only call to action. The original download page lives at `/tester`, with
-its Apple Silicon and Intel download buttons. Downloads are currently paused while
-desktop licensing is checked locally; the buttons are disabled and both API routes
-return the unavailable notice without reading R2. A license key is required in the
-desktop app to open or create local projects.
+its Apple Silicon and Intel download buttons for version 0.2.0. An active account
+subscription or compatible license is required in the desktop app to open or
+create local projects.
 
 Screenshots show the actual Photodepot desktop app in light mode with demo
 media. Capture and media provenance are documented in
@@ -96,15 +95,13 @@ signs are literal; there is no Next.js-style variable expansion.
 
 ### Downloads and releases
 
-Downloads are temporarily paused with `DOWNLOADS_ENABLED = false` in
-`lib/download-files.ts`. Website installer copies and hosted R2 installers have
-been removed, and upload commands refuse to run while paused. Re-enable the flag
-only when a licensed desktop release is ready.
+Version 0.2.0 provides account sign-in, seven-day trials, and up to two connected
+Macs. Both signed, notarized installers are published together.
 
 For that release, keep DMGs in the ignored `downloads/` folder, **outside `public/`**:
 
-- `photodepot-0.1.6-arm64.dmg`
-- `photodepot-0.1.6-x64.dmg`
+- `photodepot-0.2.0-arm64.dmg`
+- `photodepot-0.2.0-x64.dmg`
 
 Update the versioned keys in `lib/download-files.ts` for a new release, upload
 both installers, then deploy. Upload commands validate both files before writing
@@ -190,10 +187,29 @@ pnpm functions:build
 ```
 
 Tests use Node's built-in runner and Cloudflare's local D1/R2 runtime. API test
-bindings are isolated and do not access production storage. Tests cover paused
-GET/HEAD downloads without R2 access, byte-range parsing and invalid requests; D1 waitlist
-persistence and duplicates; license administration and verification; and static
-asset leakage prevention.
+bindings are isolated and do not access production storage. Tests cover public
+GET/HEAD downloads, byte ranges, unavailable storage and invalid requests;
+D1 waitlist persistence and duplicates; license administration and verification;
+and static asset leakage prevention.
+
+The dashboard and customer account browser tests run against the built site and
+isolated mock APIs. They cover manual grants, extensions, notes, revocation,
+restoration, individual Mac resets, customer requests, admin review, reminder
+previews, filtering, pagination, stale edits, session errors, and mobile keyboard
+access. Run them separately with an LTS Node.js release:
+
+```sh
+pnpm exec playwright install chromium
+pnpm build
+pnpm test:dashboard
+# Alternatively, use an installed Chrome instead of downloading Chromium:
+PHOTODEPOT_TEST_BROWSER_CHANNEL=chrome pnpm test:dashboard
+```
+
+Screenshots are saved in the ignored `.wrangler/dashboard-browser` directory.
+These UI tests complement the D1/API tests; they do not contact WorkOS or change
+production data.
+
 Brand assets are copied from the sibling `photodepot/build/brand` directory:
 the canonical SVG lockup is used in both headers, the 1024-pixel app icon is used
 on `/tester` and in social previews, and the ICO and simplified SVG supply browser
@@ -204,27 +220,107 @@ Photography credits are in `public/photography/pexels/README.md`; the Inter font
 
 ## Account subscriptions
 
-Subscription administration is available at `/admin/subscriptions`; `/admin/licenses` opens the same dashboard for existing bookmarks. All Photodepot WorkOS users appear automatically, including users without a subscription. Only the `owner` role in `WORKOS_ADMIN_ORGANIZATION_ID` can assign Trial or Standard access, choose a duration, extend, revoke, restore, reset Mac access, and read its audit history. Signups receive neither subscriptions nor administration membership automatically. See [subscription setup and protocol](deploy/LICENSES.md).
+Subscription administration is available at `/admin/subscriptions`. Each new account automatically receives a seven-day trial starting at its WorkOS signup timestamp. The signed `user.created` notification activates the trial immediately; successful verified account sign-in provides the same idempotent fallback. Neither path renews an expired trial or overwrites an admin grant or revocation. Signups never receive administration membership. Only the `owner` role in `WORKOS_ADMIN_ORGANIZATION_ID` can manage access. See [subscription setup and protocol](deploy/LICENSES.md).
 
 Set `WORKOS_CLIENT_ID`, `WORKOS_ADMIN_ORGANIZATION_ID`,
 `WORKOS_REDIRECT_URI=https://photodepot.app/api/auth/callback`, and a random
 `WORKOS_COOKIE_PASSWORD` of at least 32 characters in Pages settings/secrets.
 The server uses PKCE and encrypted HttpOnly session cookies. Add the server-only
 encrypted `WORKOS_API_KEY` secret for listing users and checking account status.
-Never include the key in browser assets or desktop builds. Apply additive D1
-migrations `0003` through `0005` after making a private backup.
+Never include the key in browser assets or desktop builds. Apply D1
+migrations through `0009` before starting the updated backend. Register a WorkOS
+`user.created` webhook at `https://photodepot.app/api/account/webhook` and store its
+signing secret as `WORKOS_WEBHOOK_SECRET`. The handler validates the signature and
+bounded raw request body before granting access. Without a webhook, signup during
+desktop sign-in still activates the trial through the authenticated callback.
 
-The dashboard refreshes visible user pages every 30 seconds while no dialog or
-mutation is open. Edits use revision checks to reject stale writes. If a session
-expires, Sign in opens a new tab; return and select Refresh.
+The dashboard shows its environment, whole-database subscription totals, trials,
+expirations in the next seven days, and Mac assignments. Search and status/type
+filters apply to loaded WorkOS users, with explicit pagination. Admins can grant
+Trial or Standard access by duration or exact end date, extend, revoke, restore,
+reset an individual Mac or both Macs, record a reason, keep internal notes, and
+inspect audit history. The customer request queue shows renewals and requests to
+remove a specific Mac. Admins can acknowledge, complete, or decline a request with
+internal review notes. Review status changes never grant access or reset a device;
+apply those changes from account details, then complete the request.
+Visible pages refresh every 30 seconds while no dialog or mutation is open.
+Revision checks reject stale writes. If a session expires, Sign in opens a new
+tab; return and select Refresh. No payment provider or charging flow is connected.
 
 Desktop account sign-in opens WorkOS in the external browser and asks the user
 to approve the Mac. The desktop receives a signed finite receipt, with no WorkOS
-tokens or API key. One account binds to one Mac; reset invalidates prior bindings
-and earlier approved requests. Receipt expiry is capped at the subscription end
+tokens or API key. One account supports up to two Macs. An individual reset
+releases only the selected Mac and leaves the other Mac’s access intact. Resetting
+all Macs invalidates both assignments and earlier approved pairing requests.
+Receipt expiry is capped at the subscription end
 and 48 hours. An admitted session keeps its work and collaboration until quit;
 expiry, revocation, and offline limits are enforced on the next app launch.
-Existing license keys remain compatible during migration. Device identity and
-receipts still use the existing encrypted local storage, which can access macOS
-Keychain. Manual subscription assignment does not charge customers or enable
-paid WorkOS services; automated payment collection requires a later billing integration.
+Device identity and receipts use encrypted local storage, which can access macOS
+Keychain. The app exposes account sign-in and subscription access.
+
+### Customer account and requests
+
+Users can sign in at `/account` to view their trial or standard plan, expiry, and
+connected Macs. Account cookies are separate from admin cookies. Customers see
+only their own subscription and latest 50 requests; administrator notes, review
+notes, subscription audits, device keys, and internal revisions are excluded.
+
+Renewal and Mac removal requests require the signed-in account and same-origin
+JSON submission. A Mac removal must select one of that account’s current Macs.
+At most one open request is allowed per account, request type, and Mac; retries
+return the existing request instead of duplicating it. Acknowledged requests stay
+open until completed or declined. New requests are limited to five per rolling
+24 hours. Requests never immediately change access and never collect payment.
+Admin reviews use revision checks and retain a separate administrator audit.
+
+### Daily renewal queue and trial reminders
+
+The admin dashboard lists active trials and standard subscriptions ending within
+seven days. Trial reminder messages are prepared once per trial term during the
+final 48 hours. The queue also shows delivery status, development previews, and
+failed or uncertain attempts. Select **Check reminders now** to process due
+trials; this uses the same routine as the scheduled worker.
+
+Development always saves previews and sends no email. Production delivery stays
+disabled until a provider and sender are configured; no production email settings
+or scheduled worker are deployed by this change. The optional Resend adapter,
+worker setup, and hourly due-reminder checks are documented in
+[the reminder worker guide](workers/README.md). Standard plans appear in the
+renewal queue but do not receive the trial email.
+
+### Local subscription development
+
+Run from this website repository, passing the actual desktop checkout directory:
+
+```sh
+pnpm subscriptions:setup --desktop-dir /path/to/photodepot
+```
+
+This creates untracked `.dev.vars.development` containing a new server signing key
+and cookie secret, and writes the matching public key and localhost URL to the
+desktop's `.env.development`. Re-running retains both identities and refuses to
+overwrite a different desktop authority. Add your **WorkOS Development** client
+ID, API key (`sk_test_…`), and admin organization ID to `.dev.vars.development`.
+Register `http://localhost:8788/api/auth/callback` in that WorkOS environment and
+assign your administrator the `owner` role in the configured organization. Keep
+Member as the default role. These are real WorkOS sessions; there is no dev login
+bypass. A localhost webhook is optional because the signup callback grants trials.
+
+```sh
+# Website: builds assets, applies local migrations, starts http://localhost:8788
+pnpm subscriptions:dev
+# Desktop: in its checkout, opens a build using .env.development
+pnpm dev:subscriptions
+```
+
+Visit `http://localhost:8788/admin/subscriptions` to edit local access. The dev
+dashboard uses a dedicated local D1 database under
+`.wrangler/subscription-development/state`, a local R2 binding, and its own
+Wrangler working directory. It never loads the production `.dev.vars` file.
+The desktop has separate user data and a separate Mac identity; packaged dev
+builds also have a distinct name and app ID. Production remains the default
+profile for releases. Dev trials and admin mutations do not change production.
+The local development server checks due trial reminders every minute and saves
+their previews. Visit `/account` to submit a local customer request and
+`/admin/subscriptions` to review it or inspect the reminder preview; no email is
+sent from this environment.

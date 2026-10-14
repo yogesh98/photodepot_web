@@ -77,6 +77,7 @@ export function signedReceipt(
     status: "active" | "revoked"
     challenge: string
     revision: number
+    subscriptionEndsAt?: number
   },
   now = Date.now(),
   maxExpiresAt?: number
@@ -87,18 +88,27 @@ export function signedReceipt(
       : now + LICENSE_GRACE_MS
   if (!Number.isSafeInteger(expiresAt) || expiresAt <= now)
     throw new Error("License access has expired")
-  const payload = Buffer.from(
-    JSON.stringify({
-      version: 1,
-      ...details,
-      issuedAt: now,
-      expiresAt,
-    })
-  ).toString("base64url")
-  return {
-    payload,
-    signature: sign(null, Buffer.from(payload, "base64url"), key).toString(
-      "base64url"
-    ),
+  const envelope = (fields: typeof details) => {
+    const payload = Buffer.from(
+      JSON.stringify({
+        version: 1,
+        ...fields,
+        issuedAt: now,
+        expiresAt,
+      })
+    ).toString("base64url")
+    return {
+      payload,
+      signature: sign(null, Buffer.from(payload, "base64url"), key).toString(
+        "base64url"
+      ),
+    }
   }
+  const receipt = envelope(details)
+  if (details.subscriptionEndsAt === undefined) return receipt
+  // Existing collaboration guests parse a strict v1 payload. New hosts receive
+  // the same signed grant without the optional account date for their proofs.
+  const compatibleDetails = { ...details }
+  delete compatibleDetails.subscriptionEndsAt
+  return { ...receipt, collaborationReceipt: envelope(compatibleDetails) }
 }

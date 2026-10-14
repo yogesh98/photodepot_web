@@ -267,7 +267,7 @@ test("only a verified Owner session in the configured organization can read or m
   assert.equal(await count("subscriptions"), 0)
   assert.equal(await count("subscription_audit"), 0)
 })
-test("WorkOS users appear without administration membership or automatic subscription grants", async () => {
+test("listing WorkOS users is read-only and does not itself trigger signup trials", async () => {
   const response = await api()
   assert.equal(response.status, 200)
   const result = await response.json()
@@ -523,10 +523,7 @@ test("Mac reset retains prior identity proofs, expiry and type while advancing t
   const deviceId = "b".repeat(64)
   await env.DB.batch([
     env.DB.prepare(
-      "UPDATE subscriptions SET current_device_id = ? WHERE user_id = ?"
-    ).bind(deviceId, "user_api_trial"),
-    env.DB.prepare(
-      "INSERT INTO account_devices (device_id, user_id, public_key, binding_revision, activated_at) VALUES (?, ?, ?, 1, ?)"
+      "INSERT INTO account_devices (device_id, user_id, public_key, binding_revision, activated_at, active) VALUES (?, ?, ?, 1, ?, 1)"
     ).bind(deviceId, "user_api_trial", "fixture-public-key", Date.now()),
   ])
   const original = await env.DB.prepare(
@@ -545,11 +542,11 @@ test("Mac reset retains prior identity proofs, expiry and type while advancing t
   assert.equal(reset.endsAt, original.end_at)
   assert.equal(reset.revision, 2)
   const row = await env.DB.prepare(
-    "SELECT current_device_id, binding_revision FROM subscriptions WHERE user_id = ?"
+    "SELECT binding_revision FROM subscriptions WHERE user_id = ?"
   )
     .bind("user_api_trial")
     .first()
-  assert.deepEqual(row, { current_device_id: null, binding_revision: 2 })
+  assert.deepEqual(row, { binding_revision: 2 })
   assert.equal(await count("account_devices"), 1)
   const history = await (
     await api(undefined, "?userId=user_api_trial&history=1")
@@ -586,4 +583,318 @@ test("refreshed Owner cookies propagate on successful reads and rejected mutatio
         )
     )
   }
+})
+
+test("dashboard overview counts the whole subscription database rather than the current WorkOS page", async (t) => {
+  const now = Date.now()
+  t.mock.method(Date, "now", () => now)
+  listPageSize = 1
+  await api(setBody("user_api_trial", { durationDays: 7 }))
+  await api(setBody("user_api_regular", { type: "regular", durationDays: 30 }))
+  await setSubscription(
+    env.DB,
+    {
+      userId: "user_not_on_page",
+      type: "trial",
+      expectedRevision: 0,
+      endsAt: now,
+    },
+    adminEmail,
+    now - day
+  )
+  await setSubscription(
+    env.DB,
+    {
+      userId: "user_other_hidden",
+      type: "regular",
+      expectedRevision: 0,
+      endsAt: now + day,
+    },
+    adminEmail,
+    now
+  )
+  await env.DB.prepare(
+    "UPDATE subscriptions SET status = 'revoked' WHERE user_id = 'user_other_hidden'"
+  ).run()
+  const page = await (await api()).json()
+  assert.equal(page.users.length, 1)
+  assert.equal(page.nextCursor, "user_api_trial")
+  assert.deepEqual(page.overview, {
+    totalSubscriptions: 4,
+    active: 2,
+    activeTrials: 1,
+    activeStandard: 1,
+    expired: 1,
+    revoked: 1,
+    expiringSoon: 1,
+    assignedMacs: 0,
+    asOf: now,
+    expiringWithinDays: 7,
+  })
+  assert.equal(page.environment, "production")
+  assert.equal(page.billingMode, "manual")
+  assert.equal(page.trialDays, 7)
+  const development = await handleAdminSubscriptions(
+    request("", undefined, { cookie: await cookie() }),
+    { ...env, PHOTODEPOT_ENVIRONMENT: "development" }
+  )
+  assert.equal((await development.json()).environment, "development")
+})
+
+test("exact grant and extension dates, administrator notes and reasons are persisted with guarded audits", async (t) => {
+  const now = Date.now()
+  t.mock.method(Date, "now", () => now)
+  const granted = await api({
+    action: "set",
+    userId: "user_api_trial",
+    type: "trial",
+    endsAt: now + 10 * day,
+    expectedRevision: 0,
+    notes: "  Manual customer grant  ",
+    reason: "Approved by owner",
+  })
+  assert.equal(granted.status, 201)
+  const original = (await granted.json()).subscription
+  assert.equal(original.endsAt, now + 10 * day)
+  assert.equal(original.notes, "Manual customer grant")
+  const extended = await api({
+    action: "extend",
+    userId: "user_api_trial",
+    endsAt: now + 20 * day,
+    expectedRevision: 1,
+    reason: "Support extension",
+  })
+  assert.equal(extended.status, 200)
+  const extension = (await extended.json()).subscription
+  assert.equal(extension.startsAt, original.startsAt)
+  assert.equal(extension.endsAt, now + 20 * day)
+  assert.equal(extension.notes, original.notes)
+  const annotated = await api({
+    action: "update-notes",
+    userId: "user_api_trial",
+    notes: "Support case 42",
+    expectedRevision: 2,
+    reason: "Internal account review",
+  })
+  assert.equal(annotated.status, 200)
+  assert.equal((await annotated.json()).subscription.revision, 3)
+  const history = await (
+    await api(undefined, "?history=1&userId=user_api_trial")
+  ).json()
+  assert.equal(history.subscription.notes, "Support case 42")
+  assert.deepEqual(history.devices, [])
+  assert.equal(
+    history.audit.find((entry) => entry.action === "set").reason,
+    "Approved by owner"
+  )
+  assert.equal(
+    history.audit.find((entry) => entry.action === "extend").reason,
+    "Support extension"
+  )
+  assert.equal(
+    history.audit.find((entry) => entry.action === "update-notes").reason,
+    "Internal account review"
+  )
+  const shortened = await api({
+    action: "extend",
+    userId: "user_api_trial",
+    endsAt: original.endsAt,
+    expectedRevision: 3,
+  })
+  assert.equal(shortened.status, 400)
+  const conflict = await api({
+    action: "update-notes",
+    userId: "user_api_trial",
+    notes: "Stale client notes",
+    expectedRevision: 2,
+  })
+  assert.equal(conflict.status, 409)
+  assert.equal(await count("subscription_audit"), 3)
+})
+
+test("Mac assignment details exclude signing keys and reset reasons appear alongside historical assignments", async () => {
+  await api(setBody())
+  const deviceId = "d".repeat(64)
+  const activatedAt = Date.now()
+  await env.DB.batch([
+    env.DB.prepare(
+      "INSERT INTO account_devices (device_id,user_id,public_key,binding_revision,activated_at,active) VALUES (?,?,?,1,?,1)"
+    ).bind(deviceId, "user_api_trial", "secret-signing-key", activatedAt),
+  ])
+  const page = await (await api()).json()
+  assert.deepEqual(page.users[0].subscription.devices, [
+    {
+      id: deviceId,
+      bindingRevision: 1,
+      assignmentRevision: 1,
+      activatedAt,
+    },
+  ])
+  assert.equal(page.overview.assignedMacs, 1)
+  const before = await (
+    await api(undefined, "?history=1&userId=user_api_trial")
+  ).json()
+  assert.deepEqual(before.devices, [
+    {
+      id: deviceId,
+      bindingRevision: 1,
+      assignmentRevision: 1,
+      activatedAt,
+      current: true,
+    },
+  ])
+  assert.equal(JSON.stringify(before).includes("secret-signing-key"), false)
+  const reset = await api({
+    action: "reset-device",
+    userId: "user_api_trial",
+    expectedRevision: 1,
+    reason: "Customer replaced their Mac",
+  })
+  assert.equal(reset.status, 200)
+  assert.deepEqual((await reset.json()).subscription.devices, [])
+  const after = await (
+    await api(undefined, "?history=1&userId=user_api_trial")
+  ).json()
+  assert.deepEqual(after.devices, [
+    {
+      id: deviceId,
+      bindingRevision: 1,
+      assignmentRevision: 1,
+      activatedAt,
+      current: false,
+    },
+  ])
+  assert.equal(
+    after.audit.find((entry) => entry.action === "reset-device").reason,
+    "Customer replaced their Mac"
+  )
+})
+
+test("invalid notes, reasons and exact expiry fields fail before contacting WorkOS or mutating access", async () => {
+  const future = Date.now() + day
+  for (const values of [
+    { notes: 42 },
+    { notes: null },
+    { notes: "a".repeat(2001) },
+    { reason: 42 },
+    { reason: null },
+    { reason: "a".repeat(1001) },
+    { endsAt: future },
+    { durationDays: undefined, endsAt: null },
+    { durationDays: undefined, endsAt: "2030-01-01" },
+    { durationDays: undefined, endsAt: Date.now() - 1 },
+    { durationDays: undefined, endsAt: 8_640_000_000_000_001 },
+    { action: "update-notes", notes: undefined, expectedRevision: 1 },
+  ])
+    assert.equal((await api(setBody(undefined, values))).status, 400)
+  assert.equal(
+    (await api(setBody(), "", { "content-type": "application/json-invalid" }))
+      .status,
+    415
+  )
+  assert.equal(userRequests.length, 0)
+  assert.equal(await count("subscriptions"), 0)
+  assert.equal(await count("subscription_audit"), 0)
+})
+
+test("targeted admin reset keeps the second Mac active and rejects an unknown or other account's assignment", async () => {
+  await api(setBody())
+  await api(setBody("user_api_regular", { type: "regular" }))
+  const firstMac = "a".repeat(64),
+    otherMac = "b".repeat(64),
+    foreignMac = "c".repeat(64)
+  const now = Date.now()
+  await env.DB.batch([
+    env.DB.prepare(
+      "INSERT INTO account_devices (device_id,user_id,public_key,binding_revision,activated_at,active) VALUES (?,'user_api_trial','first-public-key',1,?,1)"
+    ).bind(firstMac, now),
+    env.DB.prepare(
+      "INSERT INTO account_devices (device_id,user_id,public_key,binding_revision,activated_at,active) VALUES (?,'user_api_trial','other-public-key',1,?,1)"
+    ).bind(otherMac, now),
+    env.DB.prepare(
+      "INSERT INTO account_devices (device_id,user_id,public_key,binding_revision,activated_at,active) VALUES (?,'user_api_regular','foreign-public-key',1,?,1)"
+    ).bind(foreignMac, now),
+  ])
+  const original = (await (await api()).json()).users.find(
+    (user) => user.id === "user_api_trial"
+  ).subscription
+  assert.equal(original.devices.length, 2)
+  assert.equal(original.deviceLimit, 2)
+  for (const deviceId of ["d".repeat(64), foreignMac]) {
+    const rejected = await api({
+      action: "reset-device",
+      userId: "user_api_trial",
+      expectedRevision: 1,
+      deviceId,
+    })
+    assert.equal(rejected.status, 409)
+  }
+  assert.equal(await count("subscription_audit"), 2)
+  const reset = await api({
+    action: "reset-device",
+    userId: "user_api_trial",
+    expectedRevision: 1,
+    deviceId: firstMac,
+    reason: "Retired one Mac",
+  })
+  assert.equal(reset.status, 200)
+  const changed = (await reset.json()).subscription
+  assert.equal(changed.bindingRevision, original.bindingRevision)
+  assert.equal(changed.revision, 2)
+  assert.equal(changed.type, original.type)
+  assert.equal(changed.endsAt, original.endsAt)
+  assert.deepEqual(
+    changed.devices.map(({ id }) => id),
+    [otherMac]
+  )
+  const history = await (
+    await api(undefined, "?history=1&userId=user_api_trial")
+  ).json()
+  assert.equal(history.devices.find(({ id }) => id === firstMac).current, false)
+  assert.equal(
+    history.devices.find(({ id }) => id === firstMac).assignmentRevision,
+    2
+  )
+  assert.equal(history.devices.find(({ id }) => id === otherMac).current, true)
+  assert.equal(
+    history.audit.find(({ action }) => action === "reset-device").reason,
+    "Retired one Mac"
+  )
+  const foreign = (await (await api()).json()).users.find(
+    (user) => user.id === "user_api_regular"
+  ).subscription
+  assert.deepEqual(
+    foreign.devices.map(({ id }) => id),
+    [foreignMac]
+  )
+  const global = await api({
+    action: "reset-device",
+    userId: "user_api_trial",
+    expectedRevision: 2,
+  })
+  assert.equal(global.status, 200)
+  const allReset = (await global.json()).subscription
+  assert.deepEqual(allReset.devices, [])
+  assert.equal(allReset.bindingRevision, original.bindingRevision + 1)
+})
+
+test("admin device identifiers are validated before WorkOS lookup and only accepted for reset", async () => {
+  for (const deviceId of [null, 123, "invalid", "a".repeat(63), "A".repeat(64)])
+    assert.equal(
+      (
+        await api({
+          action: "reset-device",
+          userId: "user_api_trial",
+          expectedRevision: 1,
+          deviceId,
+        })
+      ).status,
+      400
+    )
+  assert.equal(
+    (await api(setBody(undefined, { deviceId: "a".repeat(64) }))).status,
+    400
+  )
+  assert.equal(userRequests.length, 0)
+  assert.equal(await count("subscription_audit"), 0)
 })

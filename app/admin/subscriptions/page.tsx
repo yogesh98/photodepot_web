@@ -2,7 +2,7 @@ import type { Metadata } from "next"
 import { SubscriptionDashboard } from "@/components/subscription-dashboard"
 
 export const metadata: Metadata = {
-  title: "User subscriptions · Photodepot",
+  title: "Subscriptions · Photodepot",
   robots: { index: false, follow: false },
 }
 

@@ -1,0 +1,8 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "photodepot-subscription-reminders",
+  "main": "workers/subscription-reminders.ts",
+  "compatibility_date": "2026-10-08",
+  "triggers": { "crons": ["0 * * * *"] },
+  "vars": { "PHOTODEPOT_APP_URL": "https://photodepot.app" }
+}

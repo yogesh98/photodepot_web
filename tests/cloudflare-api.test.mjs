@@ -76,42 +76,80 @@ function assertUnavailable(response) {
   assert.equal(response.headers.get("set-cookie"), null)
 }
 
-test("paused downloads cannot stream either installer, including HEAD and Range requests", async () => {
-  // Both release objects exist, so the pause must take precedence over storage.
+test("both installers stream publicly with HEAD and byte-range support", async () => {
   for (const architecture of ["arm64", "x64"]) {
-    for (const method of ["GET", "HEAD"]) {
-      for (const headers of [
-        {},
-        { range: "bytes=2-5" },
-        { range: "bytes=2-" },
-        { range: "bytes=-5" },
-        { range: "bytes=999-" },
-        { range: "bytes=0-1", "if-range": '"old-version"' },
-        { cookie: "photodepot-download=expired" },
-      ]) {
-        const response = await download(method, headers, env, architecture)
-        assertUnavailable(response)
-        assert.equal(await response.text(), "")
-      }
+    const full = await download("GET", {}, env, architecture)
+    assert.equal(full.status, 200)
+    assert.equal(full.headers.get("content-length"), String(bytes.length))
+    assert.equal(
+      full.headers.get("content-disposition"),
+      `attachment; filename="${DOWNLOAD_FILES[architecture]}"`
+    )
+    assert.equal(full.headers.get("cache-control"), "private, no-store")
+    assert.equal(full.headers.get("set-cookie"), null)
+    assert.deepEqual(new Uint8Array(await full.arrayBuffer()), bytes)
+    const head = await download(
+      "HEAD",
+      { range: "bytes=2-5" },
+      env,
+      architecture
+    )
+    assert.equal(head.status, 200)
+    assert.equal(head.headers.get("content-length"), String(bytes.length))
+    assert.equal(await head.text(), "")
+    for (const [range, offset, length] of [
+      ["bytes=2-5", 2, 4],
+      ["bytes=2-", 2, bytes.length - 2],
+      ["bytes=-5", bytes.length - 5, 5],
+    ]) {
+      const response = await download("GET", { range }, env, architecture)
+      assert.equal(response.status, 206)
+      assert.equal(
+        response.headers.get("content-range"),
+        `bytes ${offset}-${offset + length - 1}/${bytes.length}`
+      )
+      assert.deepEqual(
+        new Uint8Array(await response.arrayBuffer()),
+        bytes.slice(offset, offset + length)
+      )
     }
+    const invalid = await download(
+      "GET",
+      { range: "bytes=999-" },
+      env,
+      architecture
+    )
+    assert.equal(invalid.status, 416)
+    assert.equal(
+      invalid.headers.get("content-range"),
+      `bytes */${bytes.length}`
+    )
+    const stale = await download(
+      "GET",
+      { range: "bytes=0-1", "if-range": '"old-version"' },
+      env,
+      architecture
+    )
+    assert.equal(stale.status, 200)
+    assert.deepEqual(new Uint8Array(await stale.arrayBuffer()), bytes)
   }
 })
 
-test("paused download requests return the unavailable page before accessing R2", async () => {
-  let storageReads = 0
-  const unreachable = {
+test("missing, empty, changed, and unreachable installers show the unavailable notice", async () => {
+  const metadata = await env.DOWNLOADS.head(DOWNLOAD_FILES.arm64)
+  const failed = {
     DOWNLOADS: {
       head: () => {
-        storageReads++
-        assert.fail("Paused downloads must not reach R2")
-      },
-      get: () => {
-        storageReads++
-        assert.fail("Paused downloads must not reach R2")
+        throw new Error("Storage unavailable")
       },
     },
   }
-  for (const bindings of [{}, unreachable]) {
+  for (const bindings of [
+    {},
+    failed,
+    { DOWNLOADS: { head: async () => null } },
+    { DOWNLOADS: { head: async () => ({ size: 0 }) } },
+  ]) {
     for (const architecture of ["arm64", "x64"]) {
       for (const method of ["GET", "HEAD"]) {
         for (const headers of [{}, { range: "bytes=0-1" }]) {
@@ -127,8 +165,24 @@ test("paused download requests return the unavailable page before accessing R2",
       }
     }
   }
-  // The handler catches storage errors, so verify reads separately as well.
-  assert.equal(storageReads, 0)
+  for (const object of [null, metadata]) {
+    let condition
+    const response = await download(
+      "GET",
+      {},
+      {
+        DOWNLOADS: {
+          head: async () => metadata,
+          get: async (_name, options) => {
+            condition = options.onlyIf
+            return object
+          },
+        },
+      }
+    )
+    assertUnavailable(response)
+    assert.deepEqual(condition, { etagMatches: metadata.etag })
+  }
 })
 
 test("unsupported architectures and methods cannot reach installer storage", async () => {

@@ -1,13 +1,10 @@
 # Photodepot installers
 
-Downloads are paused while desktop licensing is checked locally. Website installer
-copies and hosted R2 installers have been removed. Both download buttons are disabled,
-and the API redirects to the unavailable notice without reading installer storage.
+Version 0.2.0 includes account sign-in and subscriptions. Keep both signed, notarized
+installers here, outside the public website:
 
-When a licensed release is ready, keep its installers here, outside the public website:
-
-- `photodepot-0.1.6-arm64.dmg`
-- `photodepot-0.1.6-x64.dmg`
+- `photodepot-0.2.0-arm64.dmg`
+- `photodepot-0.2.0-x64.dmg`
 
 DMGs are ignored by Git. `pnpm downloads:upload` uploads them to the private R2
 bucket, and `pnpm downloads:upload:local` seeds local development storage.

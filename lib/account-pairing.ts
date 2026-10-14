@@ -38,6 +38,7 @@ interface Pairing {
   status: "pending" | "approved" | "cancelled"
   user_id: string | null
   approved_binding_revision: number | null
+  approved_device_revision: number | null
   created_at: number
   expires_at: number
 }
@@ -239,7 +240,7 @@ export async function handleAccountPairing(
       return json(
         {
           error:
-            "This sign-in request is no longer available, or your subscription is assigned to another Mac. Start again or ask the Owner to reset your Mac access.",
+            "This sign-in request is no longer available, or both Mac slots are in use. Start again or request a Mac reset from your account page.",
         },
         409
       )
@@ -256,6 +257,9 @@ export async function handleAccountPairing(
           status: "active",
           challenge: row.challenge,
           revision: binding.subscription.revision,
+          ...(request.headers.get("Photodepot-Receipt-Version") === "2"
+            ? { subscriptionEndsAt: binding.subscription.endsAt }
+            : {}),
         },
         Date.now(),
         binding.subscription.endsAt
@@ -373,13 +377,25 @@ export async function handleAccountApproval(request: Request, env: Env) {
           403
         )
       )
+    if (
+      subscription.devices.length >= subscription.deviceLimit &&
+      !subscription.devices.some((device) => device.id === row.device_id)
+    )
+      return respond(
+        page(
+          "Mac limit reached",
+          `<p>Your account already has ${subscription.deviceLimit} connected Macs.</p><p><a href="/account">Open your account page</a> to request a Mac reset before connecting another Mac.</p>`,
+          409
+        )
+      )
     if (request.method === "POST") {
       const result = await env.DB.prepare(
-        "UPDATE account_pairings SET status = 'approved', user_id = ?, approved_binding_revision = (SELECT binding_revision FROM subscriptions WHERE user_id = ?) WHERE code_hash = ? AND status = 'pending' AND expires_at > ? AND EXISTS (SELECT 1 FROM subscriptions WHERE user_id = ? AND status = 'active' AND started_at <= ? AND end_at > ?) RETURNING token_hash"
+        "UPDATE account_pairings SET status = 'approved', user_id = ?, approved_binding_revision = (SELECT binding_revision FROM subscriptions WHERE user_id = ?), approved_device_revision = COALESCE((SELECT assignment_revision FROM account_devices WHERE device_id = ?), 1) WHERE code_hash = ? AND status = 'pending' AND expires_at > ? AND EXISTS (SELECT 1 FROM subscriptions WHERE user_id = ? AND status = 'active' AND started_at <= ? AND end_at > ?) RETURNING token_hash"
       )
         .bind(
           user.id,
           user.id,
+          row.device_id,
           hash(code),
           Date.now(),
           user.id,
@@ -405,7 +421,7 @@ export async function handleAccountApproval(request: Request, env: Env) {
     return respond(
       page(
         "Sign in on your Mac",
-        `<p>Signed in as <strong>${escape(user.email)}</strong>.</p><p>${subscription.type === "trial" ? "Trial" : "Standard"} subscription active until ${escape(new Date(subscription.endsAt).toISOString().slice(0, 10))}.</p><small>Only approve if you just clicked Sign in in Photodepot on your own Mac. This links your subscription to that Mac.<br>Mac fingerprint: ${escape(row.device_id.slice(0, 12))}</small><form method="post" action="/account/activate?code=${code}"><button type="submit">Approve Mac sign-in</button></form><form method="post" action="/api/account/auth/logout"><button type="submit">Sign out</button></form>`
+        `<p>Signed in as <strong>${escape(user.email)}</strong>.</p><p>${subscription.type === "trial" ? "Trial" : "Standard"} subscription active until ${escape(new Date(subscription.endsAt).toISOString().slice(0, 10))}.</p><small>Only approve if you just clicked Sign in in Photodepot on your own Mac. This connects this Mac to your account (${subscription.devices.length} of ${subscription.deviceLimit} slots currently used).<br>Mac fingerprint: ${escape(row.device_id.slice(0, 12))}</small><form method="post" action="/account/activate?code=${code}"><button type="submit">Approve Mac sign-in</button></form><form method="post" action="/api/account/auth/logout"><button type="submit">Sign out</button></form>`
       )
     )
   } catch {
