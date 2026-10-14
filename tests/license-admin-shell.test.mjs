@@ -22,6 +22,10 @@ test("Pages routes send all admin shell URLs to fail-closed middleware", async (
       "/admin/licenses",
       "/admin/licenses.html",
       "/admin/licenses.txt",
+      "/admin/subscriptions",
+      "/admin/subscriptions/",
+      "/admin/subscriptions.html",
+      "/admin/subscriptions.txt",
     ]) {
       let called = false
       const response = await onRequest({

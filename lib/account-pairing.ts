@@ -159,6 +159,7 @@ export async function handleAccountPairing(
           pairingId,
           approvalUrl: `${origin}/account/activate?code=${code}`,
           expiresAt: now + lifetime,
+          expiresInMs: lifetime,
           pollIntervalMs: 2000,
         },
         201
@@ -208,7 +209,13 @@ export async function handleAccountPairing(
     const user = await getWorkOSUser(env, row.user_id!)
     if (!user?.emailVerified)
       return json({ error: "This account is unavailable. Sign in again." }, 403)
-    const subscription = await getSubscription(env.DB, user.id, now)
+    const deliveryNow = Date.now()
+    if (row.expires_at <= deliveryNow)
+      return json(
+        { error: "This sign-in request expired. Start again on your Mac." },
+        410
+      )
+    const subscription = await getSubscription(env.DB, user.id, deliveryNow)
     if (subscription?.status !== "active")
       return json(
         {
@@ -224,14 +231,15 @@ export async function handleAccountPairing(
         deviceId: row.device_id,
         publicKey: row.public_key,
         expectedBindingRevision: row.approved_binding_revision!,
+        pairing: { tokenHash: row.token_hash, challenge: row.challenge },
       },
-      now
+      Date.now()
     )
     if (!binding)
       return json(
         {
           error:
-            "Your subscription is assigned to another Mac. Ask the Owner to reset your Mac access.",
+            "This sign-in request is no longer available, or your subscription is assigned to another Mac. Start again or ask the Owner to reset your Mac access.",
         },
         409
       )
@@ -249,7 +257,7 @@ export async function handleAccountPairing(
           challenge: row.challenge,
           revision: binding.subscription.revision,
         },
-        now,
+        Date.now(),
         binding.subscription.endsAt
       ),
     })

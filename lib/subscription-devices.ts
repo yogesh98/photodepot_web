@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 import type { D1Database } from "@cloudflare/workers-types"
-import { parseDevicePublicKey } from "./license-crypto.ts"
+import { CHALLENGE_PATTERN, parseDevicePublicKey } from "./license-crypto.ts"
 import { SubscriptionConflictError } from "./subscription-store.ts"
 import type {
   SubscriptionSummary,
@@ -110,10 +110,12 @@ export async function bindSubscriptionDevice(
     deviceId: string
     publicKey: string
     expectedBindingRevision?: number
+    pairing?: { tokenHash: string; challenge: string }
   },
   now = Date.now()
 ): Promise<SubscriptionDevice | null> {
-  const { userId, deviceId, publicKey, expectedBindingRevision } = values
+  const { userId, deviceId, publicKey, expectedBindingRevision, pairing } =
+    values
   validateUserId(userId)
   validateNow(now)
   if (parseDevicePublicKey(publicKey).deviceId !== deviceId)
@@ -124,6 +126,24 @@ export async function bindSubscriptionDevice(
       expectedBindingRevision < 1)
   )
     throw new TypeError("Invalid Mac assignment revision.")
+  if (
+    pairing &&
+    (!/^[a-f0-9]{64}$/.test(pairing.tokenHash) ||
+      !CHALLENGE_PATTERN.test(pairing.challenge) ||
+      expectedBindingRevision === undefined)
+  )
+    throw new TypeError("Invalid Mac sign-in request.")
+  // Approval must still authorize this exact Mac when the binding commits.
+  // The database clock also closes expiry races while the batch is queued.
+  const pairingCondition = pairing
+    ? `AND EXISTS (SELECT 1 FROM account_pairings p
+         WHERE p.token_hash = ? AND p.status = 'approved'
+         AND p.expires_at > MAX(?, CAST(unixepoch('subsec') * 1000 AS INTEGER))
+         AND p.user_id = subscriptions.user_id AND p.device_id = ?
+         AND p.public_key = ? AND p.challenge = ?
+         AND p.approved_binding_revision = subscriptions.binding_revision)
+       AND subscriptions.end_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)`
+    : ""
   const results = await database.batch<SubscriptionDeviceRow>([
     database
       .prepare(
@@ -134,6 +154,7 @@ export async function bindSubscriptionDevice(
          AND (current_device_id IS NULL OR current_device_id = ?)
          AND (? IS NULL OR binding_revision = ?)
          AND NOT EXISTS (SELECT 1 FROM account_devices d WHERE d.device_id = ? AND d.user_id != ?)
+         ${pairingCondition}
          RETURNING *`
       )
       .bind(
@@ -146,7 +167,10 @@ export async function bindSubscriptionDevice(
         expectedBindingRevision ?? null,
         expectedBindingRevision ?? null,
         deviceId,
-        userId
+        userId,
+        ...(pairing
+          ? [pairing.tokenHash, now, deviceId, publicKey, pairing.challenge]
+          : [])
       ),
     database
       .prepare(

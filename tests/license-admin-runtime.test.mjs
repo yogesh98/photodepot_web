@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { execFile } from "node:child_process"
 import { generateKeyPairSync, sign } from "node:crypto"
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { after, before, test } from "node:test"
 import { fileURLToPath } from "node:url"
@@ -236,7 +236,15 @@ test("the built Pages Worker enforces organization-scoped Owner authorization on
     { role: "Owner" },
     { role: "member", roles: ["org-owner"] },
   ]) {
-    for (const path of ["/admin/licenses", "/api/admin/licenses"]) {
+    for (const path of [
+      "/admin/licenses",
+      "/admin/subscriptions",
+      "/admin/subscriptions.html",
+      "/admin/subscriptions.txt",
+      "/api/admin/licenses",
+      "/api/admin/subscriptions",
+      "/api/admin/subscriptions?history=1&userId=user_runtime_customer",
+    ]) {
       const response = await worker.dispatchFetch(`${origin}${path}`, {
         headers: { cookie: await sessionCookie(jwt(claims)) },
       })
@@ -256,6 +264,182 @@ test("the built Pages Worker enforces organization-scoped Owner authorization on
   assert.equal(servedShell, true)
 })
 
+test("the built Pages Worker authorizes subscription administration only for a verified Owner", async (t) => {
+  let customerRequests = 0
+  const customer = {
+    object: "user",
+    id: "user_runtime_customer",
+    email: "customer@example.test",
+    email_verified: true,
+    first_name: "Runtime",
+    last_name: "Customer",
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  }
+  const worker = runtime(
+    t,
+    (request) => {
+      if (request.url === jwksUrl) return Response.json({ keys: [jwk] })
+      assert.equal(
+        request.headers.get("authorization"),
+        "Bearer sk_test_runtime"
+      )
+      customerRequests++
+      if (new URL(request.url).pathname === "/user_management/users")
+        return Response.json({
+          data: [customer],
+          list_metadata: { before: null, after: null },
+        })
+      assert.equal(
+        request.url,
+        `${issuer}/user_management/users/${customer.id}`
+      )
+      return Response.json(customer)
+    },
+    undefined,
+    { WORKOS_API_KEY: "sk_test_runtime" }
+  )
+  const database = await worker.getD1Database("DB")
+  for (const filename of (
+    await readdir(new URL("../migrations/", import.meta.url))
+  )
+    .filter((name) => name.endsWith(".sql"))
+    .sort()) {
+    const migration = await readFile(
+      new URL(`../migrations/${filename}`, import.meta.url),
+      "utf8"
+    )
+    await database.batch(
+      unstable_splitSqlQuery(migration).map((sql) => database.prepare(sql))
+    )
+  }
+  const denied = [
+    [undefined, 401],
+    [await sessionCookie(jwt({ role: "member" })), 403],
+    [await sessionCookie(jwt({ org_id: "org_other" })), 403],
+    [await sessionCookie(jwt(), { audience: "account" }), 401],
+    [
+      await sessionCookie(jwt(), {
+        user: { id: userId, email: adminEmail, emailVerified: false },
+      }),
+      401,
+    ],
+  ]
+  for (const [cookie, status] of denied) {
+    for (const action of [
+      "set",
+      "extend",
+      "revoke",
+      "restore",
+      "reset-device",
+    ]) {
+      const response = await worker.dispatchFetch(
+        `${origin}/api/admin/subscriptions`,
+        {
+          method: "POST",
+          headers: {
+            ...(cookie ? { cookie } : {}),
+            origin,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            action,
+            userId: customer.id,
+            type: "trial",
+            durationDays: 14,
+            expectedRevision: 0,
+          }),
+        }
+      )
+      assert.equal(response.status, status)
+    }
+  }
+  assert.equal(customerRequests, 0)
+  assert.equal(
+    (
+      await database
+        .prepare("SELECT COUNT(*) AS count FROM subscriptions")
+        .first()
+    ).count,
+    0
+  )
+  assert.equal(
+    (
+      await database
+        .prepare("SELECT COUNT(*) AS count FROM subscription_audit")
+        .first()
+    ).count,
+    0
+  )
+
+  const headers = {
+    cookie: await sessionCookie(),
+    origin,
+    "content-type": "application/json",
+  }
+  const granted = await worker.dispatchFetch(
+    `${origin}/api/admin/subscriptions`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        action: "set",
+        userId: customer.id,
+        type: "trial",
+        durationDays: 14,
+        expectedRevision: 0,
+      }),
+    }
+  )
+  assert.equal(granted.status, 201)
+  const result = await granted.json()
+  assert.equal(result.subscription.userId, customer.id)
+  const listed = await worker.dispatchFetch(
+    `${origin}/api/admin/subscriptions`,
+    { headers }
+  )
+  assert.equal(listed.status, 200)
+  assert.equal(
+    (await listed.json()).users[0].subscription.id,
+    result.subscription.id
+  )
+  assert.equal(customerRequests, 2)
+})
+
+test("the built Pages Worker denies subscription administration after Owner membership is removed", async (t) => {
+  let servedShell = false
+  const worker = runtime(
+    t,
+    async (request) => {
+      if (request.url === jwksUrl) return Response.json({ keys: [jwk] })
+      assert.equal(request.url, `${issuer}/user_management/authenticate`)
+      const body = await request.json()
+      assert.equal(body.organization_id, organizationId)
+      return Response.json({
+        access_token: jwt({ role: "member" }),
+        refresh_token: "runtime-demoted-refresh-token",
+        user: {
+          object: "user",
+          id: userId,
+          email: adminEmail,
+          email_verified: true,
+        },
+      })
+    },
+    () => {
+      servedShell = true
+      return new Response("dashboard")
+    }
+  )
+  for (const path of ["/admin/subscriptions", "/api/admin/subscriptions"]) {
+    const response = await worker.dispatchFetch(`${origin}${path}`, {
+      headers: { cookie: await sessionCookie(jwt({ exp: 1 })) },
+    })
+    assert.equal(response.status, 403)
+  }
+  assert.equal(servedShell, false)
+})
+
 test("the built Pages Worker rejects forged sessions and legacy Cloudflare authentication", async (t) => {
   const foreignKey = generateKeyPairSync("rsa", { modulusLength: 2048 })
   const worker = runtime(t, () => Response.json({ keys: [jwk] }))
@@ -271,15 +455,18 @@ test("the built Pages Worker rejects forged sessions and legacy Cloudflare authe
     await sessionCookie(jwt({ iss: "https://attacker.example" })),
     await sessionCookie(jwt({ sub: "user_other" })),
     await sessionCookie(jwt(), { origin: "https://attacker.example" }),
+    await sessionCookie(jwt(), { audience: "account" }),
+    await sessionCookie(jwt(), {
+      user: { id: userId, email: adminEmail, emailVerified: false },
+    }),
   ]
   for (const cookie of cookies) {
-    const response = await worker.dispatchFetch(
-      `${origin}/api/admin/licenses`,
-      {
+    for (const path of ["/api/admin/licenses", "/api/admin/subscriptions"]) {
+      const response = await worker.dispatchFetch(`${origin}${path}`, {
         headers: { cookie },
-      }
-    )
-    assert.equal(response.status, 401)
+      })
+      assert.equal(response.status, 401)
+    }
   }
   const legacyHeaders = {
     "cf-access-jwt-assertion": jwt(),
@@ -311,7 +498,12 @@ test("the built Pages Worker fails closed when WorkOS session configuration is m
     },
     { WORKOS_COOKIE_PASSWORD: "" }
   )
-  for (const path of ["/admin/licenses", "/api/admin/licenses"]) {
+  for (const path of [
+    "/admin/licenses",
+    "/admin/subscriptions",
+    "/api/admin/licenses",
+    "/api/admin/subscriptions",
+  ]) {
     assert.equal((await worker.dispatchFetch(`${origin}${path}`)).status, 503)
   }
   assert.equal(outboundRequests, 0)
@@ -321,9 +513,8 @@ test("the built Pages Worker fails closed when WorkOS session configuration is m
 test("the built Pages Worker rejects cross-origin admin mutations", async (t) => {
   const worker = runtime(t, () => Response.json({ keys: [jwk] }))
   for (const requestOrigin of ["https://attacker.example", "null", ""]) {
-    const response = await worker.dispatchFetch(
-      `${origin}/api/admin/licenses`,
-      {
+    for (const path of ["/api/admin/licenses", "/api/admin/subscriptions"]) {
+      const response = await worker.dispatchFetch(`${origin}${path}`, {
         method: "POST",
         headers: {
           cookie: await sessionCookie(),
@@ -332,9 +523,9 @@ test("the built Pages Worker rejects cross-origin admin mutations", async (t) =>
           "content-type": "application/json",
         },
         body: JSON.stringify({ action: "grant" }),
-      }
-    )
-    assert.equal(response.status, 403)
+      })
+      assert.equal(response.status, 403)
+    }
   }
 })
 

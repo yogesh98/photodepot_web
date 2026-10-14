@@ -165,7 +165,7 @@ after(async () => {
   globalThis.fetch = originalFetch
   await platform?.dispose()
 })
-async function cookie(claims = {}, audience = "admin") {
+async function cookie(claims = {}, audience = "admin", sessionChanges = {}) {
   const sealed = await sealData(
     {
       version: 1,
@@ -175,6 +175,7 @@ async function cookie(claims = {}, audience = "admin") {
       accessToken: jwt(claims),
       refreshToken: "api-refresh-token",
       user: { id: adminUserId, email: adminEmail, emailVerified: true },
+      ...sessionChanges,
     },
     { password, ttl: 604800 }
   )
@@ -215,23 +216,56 @@ function setBody(userId = "user_api_trial", values = {}) {
 }
 
 test("only a verified Owner session in the configured organization can read or mutate subscriptions", async () => {
-  for (const supplied of [
-    undefined,
-    await cookie({ role: "member" }),
-    await cookie({ org_id: "org_other" }),
-    await cookie({}, "account"),
+  const accountCookie = await cookie({}, "account")
+  for (const [supplied, status] of [
+    [undefined, 401],
+    ["__Host-photodepot-admin=forged", 401],
+    [await cookie({}, "admin", { accessToken: "forged" }), 401],
+    [await cookie({ role: "member" }), 403],
+    [await cookie({ role: "admin" }), 403],
+    [await cookie({ role: undefined, roles: [] }), 403],
+    [await cookie({ role: "Owner" }), 403],
+    [await cookie({ role: "member", roles: ["org-owner"] }), 403],
+    [await cookie({ org_id: "org_other" }), 403],
+    [await cookie({ client_id: "client_other" }), 401],
+    [await cookie({ sub: "user_other" }), 401],
+    [await cookie({ iss: "https://attacker.example" }), 401],
+    [
+      await cookie({}, "admin", {
+        user: { id: adminUserId, email: adminEmail, emailVerified: false },
+      }),
+      401,
+    ],
+    [accountCookie, 401],
+    [accountCookie.replace("photodepot-account=", "photodepot-admin="), 401],
   ]) {
-    for (const body of [undefined, setBody()]) {
+    for (const body of [
+      undefined,
+      setBody(),
+      ...["extend", "revoke", "restore", "reset-device"].map((action) =>
+        setBody("user_api_trial", { action, expectedRevision: 1 })
+      ),
+    ]) {
       const response = await handleAdminSubscriptions(
         request("", body, supplied ? { cookie: supplied } : {}),
         env
       )
-      assert.ok([401, 403].includes(response.status))
+      assert.equal(response.status, status)
       assert.equal(response.headers.get("cache-control"), "private, no-store")
     }
+    const history = await handleAdminSubscriptions(
+      request(
+        "?history=1&userId=user_api_trial",
+        undefined,
+        supplied ? { cookie: supplied } : {}
+      ),
+      env
+    )
+    assert.equal(history.status, status)
   }
   assert.equal(userRequests.length, 0)
   assert.equal(await count("subscriptions"), 0)
+  assert.equal(await count("subscription_audit"), 0)
 })
 test("WorkOS users appear without administration membership or automatic subscription grants", async () => {
   const response = await api()

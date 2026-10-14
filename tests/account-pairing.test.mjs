@@ -228,6 +228,7 @@ async function start(device = mac()) {
   assert.equal(response.status, 201)
   const started = await response.json()
   assert.match(started.pairingId, /^[A-Za-z0-9_-]{43}$/)
+  assert.equal(started.expiresInMs, 600_000)
   const url = new URL(started.approvalUrl)
   assert.equal(url.origin, origin)
   assert.equal(url.pathname, "/account/activate")
@@ -425,6 +426,172 @@ test("cancelled, replaced and expired sign-in requests cannot be approved or pol
     await getSubscriptionDevice(env.DB, device.deviceId, epoch),
     null
   )
+})
+
+test("cancelling an approved poll during WorkOS lookup cannot claim Mac access", async (t) => {
+  t.mock.method(Date, "now", () => epoch)
+  const userId = "user_pairing_cancel_during_lookup"
+  const subscription = await assign(userId)
+  const started = await start()
+  assert.equal((await approval(started, userId)).status, 200)
+  const lookupStarted = Promise.withResolvers()
+  const lookupGate = Promise.withResolvers()
+  const normalFetch = globalThis.fetch
+  t.mock.method(globalThis, "fetch", async (url, options) => {
+    if (String(url).endsWith(`/user_management/users/${userId}`)) {
+      lookupStarted.resolve()
+      await lookupGate.promise
+    }
+    return normalFetch(url, options)
+  })
+  const pendingPoll = pair(started.device, "poll", started.pairingId)
+  try {
+    await lookupStarted.promise
+    const cancelled = await pair(started.device, "cancel", started.pairingId)
+    assert.deepEqual(await cancelled.json(), { status: "cancelled" })
+  } finally {
+    lookupGate.resolve()
+  }
+  const response = await pendingPoll
+  assert.equal(response.status, 409)
+  assert.equal("receipt" in (await response.json()), false)
+  assert.equal(
+    await getSubscriptionDevice(env.DB, started.device.deviceId, epoch),
+    null
+  )
+  assert.deepEqual(await getSubscription(env.DB, userId, epoch), subscription)
+  assert.equal((await listSubscriptionAudit(env.DB, userId)).length, 1)
+})
+
+test("cancellation and live expiry at the binding transaction boundary prevent authorization", async (t) => {
+  t.mock.method(Date, "now", () => epoch)
+  for (const reason of ["cancel", "pairing-expiry", "subscription-expiry"]) {
+    const userId = `user_pairing_before_transaction_${reason.replaceAll("-", "_")}`
+    await assign(userId)
+    const started = await start()
+    assert.equal((await approval(started, userId)).status, 200)
+    const bindingStarted = Promise.withResolvers()
+    const bindingGate = Promise.withResolvers()
+    let batchCount = 0
+    const database = new Proxy(env.DB, {
+      get(target, property) {
+        if (property === "batch")
+          return async (statements) => {
+            // The poll's first batch updates its rate limit. Pause the subsequent
+            // binding batch after all application-level authorization reads.
+            if (++batchCount === 2) {
+              bindingStarted.resolve()
+              await bindingGate.promise
+            }
+            return target.batch(statements)
+          }
+        const value = Reflect.get(target, property)
+        return typeof value === "function" ? value.bind(target) : value
+      },
+    })
+    const pendingPoll = pair(
+      started.device,
+      "poll",
+      started.pairingId,
+      {},
+      { ...env, DB: database }
+    )
+    try {
+      await bindingStarted.promise
+      if (reason === "cancel") {
+        assert.equal(
+          (await pair(started.device, "cancel", started.pairingId)).status,
+          200
+        )
+      } else {
+        const { now: databaseNow } = await env.DB.prepare(
+          "SELECT CAST(unixepoch('subsec') * 1000 AS INTEGER) AS now"
+        ).first()
+        assert.ok(Number.isSafeInteger(databaseNow))
+        const expiredAt = databaseNow - 1
+        // This is still later than the poll's captured application timestamp.
+        // Only an execution-time database clock can observe the expiration.
+        assert.ok(expiredAt > epoch)
+        if (reason === "pairing-expiry")
+          await env.DB.prepare(
+            "UPDATE account_pairings SET expires_at = ? WHERE token_hash = ?"
+          )
+            .bind(
+              expiredAt,
+              createHash("sha256").update(started.pairingId).digest("hex")
+            )
+            .run()
+        else
+          await env.DB.prepare(
+            "UPDATE subscriptions SET end_at = ? WHERE user_id = ?"
+          )
+            .bind(expiredAt, userId)
+            .run()
+      }
+    } finally {
+      bindingGate.resolve()
+    }
+    const response = await pendingPoll
+    assert.equal(response.status, 409)
+    assert.equal("receipt" in (await response.json()), false)
+    assert.equal(
+      await getSubscriptionDevice(env.DB, started.device.deviceId, epoch),
+      null
+    )
+    assert.deepEqual(
+      await env.DB.prepare(
+        "SELECT current_device_id, revision FROM subscriptions WHERE user_id = ?"
+      )
+        .bind(userId)
+        .first(),
+      { current_device_id: null, revision: 1 }
+    )
+    assert.equal((await listSubscriptionAudit(env.DB, userId)).length, 1)
+  }
+})
+
+test("pairing and subscription expiry during WorkOS lookup prevent authorization", async (t) => {
+  let currentTime = epoch
+  t.mock.method(Date, "now", () => currentTime)
+  const normalFetch = globalThis.fetch
+  for (const reason of ["pairing", "subscription"]) {
+    currentTime = epoch
+    const userId = `user_pairing_expiry_during_lookup_${reason}`
+    const subscription = await assign(
+      userId,
+      "regular",
+      epoch + (reason === "subscription" ? 1000 : 3600_000)
+    )
+    const started = await start()
+    assert.equal((await approval(started, userId)).status, 200)
+    const lookupStarted = Promise.withResolvers()
+    const lookupGate = Promise.withResolvers()
+    globalThis.fetch = async (url, options) => {
+      if (String(url).endsWith(`/user_management/users/${userId}`)) {
+        lookupStarted.resolve()
+        await lookupGate.promise
+      }
+      return normalFetch(url, options)
+    }
+    const pendingPoll = pair(started.device, "poll", started.pairingId)
+    try {
+      await lookupStarted.promise
+      currentTime =
+        reason === "pairing" ? started.expiresAt : subscription.endsAt
+    } finally {
+      lookupGate.resolve()
+      globalThis.fetch = normalFetch
+    }
+    const response = await pendingPoll
+    assert.equal(response.status, reason === "pairing" ? 410 : 403)
+    assert.equal("receipt" in (await response.json()), false)
+    assert.equal(
+      await getSubscriptionDevice(env.DB, started.device.deviceId, epoch),
+      null
+    )
+    assert.deepEqual(await getSubscription(env.DB, userId, epoch), subscription)
+    assert.equal((await listSubscriptionAudit(env.DB, userId)).length, 1)
+  }
 })
 
 test("sign-in and account creation never automatically grant subscriptions", async (t) => {
