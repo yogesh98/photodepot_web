@@ -8,15 +8,18 @@ html {
   scroll-behavior: smooth;
 }
 
-/* Keep the native scrollbar on the landing section's surface. */
+/* A transparent native track reveals the visible sections on the root canvas. */
 html[data-landing-scrollbar] {
   --landing-scrollbar-thumb: color-mix(
     in srgb,
     var(--brand-ink) 65%,
     transparent
   );
-  scrollbar-color: var(--landing-scrollbar-thumb)
-    var(--landing-scrollbar-background, var(--brand-paper));
+  background-color: var(--landing-scrollbar-color, var(--brand-paper));
+  background-image: var(--landing-scrollbar-background, none);
+  background-attachment: fixed;
+  background-repeat: repeat-x;
+  scrollbar-color: var(--landing-scrollbar-thumb) transparent;
 }
 /* The viewport theme must not carry into independently scrolling dialogs. */
 html[data-landing-scrollbar] body {
@@ -26,15 +29,19 @@ html[data-landing-scrollbar] body {
   html[data-landing-scrollbar] {
     scrollbar-width: thin;
   }
-  @supports not (scrollbar-color: #151613 #f7f6f2) {
-    html[data-landing-scrollbar]::-webkit-scrollbar {
-      width: 10px;
-    }
-  }
 }
-@supports not (scrollbar-color: #151613 #f7f6f2) {
-  html[data-landing-scrollbar]::-webkit-scrollbar-track {
+@supports selector(::-webkit-scrollbar) {
+  html[data-landing-scrollbar] {
+    scrollbar-color: auto;
+    scrollbar-width: auto;
+  }
+  html[data-landing-scrollbar]::-webkit-scrollbar {
+    width: 10px;
+    /* Native gutters may expose only the canvas color, not its image. */
     background: var(--landing-scrollbar-background, var(--brand-paper));
+  }
+  html[data-landing-scrollbar]::-webkit-scrollbar-track {
+    background: transparent;
   }
   html[data-landing-scrollbar]::-webkit-scrollbar-thumb {
     border: 2px solid transparent;

@@ -27,28 +27,44 @@ export function LandingSections({
     )
     let frame = 0
 
-    function updateHeader() {
+    function updateSurfaces() {
       frame = 0
-      const boundary = header!.getBoundingClientRect().bottom + 1
-      let active = sections[0]
-      for (const section of sections) {
-        if (section.getBoundingClientRect().top > boundary) break
-        active = section
+      const headerBottom = header!.getBoundingClientRect().bottom
+      const surfaces = sections.map((section) => ({
+        section,
+        bounds: section.getBoundingClientRect(),
+        background: getComputedStyle(section).backgroundColor,
+      }))
+      let active = surfaces[0]
+      for (const surface of surfaces) {
+        if (surface.bounds.top > headerBottom + 1) break
+        active = surface
       }
       if (!active) return
 
-      const background = getComputedStyle(active).backgroundColor
-      page!.style.setProperty("--header-background", background)
-      // Native page scrolling paints its scrollbar on the document root.
+      page!.style.setProperty("--header-background", active.background)
+      page!.dataset.headerSection = active.section.id
+      documentRoot.style.setProperty(
+        "--landing-scrollbar-color",
+        active.background
+      )
+
+      // Classic scrollbar gutters reveal the root canvas, not child sections.
+      // Mirror the visible surfaces there, including the sticky header.
+      const stops = [`${active.background} 0px ${headerBottom}px`]
+      for (const { bounds, background } of surfaces) {
+        const top = Math.max(headerBottom, bounds.top)
+        const bottom = Math.min(window.innerHeight, bounds.bottom)
+        if (bottom > top) stops.push(`${background} ${top}px ${bottom}px`)
+      }
       documentRoot.style.setProperty(
         "--landing-scrollbar-background",
-        background
+        `linear-gradient(to bottom, ${stops.join(", ")})`
       )
-      page!.dataset.headerSection = active.id
     }
 
     function scheduleUpdate() {
-      if (!frame) frame = requestAnimationFrame(updateHeader)
+      if (!frame) frame = requestAnimationFrame(updateSurfaces)
     }
 
     const resize = new ResizeObserver(scheduleUpdate)
@@ -56,7 +72,7 @@ export function LandingSections({
     sections.forEach((section) => resize.observe(section))
     window.addEventListener("scroll", scheduleUpdate, { passive: true })
     window.addEventListener("resize", scheduleUpdate)
-    updateHeader()
+    updateSurfaces()
 
     return () => {
       window.removeEventListener("scroll", scheduleUpdate)
@@ -66,6 +82,7 @@ export function LandingSections({
       page.style.removeProperty("--header-background")
       delete page.dataset.headerSection
       documentRoot.style.removeProperty("--landing-scrollbar-background")
+      documentRoot.style.removeProperty("--landing-scrollbar-color")
       delete documentRoot.dataset.landingScrollbar
     }
   }, [])
