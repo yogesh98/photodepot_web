@@ -21,7 +21,9 @@ Macs on the same local network, and changes are shared across the project.
 Ingest and export remain with the host. The complete Ingest, Cull, Organize, and
 Export workflow is also explained. Joining the waitlist
 is its only call to action. The original download page lives at `/tester`, with
-its public Apple Silicon and Intel downloads. A license key is required in the
+its Apple Silicon and Intel download buttons. Downloads are currently paused while
+desktop licensing is checked locally; the buttons are disabled and both API routes
+return the unavailable notice without reading R2. A license key is required in the
 desktop app to open or create local projects.
 
 Screenshots show the actual Photodepot desktop app in light mode with demo
@@ -58,7 +60,6 @@ export; this choice does not change the hosting architecture.
 pnpm install
 cp .dev.vars.example .dev.vars
 pnpm db:migrate:local
-pnpm downloads:upload:local
 pnpm preview
 ```
 
@@ -95,7 +96,12 @@ signs are literal; there is no Next.js-style variable expansion.
 
 ### Downloads and releases
 
-Keep DMGs in the ignored `downloads/` folder, **outside `public/`**:
+Downloads are temporarily paused with `DOWNLOADS_ENABLED = false` in
+`lib/download-files.ts`. Website installer copies and hosted R2 installers have
+been removed, and upload commands refuse to run while paused. Re-enable the flag
+only when a licensed desktop release is ready.
+
+For that release, keep DMGs in the ignored `downloads/` folder, **outside `public/`**:
 
 - `photodepot-0.1.6-arm64.dmg`
 - `photodepot-0.1.6-x64.dmg`
@@ -178,8 +184,8 @@ pnpm functions:build
 ```
 
 Tests use Node's built-in runner and Cloudflare's local D1/R2 runtime. API test
-bindings are isolated and do not access production storage. Tests cover public R2
-streaming, HEAD and ranges; unavailable storage and invalid requests; D1 waitlist
+bindings are isolated and do not access production storage. Tests cover paused
+GET/HEAD downloads without R2 access, byte-range parsing and invalid requests; D1 waitlist
 persistence and duplicates; license administration and verification; and static
 asset leakage prevention.
 Brand assets are copied from the sibling `photodepot/build/brand` directory:

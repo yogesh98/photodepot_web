@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import { createReadStream } from "node:fs"
 import { readFile, stat, writeFile } from "node:fs/promises"
-import { DOWNLOAD_FILES } from "../lib/download-files.ts"
+import { DOWNLOAD_FILES, DOWNLOADS_ENABLED } from "../lib/download-files.ts"
 import { assertStaticAssets } from "./pages-assets.mjs"
 import { parseCloudflareConfig } from "./cloudflare-config.mjs"
 
@@ -73,6 +73,10 @@ async function setup() {
 }
 
 async function upload() {
+  if (!DOWNLOADS_ENABLED)
+    throw new Error(
+      "Downloads are paused. Re-enable them before uploading a release."
+    )
   // Validate every file before uploading either architecture.
   const files = await Promise.all(
     Object.values(DOWNLOAD_FILES).map(async (name) => {

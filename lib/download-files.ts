@@ -1,5 +1,8 @@
 export type Architecture = "arm64" | "x64"
 
+// Pause both the website buttons and the API until a licensed build is ready.
+export const DOWNLOADS_ENABLED = false
+
 export function isArchitecture(value: string): value is Architecture {
   return value === "arm64" || value === "x64"
 }

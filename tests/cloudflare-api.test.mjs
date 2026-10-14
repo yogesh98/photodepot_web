@@ -64,73 +64,71 @@ function download(
   )
 }
 
-// Downloads are public, while installers remain in the private R2 bucket.
-test("public downloads stream exact bytes for both Macs without cookies, passwords or D1", async () => {
+function assertUnavailable(response) {
+  assert.equal(response.status, 303)
+  assert.equal(
+    response.headers.get("location"),
+    `${origin}/tester?download=unavailable`
+  )
+  assert.equal(response.headers.get("cache-control"), "private, no-store")
+  assert.equal(response.headers.get("content-disposition"), null)
+  assert.equal(response.headers.get("content-range"), null)
+  assert.equal(response.headers.get("set-cookie"), null)
+}
+
+test("paused downloads cannot stream either installer, including HEAD and Range requests", async () => {
+  // Both release objects exist, so the pause must take precedence over storage.
   for (const architecture of ["arm64", "x64"]) {
-    const response = await download(
-      "GET",
-      {},
-      { DOWNLOADS: env.DOWNLOADS },
-      architecture
-    )
-    assert.equal(response.status, 200)
-    assert.equal(response.headers.get("content-length"), String(bytes.length))
-    assert.equal(
-      response.headers.get("content-disposition"),
-      `attachment; filename="${DOWNLOAD_FILES[architecture]}"`
-    )
-    assert.equal(
-      response.headers.get("content-type"),
-      "application/octet-stream"
-    )
-    assert.equal(response.headers.get("cache-control"), "private, no-store")
-    assert.equal(response.headers.get("x-content-type-options"), "nosniff")
-    assert.equal(response.headers.get("accept-ranges"), "bytes")
-    assert.equal(response.headers.get("set-cookie"), null)
-    assert.deepEqual(new Uint8Array(await response.arrayBuffer()), bytes)
+    for (const method of ["GET", "HEAD"]) {
+      for (const headers of [
+        {},
+        { range: "bytes=2-5" },
+        { range: "bytes=2-" },
+        { range: "bytes=-5" },
+        { range: "bytes=999-" },
+        { range: "bytes=0-1", "if-range": '"old-version"' },
+        { cookie: "photodepot-download=expired" },
+      ]) {
+        const response = await download(method, headers, env, architecture)
+        assertUnavailable(response)
+        assert.equal(await response.text(), "")
+      }
+    }
   }
-  // A stale cookie from the former password gate must not affect public access.
-  const response = await download("GET", {
-    cookie: "photodepot-download=expired",
-  })
-  assert.equal(response.status, 200)
-  await response.arrayBuffer()
 })
 
-test("public HEAD, single ranges, invalid ranges and If-Range follow download semantics", async () => {
-  const head = await download("HEAD", { range: "bytes=0-1" })
-  assert.equal(head.status, 200)
-  assert.equal(head.headers.get("content-length"), String(bytes.length))
-  assert.equal(head.headers.get("content-range"), null)
-  assert.equal(await head.text(), "")
-  for (const [range, expected] of [
-    ["bytes=2-5", bytes.slice(2, 6)],
-    ["bytes=2-", bytes.slice(2)],
-    ["bytes=-5", bytes.slice(-5)],
-  ]) {
-    const response = await download("GET", {
-      range,
-      "if-range": head.headers.get("etag"),
-    })
-    assert.equal(response.status, 206)
-    assert.equal(
-      Number(response.headers.get("content-length")),
-      expected.length
-    )
-    assert.deepEqual(new Uint8Array(await response.arrayBuffer()), expected)
-    assert.ok(
-      response.headers.get("content-range").endsWith(`/${bytes.length}`)
-    )
+test("paused download requests return the unavailable page before accessing R2", async () => {
+  let storageReads = 0
+  const unreachable = {
+    DOWNLOADS: {
+      head: () => {
+        storageReads++
+        assert.fail("Paused downloads must not reach R2")
+      },
+      get: () => {
+        storageReads++
+        assert.fail("Paused downloads must not reach R2")
+      },
+    },
   }
-  const invalid = await download("GET", { range: "bytes=999-" })
-  assert.equal(invalid.status, 416)
-  assert.equal(invalid.headers.get("content-range"), `bytes */${bytes.length}`)
-  const changed = await download("GET", {
-    range: "bytes=0-1",
-    "if-range": '"old-version"',
-  })
-  assert.equal(changed.status, 200)
-  assert.deepEqual(new Uint8Array(await changed.arrayBuffer()), bytes)
+  for (const bindings of [{}, unreachable]) {
+    for (const architecture of ["arm64", "x64"]) {
+      for (const method of ["GET", "HEAD"]) {
+        for (const headers of [{}, { range: "bytes=0-1" }]) {
+          const response = await download(
+            method,
+            headers,
+            bindings,
+            architecture
+          )
+          assertUnavailable(response)
+          assert.equal(await response.text(), "")
+        }
+      }
+    }
+  }
+  // The handler catches storage errors, so verify reads separately as well.
+  assert.equal(storageReads, 0)
 })
 
 test("unsupported architectures and methods cannot reach installer storage", async () => {
@@ -157,67 +155,6 @@ test("unsupported architectures and methods cannot reach installer storage", asy
     assert.deepEqual(await response.json(), { error: "Method not allowed." })
     assert.equal(response.headers.get("set-cookie"), null)
   }
-})
-
-test("missing or unavailable R2 returns the download error page without exposing storage details", async () => {
-  const metadata = await env.DOWNLOADS.head(DOWNLOAD_FILES.arm64)
-  for (const bindings of [
-    {},
-    {
-      DOWNLOADS: {
-        head: async () => {
-          throw new Error("private storage detail")
-        },
-      },
-    },
-    { DOWNLOADS: { head: async () => null } },
-    { DOWNLOADS: { head: async () => ({ size: 0 }) } },
-  ]) {
-    for (const method of ["GET", "HEAD"]) {
-      const response = await download(method, {}, bindings)
-      assert.equal(response.status, 303)
-      assert.equal(
-        response.headers.get("location"),
-        `${origin}/tester?download=unavailable`
-      )
-      assert.equal(response.headers.get("cache-control"), "private, no-store")
-      assert.equal(await response.text(), "")
-    }
-  }
-  for (const bindings of [
-    {
-      DOWNLOADS: {
-        head: async () => metadata,
-        get: async () => {
-          throw new Error("private storage detail")
-        },
-      },
-    },
-    { DOWNLOADS: { head: async () => metadata, get: async () => null } },
-    // A replacement release failed the ETag condition between head and get.
-    {
-      DOWNLOADS: {
-        head: async () => metadata,
-        get: async (_key, options) => {
-          assert.deepEqual(options.onlyIf, { etagMatches: metadata.etag })
-          return metadata
-        },
-      },
-    },
-  ]) {
-    const response = await download("GET", {}, bindings)
-    assert.equal(response.status, 303)
-    assert.equal(
-      response.headers.get("location"),
-      `${origin}/tester?download=unavailable`
-    )
-    assert.equal(response.headers.get("cache-control"), "private, no-store")
-    assert.equal(await response.text(), "")
-  }
-  await env.DOWNLOADS.delete(DOWNLOAD_FILES.x64)
-  assert.equal((await download("GET", {}, env, "x64")).status, 303)
-  await env.DOWNLOADS.put(DOWNLOAD_FILES.x64, "")
-  assert.equal((await download("GET", {}, env, "x64")).status, 303)
 })
 
 test("waitlist validates requests, persists answers in D1 and keeps the original duplicate", async () => {

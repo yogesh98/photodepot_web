@@ -1,6 +1,7 @@
 import type { PagesFunction } from "@cloudflare/workers-types"
 import {
   DOWNLOAD_FILES,
+  DOWNLOADS_ENABLED,
   downloadRange,
   isArchitecture,
 } from "../../../lib/download-files.ts"
@@ -29,6 +30,7 @@ export async function handleDownload(
     response.headers.set("Allow", "GET, HEAD")
     return response
   }
+  if (!DOWNLOADS_ENABLED) return unavailable()
   try {
     const metadata = await env.DOWNLOADS.head(name)
     if (!metadata || metadata.size === 0) return unavailable()

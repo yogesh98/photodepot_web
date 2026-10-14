@@ -4,6 +4,7 @@ import { Suspense, useState } from "react"
 import { useSearchParams } from "next/navigation"
 import { ArrowDownToLine, Check, Cpu } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { DOWNLOADS_ENABLED } from "@/lib/download-files"
 
 const builds = [
   {
@@ -22,6 +23,33 @@ const builds = [
 
 export function DownloadButtons() {
   const [started, setStarted] = useState(false)
+
+  if (!DOWNLOADS_ENABLED)
+    return (
+      <>
+        <div className="download-buttons">
+          {builds.map((build) => (
+            <div key={build.architecture} className="download-option">
+              <Button
+                variant={build.variant}
+                className="download-button"
+                disabled
+              >
+                <ArrowDownToLine size={17} aria-hidden="true" />
+                Download for {build.label}
+              </Button>
+              <span className="chip-hint">
+                <Cpu size={12} aria-hidden="true" />
+                {build.hint}
+              </span>
+            </div>
+          ))}
+        </div>
+        <p className="download-message" role="status">
+          Downloads are temporarily unavailable.
+        </p>
+      </>
+    )
 
   return (
     <>
