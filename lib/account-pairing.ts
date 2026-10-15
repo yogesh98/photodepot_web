@@ -164,8 +164,13 @@ export async function handleAccountPairing(
       const pairingId = randomBytes(32).toString("base64url")
       const code = randomBytes(32).toString("base64url")
       await env.DB.batch([
+        // Keep an active session's pairing so its Mac can cancel even after
+        // the delivery deadline. Revoked sessions no longer need this link.
         env.DB.prepare(
-          "DELETE FROM account_pairings WHERE token_hash IN (SELECT token_hash FROM account_pairings WHERE expires_at <= ? ORDER BY expires_at LIMIT 100)"
+          `DELETE FROM account_pairings WHERE token_hash IN (
+            SELECT p.token_hash FROM account_pairings p WHERE p.expires_at <= ?
+            AND NOT EXISTS (SELECT 1 FROM desktop_sessions s WHERE s.id = p.session_id AND s.active = 1)
+            ORDER BY p.expires_at LIMIT 100)`
         ).bind(now),
         env.DB.prepare(
           "UPDATE account_pairings SET status = 'cancelled' WHERE device_id = ? AND status = 'pending'"
@@ -208,7 +213,11 @@ export async function handleAccountPairing(
     )
       .bind(hash(supplied.pairingId))
       .first<Pairing>()
-    if (!row || row.expires_at <= now || row.status === "cancelled")
+    if (
+      !row ||
+      (action !== "cancel" && row.expires_at <= now) ||
+      row.status === "cancelled"
+    )
       return json(
         {
           error:

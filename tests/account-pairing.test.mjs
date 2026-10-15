@@ -1338,6 +1338,90 @@ test("cancelling a browser-approved sign-in revokes the session and frees its Ma
   assert.equal(decodeReceipt((await verified.json()).session).status, "revoked")
 })
 
+test("expired browser-approved pairings retain proof-verified cancellation without delivering access", async (t) => {
+  let currentTime = Date.now()
+  t.mock.method(Date, "now", () => currentTime)
+  const userId = "user_session_expired_cancel"
+  users.set(userId, { email: `${userId}@example.com`, emailVerified: true })
+  const started = await accountStart()
+  currentTime = started.expiresAt - 1
+  assert.equal((await approval(started, userId)).status, 200)
+  const [session] = await listAccountDevices(env.DB, userId)
+  assert.ok(session.sessionId)
+  currentTime = started.expiresAt
+  assert.equal((await accountPoll(started)).status, 410)
+  assert.equal((await approval(started, userId, "GET")).status, 410)
+  assert.equal((await approval(started, userId)).status, 410)
+  assert.equal(
+    (
+      await pair(started.device, "cancel", started.pairingId, {
+        deviceSignature: signedBody(mac(), "cancel", started.pairingId)
+          .deviceSignature,
+      })
+    ).status,
+    401
+  )
+  assert.equal((await listAccountDevices(env.DB, userId)).length, 1)
+  const cancelled = await pair(started.device, "cancel", started.pairingId)
+  assert.equal(cancelled.status, 200)
+  assert.deepEqual(await cancelled.json(), { status: "cancelled" })
+  assert.deepEqual(await listAccountDevices(env.DB, userId), [])
+  const verified = await sessionRequest(started.device, session.sessionId)
+  assert.equal(decodeReceipt((await verified.json()).session).status, "revoked")
+})
+
+test("new sign-in cleanup preserves expired cancellation without revoking a replacement session", async (t) => {
+  let currentTime = Date.now()
+  t.mock.method(Date, "now", () => currentTime)
+  const userId = "user_session_expired_cleanup"
+  users.set(userId, { email: `${userId}@example.com`, emailVerified: true })
+  const started = await accountStart()
+  const expiredPending = await accountStart()
+  currentTime = started.expiresAt - 1
+  assert.equal((await approval(started, userId)).status, 200)
+  const [session] = await listAccountDevices(env.DB, userId)
+  currentTime = expiredPending.expiresAt + 1
+  const next = await accountStart({
+    ...started.device,
+    challenge: randomBytes(32).toString("base64url"),
+  })
+  const pairing = (pairingId) =>
+    env.DB.prepare("SELECT * FROM account_pairings WHERE token_hash = ?")
+      .bind(createHash("sha256").update(pairingId).digest("hex"))
+      .first()
+  assert.equal(
+    (await pairing(started.pairingId))?.session_id,
+    session.sessionId
+  )
+  assert.equal(await pairing(expiredPending.pairingId), null)
+  assert.equal((await accountPoll(started)).status, 410)
+  assert.equal((await approval(started, userId)).status, 410)
+  assert.deepEqual(await (await accountPoll(next)).json(), {
+    status: "pending",
+  })
+  assert.equal((await approval(next, userId)).status, 200)
+  const claims = decodeReceipt((await (await accountPoll(next)).json()).session)
+  assert.notEqual(claims.sessionId, session.sessionId)
+  assert.equal(
+    (await pair(started.device, "cancel", started.pairingId)).status,
+    200
+  )
+  assert.deepEqual(
+    (await listAccountDevices(env.DB, userId)).map(
+      (device) => device.sessionId
+    ),
+    [claims.sessionId]
+  )
+  await accountStart()
+  assert.equal(await pairing(started.pairingId), null)
+  assert.equal(
+    (await pair(started.device, "cancel", started.pairingId)).status,
+    410
+  )
+  const verified = await sessionRequest(next.device, claims.sessionId)
+  assert.equal(decodeReceipt((await verified.json()).session).status, "active")
+})
+
 test("cancellation revokes a session approved after its pending pairing snapshot", async () => {
   const userId = "user_cancel_approval_race"
   await assign(userId, "regular", Date.now() + 3_600_000)
