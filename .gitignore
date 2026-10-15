@@ -27,6 +27,7 @@
 # Manually uploaded installers
 /public/downloads/*.dmg
 /downloads/*.dmg
+/downloads/updates/
 /.wrangler/
 .dev.vars*
 !.dev.vars.example
