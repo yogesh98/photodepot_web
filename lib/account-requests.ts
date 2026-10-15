@@ -48,6 +48,14 @@ export interface CustomerAccount {
   user: { email: string }
   subscription: CustomerSubscription | null
   requests: CustomerRequest[]
+  devices?: {
+    id: string
+    activatedAt: number
+    sessionId: string | null
+    revision: number
+    deviceName: string | null
+    lastUsedAt: number | null
+  }[]
 }
 export interface AdminRequestQueue {
   requests: (AccountRequest & {

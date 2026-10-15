@@ -39,7 +39,12 @@ import { Textarea } from "@/components/ui/textarea"
 import styles from "./customer-account.module.css"
 
 type RequestForm = { action: "request-renewal" }
-type SelectedMac = { id: string; number: number; revision: number }
+type SelectedMac = {
+  id: string
+  label: string
+  revision: number
+  sessionId?: string | null
+}
 type RenewalAction = "cancel-renewal" | "resume-renewal"
 class AccountError extends Error {
   constructor(
@@ -343,22 +348,36 @@ export function CustomerAccountPage() {
     setBusy(true)
     setFormError("")
     try {
-      const result = await api<{ subscription: CustomerSubscription }>({
+      const result = await api<{
+        subscription: CustomerSubscription | null
+        devices?: CustomerAccount["devices"]
+      }>({
         action: "remove-device",
         deviceId: selectedMac.id,
         expectedRevision: selectedMac.revision,
+        ...(selectedMac.sessionId
+          ? {
+              sessionId: selectedMac.sessionId,
+              expectedSessionRevision: selectedMac.revision,
+            }
+          : {}),
       })
       if (!mounted.current) return
       if (
-        !result.subscription ||
-        !Array.isArray(result.subscription.devices) ||
-        result.subscription.devices.some(
+        !Array.isArray(result.devices ?? result.subscription?.devices) ||
+        (result.devices ?? result.subscription?.devices ?? []).some(
           (device) => device.id === selectedMac.id
         )
       )
         throw new Error("Unable to confirm Mac removal. Refresh your account.")
       setAccount((current) =>
-        current ? { ...current, subscription: result.subscription } : current
+        current
+          ? {
+              ...current,
+              subscription: result.subscription,
+              devices: result.devices,
+            }
+          : current
       )
       setSelectedMac(null)
       setNotice("Mac removed.")
@@ -398,7 +417,7 @@ export function CustomerAccountPage() {
       )
       setNotice(
         renewalAction === "cancel-renewal"
-          ? "Renewal canceled. You can keep using Photodepot until your current access period ends."
+          ? "Renewal canceled. Local project access continues until your subscription ends. You can still log in and join collaboration afterward."
           : "Renewal preference restored. Your administrator will still need to approve and extend access."
       )
       setRenewalAction(null)
@@ -417,6 +436,16 @@ export function CustomerAccountPage() {
     }
   }
   const subscription = account?.subscription
+  const devices =
+    account?.devices ??
+    subscription?.devices.map((device) => ({
+      ...device,
+      deviceName: null,
+      lastUsedAt: null,
+      sessionId: null,
+      revision: subscription.revision,
+    })) ??
+    []
   const openRequests =
     account?.requests.filter((request) =>
       ["pending", "acknowledged"].includes(request.status)
@@ -429,7 +458,7 @@ export function CustomerAccountPage() {
   const status = active
     ? "Active"
     : subscription?.status === "revoked"
-      ? "Access revoked"
+      ? "Subscription revoked"
       : subscription
         ? "Expired"
         : "No subscription"
@@ -525,7 +554,7 @@ export function CustomerAccountPage() {
               <div className={styles.metric}>
                 <span>
                   <ShieldCheck />
-                  Account access
+                  Subscription
                 </span>
                 <strong>{status}</strong>
               </div>
@@ -535,7 +564,7 @@ export function CustomerAccountPage() {
                   Connected devices
                 </span>
                 <strong>
-                  {subscription?.devices.length ?? 0}
+                  {devices.length}
                   <em> / {subscription?.deviceLimit ?? 2} Macs</em>
                 </strong>
               </div>
@@ -603,8 +632,9 @@ export function CustomerAccountPage() {
                     </dl>
                   ) : (
                     <p className={styles.planHint}>
-                      An administrator must assign access before you can use the
-                      Mac app.
+                      You can log in to the Mac app and join collaboration. An
+                      administrator must assign a subscription to open local
+                      projects or host collaboration.
                     </p>
                   )}
                   {active && (
@@ -683,25 +713,33 @@ export function CustomerAccountPage() {
                     <h2 id="macs-title">Connected Macs</h2>
                   </CardTitle>
                   <Badge variant="outline" className={styles.count}>
-                    {subscription?.devices.length ?? 0} /{" "}
-                    {subscription?.deviceLimit ?? 2}
+                    {devices.length} / {subscription?.deviceLimit ?? 2}
                   </Badge>
                 </CardHeader>
                 <CardContent className={styles.deviceContent}>
-                  {subscription?.devices.length ? (
+                  {devices.length ? (
                     <ol className={styles.devices}>
-                      {subscription.devices.map((device, index) => {
+                      {devices.map((device, index) => {
+                        const label =
+                          device.deviceName || `Computer ${index + 1}`
                         return (
                           <li key={device.id}>
                             <div className={styles.deviceHeading}>
                               <span className={styles.deviceIcon}>
                                 <Monitor size={23} />
                               </span>
-                              <div>
-                                <strong>Mac {index + 1}</strong>
+                              <div className="min-w-0 [overflow-wrap:anywhere]">
+                                <strong>{label}</strong>
                                 <span>
                                   Connected{" "}
                                   <DateTime value={device.activatedAt} short />
+                                  {device.lastUsedAt != null && (
+                                    <>
+                                      <br />
+                                      Last used{" "}
+                                      <DateTime value={device.lastUsedAt} />
+                                    </>
+                                  )}
                                 </span>
                               </div>
                             </div>
@@ -718,12 +756,19 @@ export function CustomerAccountPage() {
                                 prepareDialog()
                                 setSelectedMac({
                                   id: device.id,
-                                  number: index + 1,
-                                  revision: subscription.revision,
+                                  label,
+                                  revision:
+                                    "revision" in device
+                                      ? (device.revision as number)
+                                      : subscription!.revision,
+                                  sessionId:
+                                    "sessionId" in device
+                                      ? (device.sessionId as string | null)
+                                      : undefined,
                                 })
                               }}
                               disabled={busy || sessionExpired || loading}
-                              aria-label={`Remove Mac ${index + 1}`}
+                              aria-label={`Remove ${label}`}
                             >
                               Remove Mac
                             </Button>
@@ -855,11 +900,11 @@ export function CustomerAccountPage() {
                 <Monitor />
               </div>
               <DialogTitle className={styles.modalTitle}>
-                Remove this Mac?
+                Remove {selectedMac.label}?
               </DialogTitle>
               <DialogDescription className={styles.modalDescription}>
-                End Mac {selectedMac.number}’s access to Photodepot. It must
-                sign in again to reconnect.
+                End access to Photodepot on {selectedMac.label}. This computer
+                must sign in again to reconnect.
               </DialogDescription>
             </DialogHeader>
             <code className={styles.deviceId}>{selectedMac.id}</code>

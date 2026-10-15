@@ -92,6 +92,8 @@ before(async () => {
     "0005_account_pairings.sql",
     "0006_subscription_management.sql",
     "0007_two_mac_assignments.sql",
+    "0011_desktop_account_sessions.sql",
+    "0012_desktop_device_metadata.sql",
   ]) {
     if (filename === "0007_two_mac_assignments.sql") {
       await database.batch([

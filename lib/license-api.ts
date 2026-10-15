@@ -82,7 +82,14 @@ export async function handleLicenseRequest(
         ])
       )
         return json({ error: "Device verification failed." }, 401)
-      if (await getSubscriptionDevice(env.DB, device.deviceId))
+      if (
+        (await getSubscriptionDevice(env.DB, device.deviceId)) ||
+        (await env.DB.prepare(
+          "SELECT id FROM desktop_sessions WHERE device_id = ? LIMIT 1"
+        )
+          .bind(device.deviceId)
+          .first())
+      )
         return json(
           {
             error:

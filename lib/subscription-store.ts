@@ -115,6 +115,12 @@ export const subscriptionSelectFields = `s.*, (
     'activatedAt', mac.activated_at)), '[]')
   FROM (SELECT device_id, binding_revision, assignment_revision, activated_at FROM account_devices
     WHERE user_id = s.user_id AND active = 1 AND binding_revision = s.binding_revision
+      AND NOT EXISTS (SELECT 1 FROM desktop_sessions foreign_session WHERE foreign_session.device_id = account_devices.device_id
+        AND foreign_session.user_id != s.user_id AND foreign_session.active = 1)
+    UNION ALL SELECT ds.device_id, s.binding_revision, ds.revision, ds.created_at
+    FROM desktop_sessions ds WHERE ds.user_id = s.user_id AND ds.active = 1
+      AND NOT EXISTS (SELECT 1 FROM account_devices old WHERE old.device_id = ds.device_id
+        AND old.user_id = s.user_id AND old.active = 1 AND old.binding_revision = s.binding_revision)
     ORDER BY activated_at, device_id) mac
   ) AS current_devices_json`
 
@@ -181,8 +187,9 @@ export async function getSubscriptionOverview(
        (SELECT COUNT(*) FROM waitlist) AS waitlistTotal,
        (SELECT COUNT(*) FROM waitlist WHERE julianday(created_at) >= julianday(?) AND julianday(created_at) <= julianday(?)) AS waitlistLast30Days,
        (SELECT COUNT(*) FROM subscription_requests WHERE status IN ('pending', 'acknowledged')) AS openRequests,
-       (SELECT COUNT(*) FROM account_devices d JOIN subscriptions owner ON owner.user_id = d.user_id
-         WHERE d.active = 1 AND d.binding_revision = owner.binding_revision) AS assignedMacs
+       (SELECT COUNT(*) FROM (SELECT d.device_id FROM account_devices d JOIN subscriptions owner ON owner.user_id = d.user_id
+         WHERE d.active = 1 AND d.binding_revision = owner.binding_revision
+         UNION SELECT device_id FROM desktop_sessions WHERE active = 1)) AS assignedMacs
        FROM subscriptions`
     )
     .bind(

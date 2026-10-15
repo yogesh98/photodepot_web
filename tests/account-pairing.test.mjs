@@ -18,11 +18,19 @@ import {
   getSubscription,
   listSubscriptionAudit,
   setSubscription,
+  SubscriptionConflictError,
 } from "../lib/subscription-store.ts"
 import {
   getSubscriptionDevice,
+  bindSubscriptionDevice,
   resetSubscriptionDevice,
 } from "../lib/subscription-devices.ts"
+import {
+  handleDesktopSession,
+  listAccountDevices,
+} from "../lib/account-sessions.ts"
+import { handleAccountSubscription } from "../functions/api/account/subscription.ts"
+import { handleLicenseRequest } from "../lib/license-api.ts"
 
 const origin = "https://photodepot.app"
 const clientId = "client_pairing_tests"
@@ -121,7 +129,7 @@ function mac() {
   }
 }
 
-function jwt(userId) {
+function jwt(userId, sessionId = `session_${userId}`) {
   const header = Buffer.from(
     JSON.stringify({ alg: "RS256", kid: jwk.kid })
   ).toString("base64url")
@@ -131,7 +139,7 @@ function jwt(userId) {
       iss: "https://api.workos.com",
       client_id: clientId,
       sub: userId,
-      sid: `session_${userId}`,
+      sid: sessionId,
       iat: Math.floor(epoch / 1000),
       exp: Math.floor(epoch / 1000) + 3600,
     })
@@ -139,14 +147,14 @@ function jwt(userId) {
   return `${header}.${payload}.${sign("RSA-SHA256", Buffer.from(`${header}.${payload}`), rsa.privateKey).toString("base64url")}`
 }
 
-async function accountCookie(userId, audience = "account") {
+async function accountCookie(userId, audience = "account", sessionId) {
   const value = await sealData(
     {
       version: 1,
       audience,
       clientId,
       origin,
-      accessToken: jwt(userId),
+      accessToken: jwt(userId, sessionId),
       refreshToken: `refresh_${userId}`,
       user: {
         id: userId,
@@ -178,6 +186,7 @@ function signedBody(device, action, pairingId, changes = {}) {
           device.deviceId,
           device.publicKeyEncoded,
           device.challenge,
+          ...(device.deviceName === undefined ? [] : [device.deviceName]),
         ]
       : [
           "photodepot-account-pairing-v1",
@@ -190,7 +199,12 @@ function signedBody(device, action, pairingId, changes = {}) {
     deviceId: device.deviceId,
     challenge: device.challenge,
     ...(action === "start"
-      ? { devicePublicKey: device.publicKeyEncoded }
+      ? {
+          devicePublicKey: device.publicKeyEncoded,
+          ...(device.deviceName === undefined
+            ? {}
+            : { deviceName: device.deviceName }),
+        }
       : { pairingId }),
     deviceSignature: sign(
       null,
@@ -248,10 +262,30 @@ async function approval(
 ) {
   const target = new URL(started.approvalUrl)
   const cookie = userId ? await accountCookie(userId) : undefined
+  let body
+  if (started.account && method === "POST" && cookie) {
+    const preview = await handleAccountApproval(
+      new Request(`${hostname}${target.pathname}${target.search}`, {
+        headers: { cookie },
+      }),
+      env
+    )
+    const html = await preview.text()
+    const token = html.match(/name="csrf" value="([^"]+)"/)?.[1]
+    body = new URLSearchParams({ csrf: token ?? "" })
+  }
   return handleAccountApproval(
     new Request(`${hostname}${target.pathname}${target.search}`, {
       method,
-      headers: { origin: hostname, ...(cookie ? { cookie } : {}), ...headers },
+      headers: {
+        origin: hostname,
+        ...(cookie ? { cookie } : {}),
+        ...(body
+          ? { "content-type": "application/x-www-form-urlencoded" }
+          : {}),
+        ...headers,
+      },
+      ...(body ? { body } : {}),
     }),
     env
   )
@@ -1000,4 +1034,814 @@ test("individual reset invalidates that Mac's old approval while the other Mac c
     200
   )
   assert.equal((await listSubscriptionAudit(env.DB, userId)).length, 5)
+})
+
+async function accountStart(device = mac()) {
+  const response = await pair(device, "start", undefined, {}, env, origin, {
+    "Photodepot-Account-Version": "1",
+  })
+  assert.equal(response.status, 201)
+  return { ...(await response.json()), device, account: true }
+}
+async function accountPoll(started) {
+  return pair(started.device, "poll", started.pairingId, {}, env, origin, {
+    "Photodepot-Account-Version": "1",
+  })
+}
+function sessionRequest(
+  device,
+  sessionId,
+  action = "verify",
+  changes = {},
+  bindings = env
+) {
+  const challenge = randomBytes(32).toString("base64url")
+  return handleDesktopSession(
+    new Request(`${origin}/api/account/session/${action}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "cf-connecting-ip": `session-test-${sequence++}`,
+      },
+      body: JSON.stringify({
+        sessionId,
+        deviceId: device.deviceId,
+        challenge,
+        deviceSignature: sign(
+          null,
+          Buffer.from(
+            JSON.stringify([
+              "photodepot-account-session-v1",
+              action,
+              sessionId,
+              device.deviceId,
+              challenge,
+              ...(changes.deviceName === undefined ? [] : [changes.deviceName]),
+            ])
+          ),
+          device.privateKey
+        ).toString("base64url"),
+        ...changes,
+      }),
+    }),
+    bindings,
+    action
+  )
+}
+async function accountLogin(userId, device = mac()) {
+  if (!users.has(userId))
+    users.set(userId, { email: `${userId}@example.com`, emailVerified: true })
+  const started = await accountStart(device)
+  assert.equal((await approval(started, userId)).status, 200)
+  const response = await accountPoll(started)
+  assert.equal(response.status, 200)
+  const result = await response.json()
+  return { ...started, result, claims: decodeReceipt(result.session) }
+}
+
+test("account sessions allow collaboration without subscriptions and expose independent signed login claims", async () => {
+  const userId = "user_session_free"
+  const loggedIn = await accountLogin(userId)
+  assert.equal(loggedIn.result.status, "approved")
+  assert.equal("receipt" in loggedIn.result, false)
+  assert.equal(loggedIn.claims.userId, userId)
+  assert.equal(loggedIn.claims.status, "active")
+  assert.equal(loggedIn.claims.deviceId, loggedIn.device.deviceId)
+  assert.equal(
+    loggedIn.claims.expiresAt - loggedIn.claims.issuedAt,
+    48 * 60 * 60 * 1000
+  )
+  assert.equal(await getSubscription(env.DB, userId), null)
+  const verified = await sessionRequest(
+    loggedIn.device,
+    loggedIn.claims.sessionId
+  )
+  assert.equal(verified.status, 200)
+  const result = await verified.json()
+  assert.equal(decodeReceipt(result.session).status, "active")
+  assert.equal("receipt" in result, false)
+  assert.equal((await listAccountDevices(env.DB, userId)).length, 1)
+})
+
+test("subscription expiry and revocation remove local entitlement while keeping the account session active", async () => {
+  const userId = "user_session_entitlement"
+  await assign(userId, "regular", Date.now() + 3600_000)
+  const loggedIn = await accountLogin(userId)
+  assert.equal(decodeReceipt(loggedIn.result.receipt).status, "active")
+  assert.equal(
+    decodeReceipt(loggedIn.result.receipt).challenge,
+    loggedIn.claims.challenge
+  )
+  await env.DB.prepare("UPDATE subscriptions SET end_at = ? WHERE user_id = ?")
+    .bind(Date.now() - 1, userId)
+    .run()
+  for (const state of ["expired", "revoked"]) {
+    if (state === "revoked")
+      await env.DB.prepare(
+        "UPDATE subscriptions SET status = 'revoked' WHERE user_id = ?"
+      )
+        .bind(userId)
+        .run()
+    const response = await sessionRequest(
+      loggedIn.device,
+      loggedIn.claims.sessionId
+    )
+    assert.equal(response.status, 200)
+    const result = await response.json()
+    assert.equal(decodeReceipt(result.session).status, "active")
+    assert.equal("receipt" in result, false)
+  }
+})
+
+test("desktop logout revokes its exact session and old proofs or pairing cannot revive it after a fresh login", async () => {
+  const userId = "user_session_logout"
+  const first = await accountLogin(userId)
+  const response = await sessionRequest(
+    first.device,
+    first.claims.sessionId,
+    "logout"
+  )
+  assert.equal(response.status, 200)
+  const revoked = decodeReceipt((await response.json()).session)
+  assert.equal(revoked.status, "revoked")
+  assert.equal(revoked.revision, first.claims.revision + 1)
+  assert.equal((await listAccountDevices(env.DB, userId)).length, 0)
+  assert.equal((await accountPoll(first)).status, 410)
+  const second = await accountLogin(userId, first.device)
+  assert.notEqual(second.claims.sessionId, first.claims.sessionId)
+  const old = await sessionRequest(first.device, first.claims.sessionId)
+  assert.equal(decodeReceipt((await old.json()).session).status, "revoked")
+  await sessionRequest(first.device, first.claims.sessionId, "logout")
+  const current = await sessionRequest(first.device, second.claims.sessionId)
+  assert.equal(decodeReceipt((await current.json()).session).status, "active")
+  assert.equal((await listAccountDevices(env.DB, userId)).length, 1)
+})
+
+test("web Remove Mac revokes the same free-account session and protects other accounts and stale sessions", async () => {
+  const userId = "user_session_console"
+  const first = await accountLogin(userId)
+  const cookie = await accountCookie(userId)
+  const get = await handleAccountSubscription(
+    new Request(`${origin}/api/account/subscription`, { headers: { cookie } }),
+    env
+  )
+  const account = await get.json()
+  assert.equal(account.subscription, null)
+  assert.equal(account.devices[0].sessionId, first.claims.sessionId)
+  async function remove(asCookie, overrides = {}, requestOrigin = origin) {
+    return handleAccountSubscription(
+      new Request(`${origin}/api/account/subscription`, {
+        method: "POST",
+        headers: {
+          cookie: asCookie,
+          origin: requestOrigin,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          action: "remove-device",
+          deviceId: first.device.deviceId,
+          sessionId: first.claims.sessionId,
+          expectedSessionRevision: 1,
+          ...overrides,
+        }),
+      }),
+      env
+    )
+  }
+  assert.equal(
+    (await remove(cookie, {}, "https://attacker.example")).status,
+    403
+  )
+  users.set("user_session_console_other", {
+    email: "other@example.com",
+    emailVerified: true,
+  })
+  assert.equal(
+    (await remove(await accountCookie("user_session_console_other"))).status,
+    400
+  )
+  assert.equal(
+    (await remove(cookie, { expectedSessionRevision: 2 })).status,
+    409
+  )
+  const removed = await remove(cookie)
+  assert.equal(removed.status, 200)
+  assert.deepEqual((await removed.json()).devices, [])
+  const verified = await sessionRequest(first.device, first.claims.sessionId)
+  assert.equal(decodeReceipt((await verified.json()).session).status, "revoked")
+  assert.equal((await remove(cookie)).status, 409)
+})
+
+test("account session proofs are scoped to the exact device, action, challenge and session", async () => {
+  const first = await accountLogin("user_session_proofs")
+  const second = await accountLogin("user_session_proofs")
+  for (const changes of [
+    { deviceId: second.device.deviceId },
+    { challenge: randomBytes(32).toString("base64url") },
+    { sessionId: second.claims.sessionId },
+    { deviceSignature: "a".repeat(86) },
+  ])
+    assert.equal(
+      (
+        await sessionRequest(
+          first.device,
+          first.claims.sessionId,
+          "verify",
+          changes
+        )
+      ).status,
+      401
+    )
+  assert.equal(
+    decodeReceipt(
+      (
+        await (
+          await sessionRequest(first.device, first.claims.sessionId)
+        ).json()
+      ).session
+    ).status,
+    "active"
+  )
+})
+
+test("free account approvals enforce two Macs atomically and Owner resets revoke subscribed sessions", async () => {
+  const userId = "user_session_capacity"
+  users.set(userId, { email: `${userId}@example.com`, emailVerified: true })
+  const started = await Promise.all(
+    Array.from({ length: 4 }, () => accountStart())
+  )
+  const approvals = await Promise.all(
+    started.map((value) => approval(value, userId))
+  )
+  assert.equal(approvals.filter((value) => value.status === 200).length, 2)
+  assert.equal(approvals.filter((value) => value.status === 409).length, 2)
+  assert.equal((await listAccountDevices(env.DB, userId)).length, 2)
+  const subscription = await assign(userId, "regular", Date.now() + 3600_000)
+  assert.equal(subscription.devices.length, 2)
+  const connected =
+    started[approvals.findIndex((value) => value.status === 200)]
+  const before = decodeReceipt(
+    (await (await accountPoll(connected)).json()).session
+  )
+  const reset = await resetSubscriptionDevice(
+    env.DB,
+    userId,
+    subscription.revision,
+    "owner@example.com",
+    Date.now(),
+    "Test reset",
+    connected.device.deviceId
+  )
+  assert.equal(reset.devices.length, 1)
+  const verified = await sessionRequest(connected.device, before.sessionId)
+  assert.equal(decodeReceipt((await verified.json()).session).status, "revoked")
+})
+
+test("deleted and unverified accounts revoke login while WorkOS outages preserve recoverable sessions", async () => {
+  for (const state of ["deleted", "unverified", "unavailable"]) {
+    const userId = `user_session_account_${state}`
+    const first = await accountLogin(userId)
+    if (state === "deleted") users.delete(userId)
+    else if (state === "unverified")
+      users.set(userId, {
+        email: "unverified@example.com",
+        emailVerified: false,
+      })
+    else users.set(userId, "unavailable")
+    const response = await sessionRequest(first.device, first.claims.sessionId)
+    assert.equal(response.status, state === "unavailable" ? 503 : 200)
+    if (response.status === 200)
+      assert.equal(
+        decodeReceipt((await response.json()).session).status,
+        "revoked"
+      )
+  }
+})
+
+test("cancelling a browser-approved sign-in revokes the session and frees its Mac slot", async () => {
+  const first = await accountLogin("user_session_cancel")
+  const cancelled = await pair(
+    first.device,
+    "cancel",
+    first.pairingId,
+    {},
+    env,
+    origin,
+    { "Photodepot-Account-Version": "1" }
+  )
+  assert.equal(cancelled.status, 200)
+  assert.equal(
+    (await listAccountDevices(env.DB, first.claims.userId)).length,
+    0
+  )
+  const verified = await sessionRequest(first.device, first.claims.sessionId)
+  assert.equal(decodeReceipt((await verified.json()).session).status, "revoked")
+})
+
+test("session removal wins an in-flight WorkOS outage and never returns cached active authorization", async (t) => {
+  const userId = "user_session_remove_race"
+  const first = await accountLogin(userId)
+  const lookupStarted = Promise.withResolvers()
+  const lookupGate = Promise.withResolvers()
+  const normalFetch = globalThis.fetch
+  t.mock.method(globalThis, "fetch", async (url, options) => {
+    if (String(url).endsWith(`/user_management/users/${userId}`)) {
+      lookupStarted.resolve()
+      await lookupGate.promise
+      return Response.json({ message: "Service unavailable" }, { status: 503 })
+    }
+    return normalFetch(url, options)
+  })
+  const pending = sessionRequest(first.device, first.claims.sessionId)
+  await lookupStarted.promise
+  try {
+    const removed = await sessionRequest(
+      first.device,
+      first.claims.sessionId,
+      "logout"
+    )
+    assert.equal(removed.status, 200)
+  } finally {
+    lookupGate.resolve()
+  }
+  const response = await pending
+  assert.equal(response.status, 200)
+  const result = await response.json()
+  assert.equal(decodeReceipt(result.session).status, "revoked")
+  assert.equal("receipt" in result, false)
+})
+
+test("fresh session approval invalidates stale administrative Mac removal and logout advances the subscription revision only once", async () => {
+  const userId = "user_session_admin_revision"
+  await assign(userId, "regular", Date.now() + 3600_000)
+  const first = await accountLogin(userId)
+  const original = await getSubscription(env.DB, userId)
+  const second = await accountLogin(userId, first.device)
+  const current = await getSubscription(env.DB, userId)
+  assert.equal(current.revision, original.revision + 1)
+  await assert.rejects(
+    resetSubscriptionDevice(
+      env.DB,
+      userId,
+      original.revision,
+      "owner@example.com",
+      Date.now(),
+      "Stale removal",
+      first.device.deviceId
+    ),
+    SubscriptionConflictError
+  )
+  assert.equal(
+    decodeReceipt(
+      (
+        await (
+          await sessionRequest(second.device, second.claims.sessionId)
+        ).json()
+      ).session
+    ).status,
+    "active"
+  )
+  await sessionRequest(second.device, second.claims.sessionId, "logout")
+  const removed = await getSubscription(env.DB, userId)
+  assert.equal(removed.revision, current.revision + 1)
+  await sessionRequest(second.device, second.claims.sessionId, "logout")
+  assert.equal(
+    (await getSubscription(env.DB, userId)).revision,
+    removed.revision
+  )
+})
+
+test("account session devices cannot replace subscription entitlement with legacy license activation, including after logout", async () => {
+  const loggedIn = await accountLogin("user_session_no_legacy")
+  const key = `PD-${Array(6).fill("AAAAAAAA").join("-")}`
+  for (const loggedOut of [false, true]) {
+    if (loggedOut)
+      await sessionRequest(loggedIn.device, loggedIn.claims.sessionId, "logout")
+    const challenge = randomBytes(32).toString("base64url")
+    const device = loggedIn.device
+    const response = await handleLicenseRequest(
+      new Request(`${origin}/api/licenses/activate`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          key,
+          devicePublicKey: device.publicKeyEncoded,
+          challenge,
+          signature: sign(
+            null,
+            Buffer.from(
+              JSON.stringify([
+                "photodepot-license-v1",
+                "activate",
+                key,
+                device.publicKeyEncoded,
+                challenge,
+              ])
+            ),
+            device.privateKey
+          ).toString("base64url"),
+        }),
+      }),
+      env,
+      "activate"
+    )
+    assert.equal(response.status, 409)
+    assert.match((await response.json()).error, /account subscription/)
+  }
+})
+
+async function signInForm(
+  started,
+  userId,
+  cookie,
+  headers = { "sec-fetch-site": "none" }
+) {
+  cookie ??= await accountCookie(userId)
+  const response = await handleAccountApproval(
+    new Request(started.approvalUrl, { headers: { cookie, ...headers } }),
+    env
+  )
+  const html = await response.text()
+  return {
+    cookie,
+    response,
+    html,
+    csrf: html.match(/name="csrf" value="([^"]+)"/)?.[1],
+  }
+}
+function submitSignIn(
+  started,
+  cookie,
+  csrf,
+  replacement,
+  bindings = env,
+  requestOrigin = origin
+) {
+  const body = new URLSearchParams({ csrf: csrf ?? "" })
+  if (replacement) body.set("replacement", JSON.stringify(replacement))
+  return handleAccountApproval(
+    new Request(started.approvalUrl, {
+      method: "POST",
+      headers: {
+        cookie,
+        origin: requestOrigin,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body,
+    }),
+    bindings
+  )
+}
+function selection(loggedIn) {
+  return {
+    deviceId: loggedIn.device.deviceId,
+    sessionId: loggedIn.claims.sessionId,
+    revision: loggedIn.claims.revision,
+  }
+}
+
+test("free slots complete sign-in automatically with a protected POST and branded success", async () => {
+  const userId = "user_auto_free"
+  users.set(userId, { email: `${userId}@example.com`, emailVerified: true })
+  const started = await accountStart({
+    ...mac(),
+    deviceName: "Yogesh’s MacBook Pro",
+  })
+  const form = await signInForm(started, userId)
+  assert.equal(form.response.status, 200)
+  assert.match(form.html, /requestSubmit\(\)/)
+  assert.match(
+    form.response.headers.get("content-security-policy"),
+    /script-src 'nonce-/
+  )
+  assert.doesNotMatch(form.html, /Approve|fingerprint|Only approve/)
+  assert.deepEqual(await listAccountDevices(env.DB, userId), [])
+  const response = await submitSignIn(started, form.cookie, form.csrf)
+  assert.equal(response.status, 200)
+  const html = await response.text()
+  assert.match(html, /src="\/brand\/photodepot-lockup.svg"/)
+  assert.match(html, /<h1>Signed in<\/h1>/)
+  assert.match(html, /Return to Photodepot\./)
+  assert.doesNotMatch(html, /Mac/)
+  const devices = await listAccountDevices(env.DB, userId)
+  assert.equal(devices[0].deviceName, "Yogesh’s MacBook Pro")
+  assert.ok(devices[0].lastUsedAt >= devices[0].activatedAt)
+})
+
+test("device names are signed, bounded, and refreshed by active session verification", async (t) => {
+  const named = { ...mac(), deviceName: "Studio Computer" }
+  assert.equal(
+    (
+      await pair(
+        named,
+        "start",
+        undefined,
+        { deviceName: "Altered name" },
+        env,
+        origin,
+        { "Photodepot-Account-Version": "1" }
+      )
+    ).status,
+    401
+  )
+  for (const name of [
+    "",
+    " leading",
+    "trailing ",
+    "bad\nname",
+    "x".repeat(121),
+  ])
+    assert.equal(
+      (
+        await pair(
+          mac(),
+          "start",
+          undefined,
+          { deviceName: name },
+          env,
+          origin,
+          { "Photodepot-Account-Version": "1" }
+        )
+      ).status,
+      400
+    )
+  const loggedIn = await accountLogin("user_device_metadata", named)
+  let current = Date.now()
+  t.mock.method(Date, "now", () => current)
+  const before = (await listAccountDevices(env.DB, loggedIn.claims.userId))[0]
+  current += 1000
+  const response = await sessionRequest(
+    loggedIn.device,
+    loggedIn.claims.sessionId,
+    "verify",
+    { deviceName: "Renamed Studio Computer" }
+  )
+  assert.equal(response.status, 200)
+  const after = (await listAccountDevices(env.DB, loggedIn.claims.userId))[0]
+  assert.equal(after.deviceName, "Renamed Studio Computer")
+  assert.ok(after.lastUsedAt > before.lastUsedAt)
+  assert.equal(after.revision, before.revision)
+  const bad = await sessionRequest(
+    loggedIn.device,
+    loggedIn.claims.sessionId,
+    "verify",
+    { deviceName: "" }
+  )
+  assert.equal(bad.status, 400)
+})
+
+test("full slots show real computer names and replace only the selected current session atomically", async () => {
+  const userId = "user_auto_replace"
+  const first = await accountLogin(userId, {
+    ...mac(),
+    deviceName: "Office <Computer>",
+  })
+  const second = await accountLogin(userId, {
+    ...mac(),
+    deviceName: "Travel Computer",
+  })
+  const incoming = await accountStart({ ...mac(), deviceName: "New Computer" })
+  const form = await signInForm(incoming, userId)
+  assert.match(form.html, /Office &lt;Computer&gt;/)
+  assert.match(form.html, /Travel Computer/)
+  assert.match(form.html, /Last used/)
+  assert.match(form.html, /Remove and sign in/)
+  assert.doesNotMatch(form.html, /requestSubmit|Approve/)
+  assert.equal(
+    (
+      await submitSignIn(incoming, form.cookie, form.csrf, {
+        ...selection(first),
+        revision: 9,
+      })
+    ).status,
+    409
+  )
+  assert.equal((await listAccountDevices(env.DB, userId)).length, 2)
+  assert.equal(
+    (await submitSignIn(incoming, form.cookie, form.csrf, selection(first)))
+      .status,
+    200
+  )
+  const devices = await listAccountDevices(env.DB, userId)
+  assert.deepEqual(
+    new Set(devices.map((value) => value.id)),
+    new Set([second.device.deviceId, incoming.device.deviceId])
+  )
+  assert.equal(
+    decodeReceipt(
+      (
+        await (
+          await sessionRequest(first.device, first.claims.sessionId)
+        ).json()
+      ).session
+    ).status,
+    "revoked"
+  )
+  assert.equal((await accountPoll(incoming)).status, 200)
+  // A replay after success cannot select and remove another computer.
+  assert.equal(
+    (await submitSignIn(incoming, form.cookie, form.csrf, selection(second)))
+      .status,
+    200
+  )
+  assert.deepEqual(await listAccountDevices(env.DB, userId), devices)
+})
+
+test("automatic sign-in CSRF is bound to the account, browser session, pairing, expiry and origin", async (t) => {
+  const userId = "user_auto_csrf"
+  users.set(userId, { email: `${userId}@example.com`, emailVerified: true })
+  users.set("user_auto_csrf_other", {
+    email: "other@example.com",
+    emailVerified: true,
+  })
+  const started = await accountStart()
+  const other = await accountStart()
+  const form = await signInForm(started, userId)
+  for (const [target, cookie, csrf, requestOrigin] of [
+    [started, form.cookie, "", origin],
+    [started, form.cookie, form.csrf, "https://attacker.example"],
+    [
+      started,
+      await accountCookie(userId, "account", "other_browser_session"),
+      form.csrf,
+      origin,
+    ],
+    [started, await accountCookie("user_auto_csrf_other"), form.csrf, origin],
+    [other, form.cookie, form.csrf, origin],
+  ])
+    assert.equal(
+      (await submitSignIn(target, cookie, csrf, undefined, env, requestOrigin))
+        .status,
+      403
+    )
+  t.mock.method(Date, "now", () => Number(form.csrf.split(".")[0]) + 1)
+  assert.equal(
+    (await submitSignIn(started, form.cookie, form.csrf)).status,
+    403
+  )
+  assert.deepEqual(await listAccountDevices(env.DB, userId), [])
+})
+
+test("cancelled and foreign replacement selections cannot sign out any existing computer", async () => {
+  const userId = "user_auto_cancel"
+  const first = await accountLogin(userId)
+  await accountLogin(userId)
+  const foreign = await accountLogin("user_auto_foreign")
+  const incoming = await accountStart()
+  const form = await signInForm(incoming, userId)
+  assert.equal(
+    (await submitSignIn(incoming, form.cookie, form.csrf, selection(foreign)))
+      .status,
+    409
+  )
+  await pair(incoming.device, "cancel", incoming.pairingId)
+  assert.equal(
+    (await submitSignIn(incoming, form.cookie, form.csrf, selection(first)))
+      .status,
+    410
+  )
+  assert.equal((await listAccountDevices(env.DB, userId)).length, 2)
+  assert.equal(
+    (await listAccountDevices(env.DB, foreign.claims.userId)).length,
+    1
+  )
+})
+
+test("concurrent replacement forms have one winner and preserve two active computers", async () => {
+  const userId = "user_auto_replace_race"
+  const first = await accountLogin(userId)
+  const second = await accountLogin(userId)
+  const incoming = await Promise.all([accountStart(), accountStart()])
+  const forms = await Promise.all(
+    incoming.map((value) => signInForm(value, userId))
+  )
+  const responses = await Promise.all(
+    incoming.map((value, index) =>
+      submitSignIn(
+        value,
+        forms[index].cookie,
+        forms[index].csrf,
+        selection(first)
+      )
+    )
+  )
+  assert.deepEqual(responses.map((value) => value.status).sort(), [200, 409])
+  const devices = await listAccountDevices(env.DB, userId)
+  assert.equal(devices.length, 2)
+  assert.ok(devices.some((value) => value.id === second.device.deviceId))
+  assert.ok(!devices.some((value) => value.id === first.device.deviceId))
+})
+
+test("explicit account switching retires the foreign legacy assignment without hidden or revived computer slots", async () => {
+  const oldUser = "user_legacy_switch_original"
+  await assign(oldUser, "regular", Date.now() + 3600_000)
+  const device = { ...mac(), deviceName: "Shared Computer" }
+  await bindSubscriptionDevice(env.DB, {
+    userId: oldUser,
+    deviceId: device.deviceId,
+    publicKey: device.publicKeyEncoded,
+  })
+  const before = await getSubscription(env.DB, oldUser)
+  const newAccount = await accountLogin("user_legacy_switch_new", device)
+  assert.deepEqual(await listAccountDevices(env.DB, oldUser), [])
+  assert.equal(
+    (await getSubscriptionDevice(env.DB, device.deviceId)).active,
+    false
+  )
+  assert.equal(
+    (await getSubscription(env.DB, oldUser)).revision,
+    before.revision + 1
+  )
+  await accountLogin(oldUser)
+  await accountLogin(oldUser)
+  assert.equal((await listAccountDevices(env.DB, oldUser)).length, 2)
+  await sessionRequest(device, newAccount.claims.sessionId, "logout")
+  assert.equal((await listAccountDevices(env.DB, oldUser)).length, 2)
+  assert.equal(
+    (await getSubscriptionDevice(env.DB, device.deviceId)).active,
+    false
+  )
+})
+
+test("foreign links and same-origin redirect gadgets cannot silently authorize a computer", async () => {
+  const userId = "user_foreign_link"
+  users.set(userId, { email: `${userId}@example.com`, emailVerified: true })
+  const started = await accountStart({
+    ...mac(),
+    deviceName: "Candidate <Computer>",
+  })
+  for (const headers of [
+    {},
+    { "sec-fetch-site": "cross-site" },
+    { "sec-fetch-site": "same-site" },
+    { "sec-fetch-site": "same-origin" },
+  ]) {
+    const form = await signInForm(started, userId, undefined, headers)
+    assert.doesNotMatch(form.html, /requestSubmit|<script/)
+    assert.match(
+      form.html,
+      /Sign in on <strong>Candidate &lt;Computer&gt;<\/strong>/
+    )
+    assert.match(form.html, />Continue<\/button>/)
+  }
+  assert.deepEqual(await listAccountDevices(env.DB, userId), [])
+})
+
+test("native initiation survives hosted authentication but cannot authorize a different pairing or duplicate intent cookies", async () => {
+  const userId = "user_native_hosted_return"
+  users.set(userId, { email: `${userId}@example.com`, emailVerified: true })
+  const started = await accountStart()
+  const anonymousNative = await handleAccountApproval(
+    new Request(started.approvalUrl, { headers: { "sec-fetch-site": "none" } }),
+    env
+  )
+  assert.equal(anonymousNative.status, 302)
+  const nativeHeader = anonymousNative.headers
+    .getSetCookie()
+    .find((value) => value.startsWith("__Host-photodepot-device-intent="))
+  assert.match(
+    nativeHeader,
+    /HttpOnly; SameSite=Lax; Path=\/; Max-Age=600; Secure/
+  )
+  const nativeCookie = nativeHeader.split(";")[0]
+  const cookie = `${await accountCookie(userId)}; ${nativeCookie}`
+  const callback = await signInForm(started, userId, cookie, {
+    "sec-fetch-site": "cross-site",
+  })
+  assert.match(callback.html, /requestSubmit/)
+  const foreign = await accountStart()
+  const wrongPairing = await signInForm(foreign, userId, cookie, {
+    "sec-fetch-site": "same-origin",
+  })
+  assert.doesNotMatch(wrongPairing.html, /requestSubmit/)
+  const duplicate = await signInForm(
+    started,
+    userId,
+    `${cookie}; ${nativeCookie}`,
+    { "sec-fetch-site": "cross-site" }
+  )
+  assert.doesNotMatch(duplicate.html, /requestSubmit/)
+  assert.equal(
+    (await submitSignIn(started, callback.cookie, callback.csrf)).status,
+    200
+  )
+})
+
+test("pre-existing foreign legacy shadows never count as invisible used slots", async () => {
+  const oldUser = "user_shadow_existing"
+  await assign(oldUser, "regular", Date.now() + 3600_000)
+  const device = mac()
+  await accountLogin("user_shadow_current", device)
+  // Reproduce the old persisted state directly, before the new cleanup exists.
+  await env.DB.prepare(
+    "INSERT INTO account_devices (device_id,user_id,public_key,binding_revision,activated_at,active,assignment_revision) SELECT ?,user_id,?,binding_revision,?,1,1 FROM subscriptions WHERE user_id = ?"
+  )
+    .bind(device.deviceId, device.publicKeyEncoded, Date.now(), oldUser)
+    .run()
+  assert.deepEqual(await listAccountDevices(env.DB, oldUser), [])
+  assert.equal((await getSubscription(env.DB, oldUser)).devices.length, 0)
+  await accountLogin(oldUser)
+  await accountLogin(oldUser)
+  assert.equal((await listAccountDevices(env.DB, oldUser)).length, 2)
+  assert.equal((await getSubscription(env.DB, oldUser)).devices.length, 2)
 })
