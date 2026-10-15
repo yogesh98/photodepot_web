@@ -183,6 +183,31 @@ export async function revokeDesktopSession(
   return results[0].results[0] as unknown as DesktopSession | undefined
 }
 
+/** Read the pairing's current session inside the same transaction as cancellation. */
+export async function cancelAccountPairing(
+  database: D1Database,
+  tokenHash: string,
+  now = Date.now()
+) {
+  const revocationId = randomUUID()
+  await database.batch([
+    database
+      .prepare(
+        "UPDATE account_pairings SET status = 'cancelled' WHERE token_hash = ?"
+      )
+      .bind(tokenHash),
+    database
+      .prepare(
+        `UPDATE desktop_sessions SET active = 0, revision = revision + 1, updated_at = ?, revocation_id = ?
+      WHERE active = 1 AND id IN (SELECT session_id FROM account_pairings WHERE token_hash = ? AND account_version = 1)`
+      )
+      .bind(now, revocationId, tokenHash),
+    ...desktopRevocationCleanup(database, revocationId, now, {
+      pairingTokenHash: tokenHash,
+    }),
+  ])
+}
+
 /** Shared by logout, console removal, and atomic sign-in slot replacement. */
 function desktopRevocationStatements(
   database: D1Database,
@@ -209,26 +234,43 @@ function desktopRevocationStatements(
         expectedRevision ?? null,
         ...(approvedSessionId ? [approvedSessionId] : [])
       ),
+    ...desktopRevocationCleanup(database, revocationId, now, { sessionId: id }),
+  ]
+}
+
+function desktopRevocationCleanup(
+  database: D1Database,
+  revocationId: string,
+  now: number,
+  source: { sessionId: string } | { pairingTokenHash: string }
+): D1PreparedStatement[] {
+  const sessionId =
+    "sessionId" in source
+      ? "?"
+      : "(SELECT session_id FROM account_pairings WHERE token_hash = ?)"
+  const sourceValue =
+    "sessionId" in source ? source.sessionId : source.pairingTokenHash
+  return [
     database
       .prepare(
-        `UPDATE account_pairings SET status = 'cancelled' WHERE device_id = (SELECT device_id FROM desktop_sessions WHERE id = ?)
-      AND user_id = ? AND EXISTS (SELECT 1 FROM desktop_sessions WHERE id = ? AND revocation_id = ?)`
+        `UPDATE account_pairings SET status = 'cancelled' WHERE (device_id, user_id) IN
+      (SELECT device_id, user_id FROM desktop_sessions WHERE id = ${sessionId} AND revocation_id = ?)`
       )
-      .bind(id, userId, id, revocationId),
+      .bind(sourceValue, revocationId),
     database
       .prepare(
         `UPDATE account_devices SET active = 0, assignment_revision = assignment_revision + 1
-      WHERE device_id = (SELECT device_id FROM desktop_sessions WHERE id = ?) AND user_id = ? AND active = 1
-      AND EXISTS (SELECT 1 FROM desktop_sessions WHERE id = ? AND revocation_id = ?)
+      WHERE active = 1 AND (device_id, user_id) IN
+      (SELECT device_id, user_id FROM desktop_sessions WHERE id = ${sessionId} AND revocation_id = ?)
       AND NOT EXISTS (SELECT 1 FROM desktop_sessions newer WHERE newer.device_id = account_devices.device_id AND newer.active = 1)`
       )
-      .bind(id, userId, id, revocationId),
+      .bind(sourceValue, revocationId),
     database
       .prepare(
         `UPDATE subscriptions SET revision = revision + 1, updated_at = ?
-      WHERE user_id = ? AND EXISTS (SELECT 1 FROM desktop_sessions WHERE id = ? AND revocation_id = ?)`
+      WHERE user_id = (SELECT user_id FROM desktop_sessions WHERE id = ${sessionId} AND revocation_id = ?)`
       )
-      .bind(now, userId, id, revocationId),
+      .bind(now, sourceValue, revocationId),
   ]
 }
 

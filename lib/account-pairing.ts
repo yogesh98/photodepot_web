@@ -4,7 +4,6 @@ import {
   randomBytes,
   timingSafeEqual,
 } from "node:crypto"
-import { sealData, unsealData } from "iron-session"
 import {
   BodyError,
   json,
@@ -28,10 +27,10 @@ import { getSubscription } from "./subscription-store.ts"
 import { getWorkOSUser } from "./workos-users.ts"
 import {
   approveDesktopSession,
+  cancelAccountPairing,
   desktopSessionResponse,
   getDesktopSession,
   listAccountDevices,
-  revokeDesktopSession,
 } from "./account-sessions.ts"
 import {
   authenticateWorkOSAccount,
@@ -232,13 +231,7 @@ export async function handleAccountPairing(
     )
       return json({ error: "Mac verification failed." }, 401)
     if (action === "cancel") {
-      if (row.account_version === 1 && row.session_id && row.user_id)
-        await revokeDesktopSession(env.DB, row.session_id, row.user_id)
-      await env.DB.prepare(
-        "UPDATE account_pairings SET status = 'cancelled' WHERE token_hash = ?"
-      )
-        .bind(row.token_hash)
-        .run()
+      await cancelAccountPairing(env.DB, row.token_hash)
       return json({ status: "cancelled" })
     }
     if (row.status === "pending") return json({ status: "pending" })
@@ -394,68 +387,7 @@ function validCsrf(
 function signedInPage() {
   return page("Signed in", "<p>Return to Photodepot.</p>")
 }
-async function nativeSignInIntent(request: Request, env: Env, row: Pairing) {
-  const origin = new URL(request.url).origin
-  const secure = new URL(origin).protocol === "https:"
-  const cookieName = `${secure ? "__Host-" : ""}photodepot-device-intent`
-  if (request.headers.get("sec-fetch-site") === "none") {
-    const value = await sealData(
-      {
-        version: 1,
-        origin,
-        pairing: row.token_hash,
-        nonce: randomBytes(32).toString("base64url"),
-        expiresAt: row.expires_at,
-      },
-      { password: env.WORKOS_COOKIE_PASSWORD!, ttl: 600 }
-    )
-    return {
-      trusted: true,
-      cookie: `${cookieName}=${value}; HttpOnly; SameSite=Lax; Path=/; Max-Age=600${secure ? "; Secure" : ""}`,
-    }
-  }
-  // Redirects and hosted callbacks cannot establish trust for foreign links.
-  const cookies =
-    request.headers
-      .get("cookie")
-      ?.split(";")
-      .map((value) => value.trim())
-      .filter((value) => value.startsWith(`${cookieName}=`)) ?? []
-  if (cookies.length === 1) {
-    try {
-      const value = await unsealData<{
-        version?: number
-        origin?: string
-        pairing?: string
-        nonce?: string
-        expiresAt?: number
-      }>(cookies[0].slice(cookieName.length + 1), {
-        password: env.WORKOS_COOKIE_PASSWORD!,
-        ttl: 600,
-      })
-      if (
-        value.version === 1 &&
-        value.origin === origin &&
-        value.pairing === row.token_hash &&
-        typeof value.nonce === "string" &&
-        tokenPattern.test(value.nonce) &&
-        Number.isSafeInteger(value.expiresAt) &&
-        value.expiresAt! > Date.now() &&
-        value.expiresAt! <= row.expires_at
-      )
-        return { trusted: true }
-    } catch {
-      /* Invalid initiation needs explicit continuation. */
-    }
-  }
-  return { trusted: false }
-}
-function page(
-  title: string,
-  content: string,
-  status = 200,
-  scriptNonce?: string
-) {
+function page(title: string, content: string, status = 200) {
   return new Response(
     `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title} · Photodepot</title><style>body{background:#f6f4ef;color:#20231e;font:16px/1.6 system-ui;margin:0}main{max-width:460px;margin:10vh auto;padding:32px}.brand{display:block;width:220px;height:auto;margin-bottom:40px}h1{line-height:1.2;font-size:30px}button{background:#20231e;color:white;border:0;border-radius:8px;padding:14px 20px;font:inherit;cursor:pointer}small{display:block;color:#62665b;margin:20px 0}a{color:inherit}form{margin-top:24px}.computers{display:grid;gap:12px;margin:24px 0}.computer{display:flex;gap:14px;border:1px solid #d5d8d0;border-radius:12px;padding:16px;cursor:pointer}.computer input{margin-top:8px}.computer strong{display:block}.computer small{margin:4px 0 0}button:focus-visible,input:focus-visible{outline:3px solid #627b4b;outline-offset:4px}</style><main><img class="brand" src="/brand/photodepot-lockup.svg" alt="Photodepot" width="625" height="169"><h1>${title}</h1>${content}</main></html>`,
     {
@@ -466,7 +398,8 @@ function page(
         // Preserve Origin on approval/sign-out forms without leaking referrers
         // to WorkOS or other external destinations.
         "Referrer-Policy": "same-origin",
-        "Content-Security-Policy": `default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; ${scriptNonce ? `script-src 'nonce-${scriptNonce}'; ` : ""}form-action 'self'; base-uri 'none'; frame-ancestors 'none'`,
+        "Content-Security-Policy":
+          "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
       },
     }
   )
@@ -500,32 +433,20 @@ export async function handleAccountApproval(request: Request, env: Env) {
         "<p>Start sign-in again in Photodepot on your Mac.</p>",
         410
       )
-    const initiation =
-      row.account_version === 1 && request.method === "GET"
-        ? await nativeSignInIntent(request, env, row)
-        : { trusted: false }
-    const rememberInitiation = (response: Response) => {
-      if (initiation.cookie)
-        response.headers.append("Set-Cookie", initiation.cookie)
-      return response
-    }
     const auth = await authenticateWorkOSAccount(request, env)
     if (auth instanceof Response) {
       if (auth.status === 401 && request.method === "GET")
-        return rememberInitiation(
-          new Response(null, {
-            status: 302,
-            headers: {
-              ...privateHeaders,
-              "Referrer-Policy": "no-referrer",
-              Location: `/api/account/auth/login?code=${code}${row.intent === "signup" ? "&intent=signup" : ""}`,
-            },
-          })
-        )
+        return new Response(null, {
+          status: 302,
+          headers: {
+            ...privateHeaders,
+            "Referrer-Policy": "no-referrer",
+            Location: `/api/account/auth/login?code=${code}${row.intent === "signup" ? "&intent=signup" : ""}`,
+          },
+        })
       return accountAuthPage(auth, `/account/activate?code=${code}`)
     }
-    const respond = (response: Response) =>
-      rememberInitiation(withAdminSession(response, auth))
+    const respond = (response: Response) => withAdminSession(response, auth)
     const user = await getWorkOSUser(env, auth.userId)
     if (!user?.emailVerified)
       return respond(
@@ -553,6 +474,7 @@ export async function handleAccountApproval(request: Request, env: Env) {
       const full =
         devices.length >= 2 &&
         !devices.some((device) => device.id === row.device_id)
+      const consent = `<p>Sign in on <strong>${escape(row.device_name ?? "this computer")}</strong> as ${escape(user.email)}.</p><p>Only approve if you just started sign-in in Photodepot on your own computer.</p>`
       const chooseComputer = (status = 200) => {
         const csrf = csrfToken(env, auth, row, origin)
         const options = devices
@@ -577,7 +499,7 @@ export async function handleAccountApproval(request: Request, env: Env) {
           .join("")
         return page(
           "Choose a computer to sign out",
-          `<p>Both computer slots are in use. Choose one to remove and continue signing in.</p><form method="post" action="${target}"><input type="hidden" name="csrf" value="${csrf}"><div class="computers">${options}</div><button type="submit">Remove and sign in</button></form><form method="post" action="/api/account/auth/logout"><button type="submit">Use another account</button></form>`,
+          `${consent}<p>Both computer slots are in use. Choose one to remove and continue signing in.</p><form method="post" action="${target}"><input type="hidden" name="csrf" value="${csrf}"><div class="computers">${options}</div><button type="submit">Remove and sign in</button></form><form method="post" action="/api/account/auth/logout"><button type="submit">Use another account</button></form>`,
           status
         )
       }
@@ -675,20 +597,10 @@ export async function handleAccountApproval(request: Request, env: Env) {
       }
       if (full) return respond(chooseComputer())
       const csrf = csrfToken(env, auth, row, origin)
-      if (!initiation.trusted)
-        return respond(
-          page(
-            "Continue signing in",
-            `<p>Sign in on <strong>${escape(row.device_name ?? "this computer")}</strong> as ${escape(user.email)}.</p><form method="post" action="${target}"><input type="hidden" name="csrf" value="${csrf}"><button type="submit">Continue</button></form>`
-          )
-        )
-      const nonce = randomBytes(18).toString("base64url")
       return respond(
         page(
-          "Signing in…",
-          `<p aria-live="polite">Finishing your sign-in.</p><form id="continue-sign-in" method="post" action="${target}"><input type="hidden" name="csrf" value="${csrf}"><noscript><button type="submit">Continue</button></noscript></form><script nonce="${nonce}">document.getElementById('continue-sign-in').requestSubmit()</script>`,
-          200,
-          nonce
+          "Continue signing in",
+          `${consent}<form method="post" action="${target}"><input type="hidden" name="csrf" value="${csrf}"><button type="submit">Approve computer sign-in</button></form>${signOutForm}`
         )
       )
     }

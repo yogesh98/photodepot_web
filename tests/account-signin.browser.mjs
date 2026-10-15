@@ -69,8 +69,10 @@ before(async () => {
       const url = new URL(incoming.url, origin)
       requests.push({
         method: incoming.method,
+        url: url.toString(),
         path: url.pathname,
         origin: incoming.headers.origin,
+        fetchSite: incoming.headers["sec-fetch-site"],
       })
       let response
       if (url.pathname === "/brand/photodepot-lockup.svg")
@@ -214,11 +216,39 @@ async function connected(userId, name, lastUsedAt) {
   return { id, deviceId }
 }
 
-test("browser auto-submits a free-slot sign-in and renders branded success", async (t) => {
+test("direct browser navigation requires computer consent before rendering branded success", async (t) => {
   const userId = "user_browser_auto"
   const started = await pending("Yogesh’s MacBook Pro")
   const { page } = await browserPage(t, userId)
   await page.goto(started.url)
+  await page
+    .getByRole("heading", { name: "Continue signing in", exact: true })
+    .waitFor()
+  assert.ok(
+    requests.some(
+      (value) =>
+        value.url === started.url &&
+        value.method === "GET" &&
+        value.fetchSite === "none"
+    )
+  )
+  assert.ok(
+    !requests.some(
+      (value) => value.url === started.url && value.method === "POST"
+    )
+  )
+  assert.deepEqual(await listAccountDevices(env.DB, userId), [])
+  assert.equal(
+    await page.getByText("Yogesh’s MacBook Pro", { exact: true }).count(),
+    1
+  )
+  assert.equal(
+    await page.getByText(/Only approve if you just started sign-in/).count(),
+    1
+  )
+  await page
+    .getByRole("button", { name: "Approve computer sign-in", exact: true })
+    .click()
   await page.getByRole("heading", { name: "Signed in", exact: true }).waitFor()
   assert.equal(
     await page.getByText("Return to Photodepot.", { exact: true }).count(),
@@ -280,13 +310,15 @@ test("browser shows two named computers and removes only the chosen computer whi
   assert.ok(devices.some((value) => value.id === started.deviceId))
 })
 
-test("browser without JavaScript has a Continue fallback and never admits on GET", async (t) => {
+test("computer consent works without JavaScript and never admits on GET", async (t) => {
   const userId = "user_browser_nojs"
   const started = await pending("Offline test computer")
   const { page } = await browserPage(t, userId, false)
   await page.goto(started.url)
   assert.deepEqual(await listAccountDevices(env.DB, userId), [])
-  await page.getByRole("button", { name: "Continue", exact: true }).click()
+  await page
+    .getByRole("button", { name: "Approve computer sign-in", exact: true })
+    .click()
   await page.getByRole("heading", { name: "Signed in", exact: true }).waitFor()
   assert.equal((await listAccountDevices(env.DB, userId)).length, 1)
 })
@@ -311,13 +343,15 @@ test("a foreign top-level link requires explicit computer continuation and canno
     1
   )
   assert.equal(
-    await page.getByRole("button", { name: "Continue", exact: true }).count(),
+    await page
+      .getByRole("button", { name: "Approve computer sign-in", exact: true })
+      .count(),
     1
   )
   assert.deepEqual(await listAccountDevices(env.DB, userId), [])
 })
 
-test("native initiation keeps automatic sign-in through a hosted cross-site return", async (t) => {
+test("native navigation through hosted authentication still requires computer consent", async (t) => {
   const userId = "user_browser_hosted_return"
   const started = await pending("Native initiated computer")
   const { context, page } = await browserPage(t, userId)
@@ -331,7 +365,7 @@ test("native initiation keeps automatic sign-in through a hosted cross-site retu
   })
   assert.equal(initial.status(), 302)
   assert.ok(
-    (await context.cookies()).some(
+    !(await context.cookies()).some(
       (value) => value.name === "photodepot-device-intent" && value.httpOnly
     )
   )
@@ -344,6 +378,13 @@ test("native initiation keeps automatic sign-in through a hosted cross-site retu
   )
   await page.goto("http://hosted-auth.test/")
   await page.getByRole("link", { name: "Return from authentication" }).click()
+  await page
+    .getByRole("heading", { name: "Continue signing in", exact: true })
+    .waitFor()
+  assert.deepEqual(await listAccountDevices(env.DB, userId), [])
+  await page
+    .getByRole("button", { name: "Approve computer sign-in", exact: true })
+    .click()
   await page.getByRole("heading", { name: "Signed in", exact: true }).waitFor()
   assert.equal((await listAccountDevices(env.DB, userId)).length, 1)
 })

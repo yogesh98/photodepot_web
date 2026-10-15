@@ -322,9 +322,10 @@ informed by [Subscription Management & Tracking Dashboard](https://dribbble.com/
 and [Invoice Dashboard](https://dribbble.com/shots/20606044-Invoice-Dashboard-Subscription-management).
 No visual assets or sample customer records from those designs are shipped.
 
-Desktop account sign-in opens WorkOS in the external browser, then automatically
-uses a free computer slot. If both slots are occupied, it shows the named computers
-and their last use so the user can remove one and finish signing in. Every app session requires a signed account session, including
+Desktop account sign-in opens WorkOS in the external browser, then asks the user
+to confirm the named computer before using a free slot. If both slots are occupied,
+it shows the named computers and their last use so the user can remove one and finish
+signing in. Every app session requires a signed account session, including
 joining collaboration. The account session is independent of the subscription:
 a subscription enables local projects and hosting; joining collaboration is free
 for signed-in users. The desktop receives signed receipts, never WorkOS tokens.
@@ -341,12 +342,13 @@ login and joining collaboration. Device identity and receipts use encrypted loca
 storage, which can access macOS Keychain. Existing binaries retain their legacy
 license protocol until updated.
 
-Native browser initiation is bound to the pending request with a sealed intent
-cookie across hosted authentication. Foreign links require a concise, explicit
-Continue action naming the computer. Automatic completion uses a fresh,
-account/session/pairing-bound CSRF token and a same-origin POST; GET does not
-admit a device. Replacing a computer and admitting the new one share one guarded
-transaction. Success uses the Photodepot logo and wordmark.
+Every desktop approval requires an explicit Approve computer sign-in action naming
+the computer, including browser launches from the app and returns from hosted authentication.
+Browser navigation metadata does not establish which app initiated a request.
+Approval uses a fresh, account/session/pairing-bound CSRF token and a same-origin
+POST; GET does not admit a device. Replacing a computer and admitting the new one
+share one guarded transaction. Cancellation also revokes a concurrently approved
+session in one transaction. Success uses the Photodepot logo and wordmark.
 
 ### Customer account and requests
 

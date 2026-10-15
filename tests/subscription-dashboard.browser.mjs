@@ -221,10 +221,12 @@ async function handleApi(request, response, url) {
           (item) => item.userId === user.id
         ),
         devices:
+          user.devices ??
           user.subscription?.devices.map((device) => ({
             ...device,
             current: true,
-          })) ?? [],
+          })) ??
+          [],
         audit: [
           {
             id: "audit_test",
@@ -1112,6 +1114,29 @@ test("a user profile opens directly and manages renewal without changing the acc
     path: join(screenshots, "admin-user-profile-mobile.png"),
     fullPage: true,
   })
+})
+
+test("a free account profile lists its signed-in Macs without offering an unsupported administrative reset", async () => {
+  const user = state.users.find(({ id }) => id === "user_cara")
+  user.devices = [
+    {
+      id: firstMac,
+      bindingRevision: 1,
+      assignmentRevision: 1,
+      activatedAt: Date.now(),
+      current: true,
+    },
+  ]
+  await page.goto(`${origin}/admin?view=users&user=user_cara`)
+  const profile = page.getByRole("region", {
+    name: "User management",
+    exact: true,
+  })
+  await expect(profile.getByText(firstMac, { exact: true })).toBeVisible()
+  await expect(profile.getByText("1 of 2 slots in use.")).toBeVisible()
+  await expect(
+    profile.getByRole("button", { name: `Reset Mac ${firstMac}`, exact: true })
+  ).toHaveCount(0)
 })
 
 test("opening a profile while search is debouncing preserves account details", async () => {

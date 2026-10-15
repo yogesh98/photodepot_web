@@ -1338,6 +1338,83 @@ test("cancelling a browser-approved sign-in revokes the session and frees its Ma
   assert.equal(decodeReceipt((await verified.json()).session).status, "revoked")
 })
 
+test("cancellation revokes a session approved after its pending pairing snapshot", async () => {
+  const userId = "user_cancel_approval_race"
+  await assign(userId, "regular", Date.now() + 3_600_000)
+  const otherComputer = await accountLogin(userId)
+  const started = await accountStart()
+  const form = await signInForm(started, userId)
+  const snapshotTaken = Promise.withResolvers()
+  const continueCancel = Promise.withResolvers()
+  const database = new Proxy(env.DB, {
+    get(target, property) {
+      if (property === "prepare")
+        return (sql) => {
+          const statement = target.prepare(sql)
+          if (sql !== "SELECT * FROM account_pairings WHERE token_hash = ?")
+            return statement
+          return {
+            bind(...args) {
+              const bound = statement.bind(...args)
+              return {
+                async first(...firstArgs) {
+                  const row = await bound.first(...firstArgs)
+                  assert.equal(row.status, "pending")
+                  assert.equal(row.session_id, null)
+                  snapshotTaken.resolve()
+                  await continueCancel.promise
+                  return row
+                },
+              }
+            },
+          }
+        }
+      const value = Reflect.get(target, property)
+      return typeof value === "function" ? value.bind(target) : value
+    },
+  })
+  const cancelling = pair(
+    started.device,
+    "cancel",
+    started.pairingId,
+    {},
+    { ...env, DB: database },
+    origin,
+    { "Photodepot-Account-Version": "1" }
+  )
+  let claims
+  await snapshotTaken.promise
+  try {
+    assert.equal(
+      (await submitSignIn(started, form.cookie, form.csrf)).status,
+      200
+    )
+    const result = await (await accountPoll(started)).json()
+    claims = decodeReceipt(result.session)
+    assert.equal(claims.status, "active")
+  } finally {
+    continueCancel.resolve()
+  }
+  assert.equal((await cancelling).status, 200)
+  const devices = await listAccountDevices(env.DB, userId)
+  assert.deepEqual(
+    devices.map((device) => device.id),
+    [otherComputer.device.deviceId]
+  )
+  const result = await (
+    await sessionRequest(started.device, claims.sessionId)
+  ).json()
+  assert.equal(decodeReceipt(result.session).status, "revoked")
+  assert.equal("receipt" in result, false)
+  assert.equal((await accountPoll(started)).status, 410)
+  const revision = (await getSubscription(env.DB, userId)).revision
+  assert.equal(
+    (await pair(started.device, "cancel", started.pairingId)).status,
+    410
+  )
+  assert.equal((await getSubscription(env.DB, userId)).revision, revision)
+})
+
 test("session removal wins an in-flight WorkOS outage and never returns cached active authorization", async (t) => {
   const userId = "user_session_remove_race"
   const first = await accountLogin(userId)
@@ -1500,7 +1577,7 @@ function selection(loggedIn) {
   }
 }
 
-test("free slots complete sign-in automatically with a protected POST and branded success", async () => {
+test("free slots require explicit computer consent with a protected POST and branded success", async () => {
   const userId = "user_auto_free"
   users.set(userId, { email: `${userId}@example.com`, emailVerified: true })
   const started = await accountStart({
@@ -1509,12 +1586,14 @@ test("free slots complete sign-in automatically with a protected POST and brande
   })
   const form = await signInForm(started, userId)
   assert.equal(form.response.status, 200)
-  assert.match(form.html, /requestSubmit\(\)/)
-  assert.match(
+  assert.doesNotMatch(form.html, /requestSubmit|<script/)
+  assert.doesNotMatch(
     form.response.headers.get("content-security-policy"),
     /script-src 'nonce-/
   )
-  assert.doesNotMatch(form.html, /Approve|fingerprint|Only approve/)
+  assert.match(form.html, /Sign in on <strong>Yogesh’s MacBook Pro<\/strong>/)
+  assert.match(form.html, /Only approve if you just started sign-in/)
+  assert.match(form.html, />Approve computer sign-in<\/button>/)
   assert.deepEqual(await listAccountDevices(env.DB, userId), [])
   const response = await submitSignIn(started, form.cookie, form.csrf)
   assert.equal(response.status, 200)
@@ -1606,7 +1685,8 @@ test("full slots show real computer names and replace only the selected current 
   assert.match(form.html, /Travel Computer/)
   assert.match(form.html, /Last used/)
   assert.match(form.html, /Remove and sign in/)
-  assert.doesNotMatch(form.html, /requestSubmit|Approve/)
+  assert.doesNotMatch(form.html, /requestSubmit|<script/)
+  assert.match(form.html, /Sign in on <strong>New Computer<\/strong>/)
   assert.equal(
     (
       await submitSignIn(incoming, form.cookie, form.csrf, {
@@ -1647,7 +1727,7 @@ test("full slots show real computer names and replace only the selected current 
   assert.deepEqual(await listAccountDevices(env.DB, userId), devices)
 })
 
-test("automatic sign-in CSRF is bound to the account, browser session, pairing, expiry and origin", async (t) => {
+test("computer consent CSRF is bound to the account, browser session, pairing, expiry and origin", async (t) => {
   const userId = "user_auto_csrf"
   users.set(userId, { email: `${userId}@example.com`, emailVerified: true })
   users.set("user_auto_csrf_other", {
@@ -1763,7 +1843,7 @@ test("explicit account switching retires the foreign legacy assignment without h
   )
 })
 
-test("foreign links and same-origin redirect gadgets cannot silently authorize a computer", async () => {
+test("external application links, direct navigation, and redirects require explicit computer consent", async () => {
   const userId = "user_foreign_link"
   users.set(userId, { email: `${userId}@example.com`, emailVerified: true })
   const started = await accountStart({
@@ -1772,6 +1852,7 @@ test("foreign links and same-origin redirect gadgets cannot silently authorize a
   })
   for (const headers of [
     {},
+    { "sec-fetch-site": "none" },
     { "sec-fetch-site": "cross-site" },
     { "sec-fetch-site": "same-site" },
     { "sec-fetch-site": "same-origin" },
@@ -1782,49 +1863,80 @@ test("foreign links and same-origin redirect gadgets cannot silently authorize a
       form.html,
       /Sign in on <strong>Candidate &lt;Computer&gt;<\/strong>/
     )
-    assert.match(form.html, />Continue<\/button>/)
+    assert.match(form.html, />Approve computer sign-in<\/button>/)
+    assert.match(form.html, /Only approve if you just started sign-in/)
+    assert.deepEqual(await (await accountPoll(started)).json(), {
+      status: "pending",
+    })
   }
   assert.deepEqual(await listAccountDevices(env.DB, userId), [])
 })
 
-test("native initiation survives hosted authentication but cannot authorize a different pairing or duplicate intent cookies", async () => {
+test("hosted authentication preserves login and signup intent but still requires computer consent", async () => {
   const userId = "user_native_hosted_return"
   users.set(userId, { email: `${userId}@example.com`, emailVerified: true })
-  const started = await accountStart()
-  const anonymousNative = await handleAccountApproval(
-    new Request(started.approvalUrl, { headers: { "sec-fetch-site": "none" } }),
-    env
-  )
-  assert.equal(anonymousNative.status, 302)
-  const nativeHeader = anonymousNative.headers
-    .getSetCookie()
-    .find((value) => value.startsWith("__Host-photodepot-device-intent="))
-  assert.match(
-    nativeHeader,
-    /HttpOnly; SameSite=Lax; Path=\/; Max-Age=600; Secure/
-  )
-  const nativeCookie = nativeHeader.split(";")[0]
-  const cookie = `${await accountCookie(userId)}; ${nativeCookie}`
-  const callback = await signInForm(started, userId, cookie, {
-    "sec-fetch-site": "cross-site",
-  })
-  assert.match(callback.html, /requestSubmit/)
-  const foreign = await accountStart()
-  const wrongPairing = await signInForm(foreign, userId, cookie, {
-    "sec-fetch-site": "same-origin",
-  })
-  assert.doesNotMatch(wrongPairing.html, /requestSubmit/)
-  const duplicate = await signInForm(
-    started,
-    userId,
-    `${cookie}; ${nativeCookie}`,
-    { "sec-fetch-site": "cross-site" }
-  )
-  assert.doesNotMatch(duplicate.html, /requestSubmit/)
-  assert.equal(
-    (await submitSignIn(started, callback.cookie, callback.csrf)).status,
-    200
-  )
+  for (const intent of ["login", "signup"]) {
+    const device = mac()
+    const response = await pair(device, "start", undefined, {}, env, origin, {
+      "Photodepot-Account-Version": "1",
+      "Photodepot-Account-Intent": intent,
+    })
+    assert.equal(response.status, 201)
+    const started = { ...(await response.json()), device, account: true }
+    const anonymousNative = await handleAccountApproval(
+      new Request(started.approvalUrl, {
+        headers: { "sec-fetch-site": "none" },
+      }),
+      env
+    )
+    assert.equal(anonymousNative.status, 302)
+    assert.equal(
+      anonymousNative.headers.get("location"),
+      `/api/account/auth/login?code=${new URL(started.approvalUrl).searchParams.get("code")}${intent === "signup" ? "&intent=signup" : ""}`
+    )
+    assert.ok(
+      !anonymousNative.headers
+        .getSetCookie()
+        .some((value) => value.includes("photodepot-device-intent"))
+    )
+    // Even a still-valid cookie minted before this fix cannot skip consent.
+    const nativeCookie = `__Host-photodepot-device-intent=${await sealData(
+      {
+        version: 1,
+        origin,
+        pairing: createHash("sha256").update(started.pairingId).digest("hex"),
+        nonce: randomBytes(32).toString("base64url"),
+        expiresAt: started.expiresAt,
+      },
+      { password: cookiePassword, ttl: 600 }
+    )}`
+    const cookie = `${await accountCookie(userId)}; ${nativeCookie}`
+    const callback = await signInForm(started, userId, cookie, {
+      "sec-fetch-site": "cross-site",
+    })
+    assert.doesNotMatch(callback.html, /requestSubmit|<script/)
+    assert.match(callback.html, />Approve computer sign-in<\/button>/)
+    const foreign = await accountStart()
+    const wrongPairing = await signInForm(foreign, userId, cookie, {
+      "sec-fetch-site": "same-origin",
+    })
+    assert.doesNotMatch(wrongPairing.html, /requestSubmit/)
+    const duplicate = await signInForm(
+      started,
+      userId,
+      `${cookie}; ${nativeCookie}`,
+      { "sec-fetch-site": "cross-site" }
+    )
+    assert.doesNotMatch(duplicate.html, /requestSubmit/)
+    assert.deepEqual(await (await accountPoll(started)).json(), {
+      status: "pending",
+    })
+    assert.equal(
+      (await submitSignIn(started, callback.cookie, callback.csrf)).status,
+      200
+    )
+    assert.equal((await accountPoll(started)).status, 200)
+  }
 })
 
 test("pre-existing foreign legacy shadows never count as invisible used slots", async () => {

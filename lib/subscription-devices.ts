@@ -312,12 +312,26 @@ export async function listSubscriptionDevices(
   validateUserId(userId)
   const rows = await database
     .prepare(
-      `SELECT d.device_id AS id, d.binding_revision AS bindingRevision, d.assignment_revision AS assignmentRevision,
-     d.activated_at AS activatedAt, (d.active = 1 AND d.binding_revision = s.binding_revision) AS current
-     FROM account_devices d JOIN subscriptions s ON s.user_id = d.user_id
-     WHERE d.user_id = ? ORDER BY d.activated_at DESC, d.device_id`
+      `WITH assignments AS (
+        SELECT d.device_id AS id, d.binding_revision AS bindingRevision, d.assignment_revision AS assignmentRevision,
+          d.activated_at AS activatedAt,
+          (d.active = 1 AND d.binding_revision = s.binding_revision
+            AND NOT EXISTS (SELECT 1 FROM desktop_sessions current WHERE current.device_id = d.device_id
+              AND current.user_id != d.user_id AND current.active = 1)) AS current,
+          0 AS sessionAssignment, '' AS sessionId
+        FROM account_devices d JOIN subscriptions s ON s.user_id = d.user_id WHERE d.user_id = ?
+        UNION ALL
+        SELECT ds.device_id, COALESCE(s.binding_revision, 1), ds.revision, ds.created_at, ds.active, 1, ds.id
+        FROM desktop_sessions ds LEFT JOIN subscriptions s ON s.user_id = ds.user_id WHERE ds.user_id = ?
+      ), ranked AS (
+        SELECT *, ROW_NUMBER() OVER (PARTITION BY id
+          ORDER BY current DESC, activatedAt DESC, sessionAssignment DESC, sessionId DESC) AS position
+        FROM assignments
+      )
+      SELECT id, bindingRevision, assignmentRevision, activatedAt, current FROM ranked
+      WHERE position = 1 ORDER BY activatedAt DESC, id`
     )
-    .bind(userId)
+    .bind(userId, userId)
     .all<Omit<SubscriptionDeviceHistory, "current"> & { current: number }>()
   return rows.results.map((row) => ({ ...row, current: row.current === 1 }))
 }

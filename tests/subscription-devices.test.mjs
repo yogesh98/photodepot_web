@@ -17,8 +17,10 @@ import { hashLicenseKey } from "../lib/license-crypto.ts"
 import {
   bindSubscriptionDevice,
   getSubscriptionDevice,
+  listSubscriptionDevices,
   resetSubscriptionDevice,
 } from "../lib/subscription-devices.ts"
+import { revokeDesktopSession } from "../lib/account-sessions.ts"
 import {
   changeSubscription,
   getSubscription,
@@ -225,6 +227,147 @@ function bind(userId, mac, now = epoch) {
     now
   )
 }
+
+async function desktopSession(userId, mac, now = epoch, active = true) {
+  const id = randomUUID()
+  await database
+    .prepare(
+      `INSERT INTO desktop_sessions (id, device_id, user_id, email, public_key, active, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .bind(
+      id,
+      mac.deviceId,
+      userId,
+      `${userId}@example.com`,
+      mac.publicKeyEncoded,
+      active ? 1 : 0,
+      now,
+      now
+    )
+    .run()
+  return id
+}
+
+test("administrative Mac history includes active and revoked desktop sessions without exposing signing keys", async () => {
+  const userId = "user_admin_session_history"
+  await assign(userId)
+  const activeMac = device(),
+    revokedMac = device()
+  await desktopSession(userId, revokedMac, epoch, false)
+  await desktopSession(userId, activeMac, epoch + 1)
+
+  const history = await listSubscriptionDevices(database, userId)
+  assert.deepEqual(history, [
+    {
+      id: activeMac.deviceId,
+      bindingRevision: 1,
+      assignmentRevision: 1,
+      activatedAt: epoch + 1,
+      current: true,
+    },
+    {
+      id: revokedMac.deviceId,
+      bindingRevision: 1,
+      assignmentRevision: 1,
+      activatedAt: epoch,
+      current: false,
+    },
+  ])
+  assert.equal(
+    JSON.stringify(history).includes(activeMac.publicKeyEncoded),
+    false
+  )
+  assert.equal(
+    JSON.stringify(history).includes(revokedMac.publicKeyEncoded),
+    false
+  )
+})
+
+test("administrative Mac history lists migrated devices once and keeps their current session after reapproval", async () => {
+  const userId = "user_admin_migrated_session_history"
+  await assign(userId)
+  const mac = device()
+  await bind(userId, mac)
+  await desktopSession(userId, mac, epoch - 1, false)
+  const sessionId = await desktopSession(userId, mac, epoch + 1)
+
+  let history = await listSubscriptionDevices(database, userId)
+  assert.equal(history.length, 1)
+  assert.equal(history[0].current, true)
+  assert.equal(history[0].activatedAt, epoch + 1)
+
+  await revokeDesktopSession(database, sessionId, userId, 1, epoch + 2)
+  history = await listSubscriptionDevices(database, userId)
+  assert.equal(history.length, 1)
+  assert.equal(history[0].current, false)
+  assert.equal(history[0].assignmentRevision, 2)
+
+  await desktopSession(userId, mac, epoch + 3)
+  history = await listSubscriptionDevices(database, userId)
+  assert.equal(history.length, 1)
+  assert.equal(history[0].current, true)
+  assert.equal(history[0].activatedAt, epoch + 3)
+  assert.equal(history[0].assignmentRevision, 1)
+})
+
+test("administrative Mac history retains a reconnected legacy assignment after an older desktop session was revoked", async () => {
+  const userId = "user_admin_legacy_session_history"
+  await assign(userId)
+  const mac = device()
+  await desktopSession(userId, mac, epoch, false)
+  await bind(userId, mac, epoch + 1)
+
+  const history = await listSubscriptionDevices(database, userId)
+  assert.equal(history.length, 1)
+  assert.equal(history[0].current, true)
+  assert.equal(history[0].activatedAt, epoch + 1)
+})
+
+test("an administrative reset of one session-only Mac updates its history and leaves the other Mac active", async () => {
+  const userId = "user_admin_session_reset"
+  const subscription = await assign(userId)
+  const first = device(),
+    second = device()
+  const firstSession = await desktopSession(userId, first)
+  const secondSession = await desktopSession(userId, second, epoch + 1)
+
+  const reset = await resetSubscriptionDevice(
+    database,
+    userId,
+    subscription.revision,
+    actor,
+    epoch + 2,
+    "Remove only this computer",
+    first.deviceId
+  )
+  assert.deepEqual(
+    reset.devices.map(({ id }) => id),
+    [second.deviceId]
+  )
+  const history = await listSubscriptionDevices(database, userId)
+  assert.equal(history.find(({ id }) => id === first.deviceId).current, false)
+  assert.equal(history.find(({ id }) => id === second.deviceId).current, true)
+  const sessions = await database
+    .prepare("SELECT id, active FROM desktop_sessions WHERE id IN (?, ?)")
+    .bind(firstSession, secondSession)
+    .all()
+  assert.equal(sessions.results.find(({ id }) => id === firstSession).active, 0)
+  assert.equal(
+    sessions.results.find(({ id }) => id === secondSession).active,
+    1
+  )
+})
+
+test("administrative Mac history includes desktop sessions for accounts without subscriptions", async () => {
+  const userId = "user_admin_free_session_history"
+  const mac = device()
+  await desktopSession(userId, mac)
+  const history = await listSubscriptionDevices(database, userId)
+  assert.equal(history.length, 1)
+  assert.equal(history[0].id, mac.deviceId)
+  assert.equal(history[0].current, true)
+})
 
 // Frozen pre-two-slot SQL exercises the backend that is still live while the
 // migrations are applied, including its omitted active/assignment columns.
