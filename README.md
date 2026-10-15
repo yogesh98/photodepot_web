@@ -124,6 +124,52 @@ historical migration and is no longer used.
 Builds and deploys reject installers, SQLite databases, environment
 files, and assets over Pages' 25 MiB file limit.
 
+### macOS OTA updates
+
+The desktop release build also produces signed ZIPs, ZIP blockmaps, and one
+`latest-mac.yml` for each architecture in `dist/release/updates/arm64/` and
+`dist/release/updates/x64/`. Keep these files outside `public/` and `out/`;
+Pages asset validation rejects updater archives, blockmaps and feeds there.
+DMG downloads continue through the installer upload command above.
+
+Deploy the update API routes once before publishing an updater-enabled desktop
+release. Then publish both architectures from the completed desktop build:
+
+```bash
+pnpm updates:upload --source ../photodepot/dist/release/updates
+# Seed the same private R2 binding for local testing:
+pnpm updates:upload:local --source ../photodepot/dist/release/updates
+```
+
+The publisher validates both stable versions, exact ZIP basenames, SHA-512
+digests, byte sizes and nonempty blockmaps before making storage changes. It
+refuses files over 300 MiB and mismatched versions. It uploads versioned binaries
+to `updates/macos/{arm64|x64}/`, downloads them back to verify their bytes, then
+publishes the two mutable feeds last. Existing identical versioned files are
+reused; conflicting bytes for an existing version are rejected. Historical ZIPs
+and blockmaps remain available for differential downloads. Run only one
+publisher at a time because Wrangler's uploader does not offer conditional
+creation. The feeds publish sequentially; if a feed upload fails, rerun the same
+validated release to finish publication.
+
+Desktop clients use the public generic provider feeds at
+`https://photodepot.app/api/updates/macos/arm64/latest-mac.yml` and
+`https://photodepot.app/api/updates/macos/x64/latest-mac.yml`. The sibling
+versioned ZIP and `.zip.blockmap` URLs support GET, HEAD, ETag and single byte
+ranges. Configure the desktop generic provider with
+`useMultipleRangeRequest: false`. Feeds use `Cache-Control: no-store`; versioned
+artifacts use immutable caching. Missing updates return JSON 404 responses, and
+storage failures return JSON 503 responses without installer-page redirects.
+No cookie, password or account is required, and the R2 bucket stays private.
+
+Users must install the first updater-enabled release manually from a DMG.
+Updates require signed, notarized builds with the same app and signing identity;
+test N → N+1 upgrades on Apple Silicon, Intel and an Intel app under Rosetta
+before release. The first update generally downloads the full ZIP; subsequent
+updates can reuse a cached ZIP for differential downloads, with a full download
+fallback. To repair a faulty release, publish a higher fixed version. Removing a
+feed prevents future discovery but cannot repair installations already updated.
+
 ### Waitlist
 
 The existing form and validation remain: first name, email, and referral answer
