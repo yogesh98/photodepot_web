@@ -27,7 +27,9 @@
     "downloads:upload:local": "node scripts/cloudflare.mjs upload --local",
     "deploy": "pnpm build && pnpm functions:build && node scripts/cloudflare.mjs deploy",
     "reminders:build": "wrangler deploy --config wrangler.reminders.jsonc --dry-run --outdir .wrangler/reminders-build",
-    "reminders:deploy": "wrangler deploy --config wrangler.reminders.jsonc"
+    "reminders:deploy": "wrangler deploy --config wrangler.reminders.jsonc",
+    "updates:upload": "node scripts/upload-updates.mjs",
+    "updates:upload:local": "node scripts/upload-updates.mjs --local"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",
@@ -56,6 +58,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.3.6",
+    "js-yaml": "^4.3.2",
     "jsonc-parser": "^3.3.1",
     "miniflare": "5.20261006.1-alpha",
     "prettier": "^3.9.9",

@@ -11,6 +11,9 @@ export async function assertStaticAssets(directory) {
       else {
         if (
           /\.(dmg|pkg|sqlite(?:-wal|-shm)?)$/i.test(entry.name) ||
+          /\.blockmap$/i.test(entry.name) ||
+          /^photodepot-.+\.zip$/i.test(entry.name) ||
+          entry.name === "latest-mac.yml" ||
           entry.name.startsWith(".env") ||
           entry.name.startsWith(".dev.vars")
         )
