@@ -1,5 +1,7 @@
 "use client"
 
+import { Button } from "@/components/ui/button"
+
 import { useCallback, useEffect, useRef, useState } from "react"
 import type {
   SubscriptionSummary,
@@ -39,8 +41,10 @@ type ReminderQueue = {
 export function AdminSubscriptionReminders({
   disabled,
   onReview,
+  refreshVersion = 0,
 }: {
   disabled: boolean
+  refreshVersion?: number
   onReview: (user: WorkOSUserSummary) => void
 }) {
   const [queue, setQueue] = useState<ReminderQueue | null>(null)
@@ -110,7 +114,7 @@ export function AdminSubscriptionReminders({
       mounted.current = false
       controller.current?.abort()
     }
-  }, [load])
+  }, [load, refreshVersion])
   const date = (value: number) =>
     new Intl.DateTimeFormat(undefined, {
       dateStyle: "medium",
@@ -126,21 +130,22 @@ export function AdminSubscriptionReminders({
         <div>
           <h2 id="daily-queue-title">Daily renewal queue</h2>
           <p>
-            Accounts expiring in the next {queue?.queueWithinDays ?? 7} days.
-            Trial reminders are prepared in the last{" "}
-            {queue?.remindWithinDays ?? 2} days.
+            Expiring within {queue?.queueWithinDays ?? 7} days · trial reminders{" "}
+            {queue?.remindWithinDays ?? 2} days before expiry
           </p>
         </div>
         <div className={styles.rowActions}>
-          <button
+          <Button
+            variant="outline"
             type="button"
             className={styles.quiet}
             disabled={loading || running}
             onClick={() => void load()}
           >
             Refresh renewal queue
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="outline"
             type="button"
             disabled={
               disabled ||
@@ -153,18 +158,17 @@ export function AdminSubscriptionReminders({
             onClick={() => void load(true)}
           >
             {running ? "Checking…" : "Check reminders now"}
-          </button>
+          </Button>
         </div>
       </div>
       <p className={styles.updated}>
         {queue?.mode === "resend"
-          ? "Reminder delivery is configured. Due trials are processed by the scheduled hourly check."
-          : "Email delivery is disabled. Review upcoming renewals and configure delivery to send trial reminders."}
+          ? "Reminder delivery is configured."
+          : "Email delivery is disabled."}
       </p>
       {queue && (
         <p className={styles.updated}>
-          Updated {date(queue.asOf)}. Shows up to 100 upcoming subscriptions and
-          100 recent reminder records.
+          Updated {date(queue.asOf)} · latest 100 records
         </p>
       )}
       {error && (
@@ -212,7 +216,8 @@ export function AdminSubscriptionReminders({
                   </small>
                 </div>
                 {user && (
-                  <button
+                  <Button
+                    variant="outline"
                     type="button"
                     className={styles.quiet}
                     disabled={disabled}
@@ -224,7 +229,7 @@ export function AdminSubscriptionReminders({
                     }
                   >
                     Review access
-                  </button>
+                  </Button>
                 )}
               </div>
             </li>

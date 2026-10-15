@@ -1,5 +1,8 @@
 "use client"
 
+import { Button } from "@/components/ui/button"
+import { Textarea } from "@/components/ui/textarea"
+
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import type {
   AccountRequestAudit,
@@ -62,8 +65,10 @@ function date(value: number) {
 export function AdminSubscriptionRequests({
   disabled,
   onReview,
+  refreshVersion = 0,
 }: {
   disabled: boolean
+  refreshVersion?: number
   onReview: (user: WorkOSUserSummary) => void
 }) {
   const [queue, setQueue] = useState<AdminRequestQueue | null>(null)
@@ -128,7 +133,7 @@ export function AdminSubscriptionRequests({
       request.current?.abort()
       historyRequest.current?.abort()
     }
-  }, [load])
+  }, [load, refreshVersion])
   useEffect(() => {
     if (selected || busy || sessionExpired) return
     const timer = window.setInterval(() => {
@@ -224,19 +229,16 @@ export function AdminSubscriptionRequests({
           <h2 id="requests-queue-title">
             Customer requests <span>{queue?.openCount ?? "—"} open</span>
           </h2>
-          <p>
-            Review renewal and Mac removal requests. Apply grants or device
-            resets from account details before marking a request completed.
-          </p>
         </div>
-        <button
+        <Button
+          variant="outline"
           type="button"
           className={styles.quiet}
           disabled={loading || busy}
           onClick={() => void load()}
         >
           Refresh requests
-        </button>
+        </Button>
       </div>
       <label className={styles.queueFilter}>
         <input
@@ -262,9 +264,7 @@ export function AdminSubscriptionRequests({
       )}
       {queue && (
         <p className={styles.updated}>
-          Showing up to {queue.limit}{" "}
-          {includeClosed ? "oldest recorded" : "oldest open"} requests.{" "}
-          {queue.openCount} open across all accounts.
+          {queue.requests.length} shown · oldest first · limit {queue.limit}
         </p>
       )}
       {!queue?.requests.length ? (
@@ -322,14 +322,16 @@ export function AdminSubscriptionRequests({
                 </p>
               )}
               <div className={styles.rowActions}>
-                <button
+                <Button
+                  variant="outline"
                   type="button"
                   onClick={() => openAccount(item)}
                   disabled={disabled || busy || sessionExpired || !item.user}
                 >
                   Open account
-                </button>
-                <button
+                </Button>
+                <Button
+                  variant="outline"
                   type="button"
                   onClick={() => void review(item)}
                   disabled={
@@ -339,7 +341,7 @@ export function AdminSubscriptionRequests({
                   {["pending", "acknowledged"].includes(item.status)
                     ? "Review request"
                     : "View review"}
-                </button>
+                </Button>
               </div>
               {selected?.id === item.id && (
                 <form className={styles.queueReview} onSubmit={save}>
@@ -374,7 +376,7 @@ export function AdminSubscriptionRequests({
                         <span className={styles.fieldHint}>
                           Optional · admins only · 1,000 characters maximum
                         </span>
-                        <textarea
+                        <Textarea
                           value={note}
                           onChange={(event) => setNote(event.target.value)}
                           maxLength={1000}
@@ -405,16 +407,18 @@ export function AdminSubscriptionRequests({
                   )}
                   <div className={styles.actions}>
                     {["pending", "acknowledged"].includes(item.status) && (
-                      <button
+                      <Button
+                        variant="outline"
                         type="submit"
                         disabled={
                           busy || disabled || sessionExpired || reloadRequired
                         }
                       >
                         {busy ? "Saving…" : "Save review"}
-                      </button>
+                      </Button>
                     )}
-                    <button
+                    <Button
+                      variant="outline"
                       type="button"
                       className={styles.quiet}
                       onClick={() => {
@@ -425,7 +429,7 @@ export function AdminSubscriptionRequests({
                       disabled={busy}
                     >
                       Close review
-                    </button>
+                    </Button>
                   </div>
                 </form>
               )}

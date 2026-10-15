@@ -1,0 +1,34 @@
+.frame {
+  --primary: var(--brand-orange);
+  --primary-foreground: oklch(0.216 0.006 56.043);
+  --sidebar-primary: var(--primary);
+  --sidebar-primary-foreground: var(--primary-foreground);
+  --sidebar-width: 16rem;
+  color: var(--brand-ink);
+  background: var(--brand-paper);
+  font-size: 13px;
+}
+.inset {
+  min-width: 0;
+  background: var(--brand-paper);
+}
+.brand {
+  display: flex;
+  align-items: center;
+  height: 56px;
+  padding: 8px;
+  overflow: hidden;
+}
+.brand img {
+  width: 180px;
+  max-width: none;
+  height: auto;
+  flex-shrink: 0;
+}
+:global([data-collapsible="icon"]) .brand {
+  height: 40px;
+  padding: 0;
+}
+:global([data-collapsible="icon"]) .brand img {
+  width: 120px;
+}

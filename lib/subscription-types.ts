@@ -26,6 +26,8 @@ export interface SubscriptionSummary {
   bindingRevision: number
   devices: SubscriptionDevice[]
   deviceLimit: number
+  cancelAtPeriodEnd: boolean
+  canceledAt: number | null
 }
 
 export interface SubscriptionOverview {
@@ -37,6 +39,10 @@ export interface SubscriptionOverview {
   revoked: number
   expiringSoon: number
   assignedMacs: number
+  canceling: number
+  waitlistTotal: number
+  waitlistLast30Days: number
+  openRequests: number
   asOf: number
   expiringWithinDays: number
 }

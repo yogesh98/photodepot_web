@@ -38,6 +38,9 @@ export interface CustomerSubscription {
   status: SubscriptionStatus
   startsAt: number
   endsAt: number
+  revision: number
+  cancelAtPeriodEnd: boolean
+  canceledAt: number | null
   deviceLimit: number
   devices: { id: string; activatedAt: number }[]
 }
@@ -146,6 +149,20 @@ export async function listAccountRequests(
     .bind(accountId)
     .all<RequestRow>()
   return rows.results.map((row) => customerRequest(summary(row)))
+}
+
+export async function listUserAdminRequests(
+  database: D1Database,
+  accountId: string
+): Promise<AccountRequest[]> {
+  userId(accountId)
+  const rows = await database
+    .prepare(
+      "SELECT * FROM subscription_requests WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT 50"
+    )
+    .bind(accountId)
+    .all<RequestRow>()
+  return rows.results.map(summary)
 }
 export async function listAdminRequests(
   database: D1Database,

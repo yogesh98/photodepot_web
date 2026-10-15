@@ -136,7 +136,7 @@ test("PKCE callback establishes encrypted Owner session without an API key", asy
     env
   )
   assert.equal(response.status, 303)
-  assert.equal(response.headers.get("location"), "/admin/subscriptions")
+  assert.equal(response.headers.get("location"), "/admin")
   const cookies = response.headers.getSetCookie()
   assert.ok(
     cookies.some(

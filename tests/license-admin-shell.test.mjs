@@ -10,6 +10,8 @@ test("Pages routes send all admin shell URLs to fail-closed middleware", async (
   )
   assert.ok(routes.include.includes("/api/*"))
   assert.ok(routes.include.includes("/admin"))
+  assert.ok(routes.include.includes("/admin.html"))
+  assert.ok(routes.include.includes("/admin.txt"))
   assert.ok(routes.include.includes("/admin/*"))
   assert.deepEqual(routes.exclude, [])
   for (const host of [
@@ -19,6 +21,10 @@ test("Pages routes send all admin shell URLs to fail-closed middleware", async (
   ]) {
     for (const path of [
       "/admin",
+      "/admin/",
+      "/admin.html",
+      "/admin.txt",
+      "/admin/__next._full.txt",
       "/admin/licenses",
       "/admin/licenses.html",
       "/admin/licenses.txt",

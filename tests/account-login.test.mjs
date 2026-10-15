@@ -728,7 +728,7 @@ test("simultaneous login flows select and clear only their matching transaction"
     `${adminCookie}; ${customer.cookie}`,
     admin.state
   )
-  assert.equal(owner.headers.get("location"), "/admin/subscriptions")
+  assert.equal(owner.headers.get("location"), "/admin")
   assert.ok(responseCookie(owner, "__Host-photodepot-admin"))
   assert.equal(
     owner.headers

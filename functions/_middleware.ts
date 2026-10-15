@@ -13,6 +13,9 @@ import {
 export const onRequest: PagesFunction<Env> = async (context) => {
   const path = new URL(context.request.url).pathname
   let adminAuth: AdminAuth | undefined
+  const adminPage =
+    ["/admin", "/admin.html", "/admin.txt"].includes(path) ||
+    path.startsWith("/admin/")
   const accountPage =
     ["/account", "/account/", "/account.html", "/account.txt"].includes(path) ||
     path.startsWith("/account/__next.")
@@ -41,7 +44,7 @@ export const onRequest: PagesFunction<Env> = async (context) => {
     }
     adminAuth = auth
   }
-  if (path === "/admin" || path.startsWith("/admin/")) {
+  if (adminPage) {
     const auth = await authenticateLicenseAdmin(
       context.request as unknown as Request,
       context.env
@@ -68,7 +71,7 @@ export const onRequest: PagesFunction<Env> = async (context) => {
     adminAuth = auth
   }
   const response = await context.next()
-  if (accountPage || path === "/admin" || path.startsWith("/admin/")) {
+  if (accountPage || adminPage) {
     response.headers.set("Cache-Control", "private, no-store")
     response.headers.set("X-Robots-Tag", "noindex, nofollow")
     // Native POST forms need their same-origin Origin header for CSRF checks.

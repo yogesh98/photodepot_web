@@ -152,6 +152,8 @@ before(async () => {
     bindingRevision: 1,
     devices: [],
     deviceLimit: 2,
+    cancelAtPeriodEnd: false,
+    canceledAt: null,
   }
   originalFetch = globalThis.fetch
   globalThis.fetch = async (url, options) => {
@@ -771,7 +773,7 @@ test("live verification negotiates subscription expiry without breaking legacy r
     assert.equal(payload.expiresAt, subscription.endsAt)
     assert.equal(
       payload.subscriptionEndsAt,
-      version === "2" ? subscription.endsAt : undefined
+      ["2", "3"].includes(version) ? subscription.endsAt : undefined
     )
     assert.deepEqual(
       Object.keys(payload).sort(),
@@ -785,7 +787,7 @@ test("live verification negotiates subscription expiry without breaking legacy r
         "revision",
         "issuedAt",
         "expiresAt",
-        ...(version === "2" ? ["subscriptionEndsAt"] : []),
+        ...(["2", "3"].includes(version) ? ["subscriptionEndsAt"] : []),
       ].sort()
     )
     assert.deepEqual(
@@ -793,10 +795,10 @@ test("live verification negotiates subscription expiry without breaking legacy r
       [
         "payload",
         "signature",
-        ...(version === "2" ? ["collaborationReceipt"] : []),
+        ...(["2", "3"].includes(version) ? ["collaborationReceipt"] : []),
       ].sort()
     )
-    if (version === "2") {
+    if (["2", "3"].includes(version)) {
       const compatible = await receipt(
         Response.json(envelope.collaborationReceipt, {
           headers: { "cache-control": "private, no-store" },
@@ -1169,12 +1171,26 @@ test("live verification rechecks resets, revocation and expiration after an in-f
       return response
     }
     try {
-      const response = await verifyRequest(mac)
+      const response = await verifyRequest(
+        mac,
+        env,
+        {},
+        {
+          "Photodepot-Receipt-Version": "3",
+        }
+      )
       assert.equal(response.status, 200)
       const payload = await receipt(response)
       assert.equal(payload.status, "revoked", action)
       assert.equal(payload.revision, latest.revision, action)
       assert.equal(payload.issuedAt, currentTime)
+      assert.equal(
+        payload.revocationReason,
+        action === "individual-reset" || action === "reset-all"
+          ? "device-removed"
+          : undefined,
+        action
+      )
       if (otherMac) {
         const other = await getSubscriptionDevice(
           database,

@@ -4,6 +4,7 @@ import { after, before, test } from "node:test"
 import { getPlatformProxy, unstable_splitSqlQuery } from "wrangler"
 import {
   changeSubscription,
+  changeSubscriptionRenewal,
   getSubscriptionOverview,
   getSubscription,
   listSubscriptionAudit,
@@ -111,6 +112,9 @@ before(async () => {
   await migrate("0005_account_pairings.sql")
   await migrate("0006_subscription_management.sql")
   await migrate("0007_two_mac_assignments.sql")
+  await migrate("0008_account_requests.sql")
+  await migrate("0009_subscription_reminders.sql")
+  await migrate("0010_subscription_renewal_preferences.sql")
 })
 
 after(async () => {
@@ -627,4 +631,92 @@ test("overview includes all subscriptions and classifies expiration boundaries i
     JSON.stringify(subscription).includes("private-device-key"),
     false
   )
+})
+
+test("canceling renewal preserves access and Mac assignments, guards concurrent changes and expires normally", async () => {
+  const userId = "user_renewal_preference"
+  const original = await set(userId, { type: "regular", endsAt: now + day })
+  const outcomes = await Promise.allSettled([
+    changeSubscriptionRenewal(
+      database,
+      userId,
+      "cancel-renewal",
+      1,
+      actor,
+      now + 1,
+      "Customer request"
+    ),
+    changeSubscriptionRenewal(
+      database,
+      userId,
+      "cancel-renewal",
+      1,
+      actor,
+      now + 1,
+      "Customer request"
+    ),
+  ])
+  assert.equal(
+    outcomes.filter(({ status }) => status === "fulfilled").length,
+    1
+  )
+  assert.ok(
+    outcomes.find(({ status }) => status === "rejected").reason instanceof
+      SubscriptionConflictError
+  )
+  const canceled = await getSubscription(database, userId, now + 2)
+  assert.deepEqual(canceled, {
+    ...original,
+    cancelAtPeriodEnd: true,
+    canceledAt: now + 1,
+    revision: 2,
+    updatedAt: now + 1,
+  })
+  const overview = await getSubscriptionOverview(database, now + 2)
+  assert.ok(overview.canceling >= 1)
+  assert.equal(
+    (await getSubscription(database, userId, original.endsAt)).status,
+    "expired"
+  )
+  await assert.rejects(
+    changeSubscriptionRenewal(
+      database,
+      userId,
+      "resume-renewal",
+      2,
+      actor,
+      original.endsAt
+    ),
+    TypeError
+  )
+  await assert.rejects(
+    changeSubscriptionRenewal(
+      database,
+      userId,
+      "resume-renewal",
+      1,
+      actor,
+      now + 3
+    ),
+    SubscriptionConflictError
+  )
+  const resumed = await changeSubscriptionRenewal(
+    database,
+    userId,
+    "resume-renewal",
+    2,
+    actor,
+    now + 3
+  )
+  assert.equal(resumed.cancelAtPeriodEnd, false)
+  assert.equal(resumed.canceledAt, null)
+  assert.equal(resumed.endsAt, original.endsAt)
+  assert.equal(resumed.bindingRevision, original.bindingRevision)
+  assert.deepEqual(resumed.devices, original.devices)
+  const audit = await listSubscriptionAudit(database, userId)
+  assert.deepEqual(
+    audit.map(({ action }) => action),
+    ["resume-renewal", "cancel-renewal", "set"]
+  )
+  assert.equal(audit[1].reason, "Customer request")
 })

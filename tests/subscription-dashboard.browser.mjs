@@ -33,6 +33,8 @@ function fixtures() {
     revision: 1,
     bindingRevision: 0,
     notes: "",
+    cancelAtPeriodEnd: false,
+    canceledAt: null,
     devices: device ? [device] : [],
     deviceLimit: 2,
   })
@@ -90,6 +92,8 @@ function fixtures() {
   ]
   users[0].subscription.notes =
     "Pilot account <script>window.injected=true</script>"
+  users[4].subscription.cancelAtPeriodEnd = true
+  users[4].subscription.canceledAt = now - day
   users[0].subscription.devices.push({
     id: secondMac,
     activatedAt: now,
@@ -98,6 +102,33 @@ function fixtures() {
   })
   return {
     users,
+    waitlist: [
+      {
+        id: 3,
+        firstName: "Wendy",
+        lastName: "Example",
+        email: "wendy@example.test",
+        heardAboutUs: "A friend",
+        createdAt: now - day,
+      },
+      {
+        id: 2,
+        firstName: "Will",
+        lastName: null,
+        email: "will@example.test",
+        heardAboutUs: "Search",
+        createdAt: now - 8 * day,
+      },
+      {
+        id: 1,
+        firstName: "Zoe",
+        lastName: "Example",
+        email: "zoe@example.test",
+        heardAboutUs: "Search",
+        createdAt: now - 45 * day,
+      },
+    ],
+    listQueries: [],
     requests: [],
     failNext: null,
     listFailure: false,
@@ -115,6 +146,10 @@ function fixtures() {
     requestHistoryStarted: [],
     requestHistoryResponses: [],
     reminderMode: "disabled",
+    dashboardAccess: true,
+    dashboardAccessStatus: 200,
+    dashboardAccessDelay: 0,
+    dashboardAccessQueries: [],
   }
 }
 
@@ -149,6 +184,15 @@ function overview() {
       (sum, subscription) => sum + subscription.devices.length,
       0
     ),
+    canceling: active.filter((subscription) => subscription.cancelAtPeriodEnd)
+      .length,
+    waitlistTotal: state.waitlist.length,
+    waitlistLast30Days: state.waitlist.filter(
+      (entry) => entry.createdAt >= now - 30 * day
+    ).length,
+    openRequests: state.accountRequests.filter((item) =>
+      ["pending", "acknowledged"].includes(item.status)
+    ).length,
     asOf: now,
     expiringWithinDays: 7,
   }
@@ -171,7 +215,11 @@ async function handleApi(request, response, url) {
         (user) => user.id === url.searchParams.get("userId")
       )
       return respond(response, 200, {
+        user,
         subscription: user.subscription,
+        requests: state.accountRequests.filter(
+          (item) => item.userId === user.id
+        ),
         devices:
           user.subscription?.devices.map((device) => ({
             ...device,
@@ -189,10 +237,46 @@ async function handleApi(request, response, url) {
         ],
       })
     }
-    const secondPage = url.searchParams.has("cursor")
+    state.listQueries.push(Object.fromEntries(url.searchParams))
+    const query = (url.searchParams.get("q") || "").trim().toLowerCase()
+    const filter = url.searchParams.get("filter") || "all"
+    const now = Date.now()
+    const matching = state.users.filter((user) => {
+      const sub = user.subscription
+      const active = sub && sub.status !== "revoked" && sub.endsAt > now
+      if (
+        query &&
+        ![user.email, user.firstName, user.lastName, sub?.notes]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase()
+          .includes(query)
+      )
+        return false
+      return (
+        filter === "all" ||
+        (filter === "active" && active) ||
+        (filter === "trial" && active && sub.type === "trial") ||
+        (filter === "standard" && active && sub.type === "regular") ||
+        (filter === "canceling" && active && sub.cancelAtPeriodEnd) ||
+        (filter === "expiring" && active && sub.endsAt <= now + 7 * day) ||
+        (filter === "expired" &&
+          sub &&
+          sub.status !== "revoked" &&
+          sub.endsAt <= now) ||
+        (filter === "revoked" && sub?.status === "revoked") ||
+        (filter === "unassigned" && !sub)
+      )
+    })
+    const cursor = url.searchParams.get("cursor")
+    const start = cursor
+      ? matching.findIndex((user) => user.id === cursor) + 1
+      : 0
+    const users = matching.slice(start, start + 3)
     return respond(response, 200, {
-      users: secondPage ? state.users.slice(3) : state.users.slice(0, 3),
-      nextCursor: secondPage ? null : "user_cara",
+      users,
+      nextCursor:
+        start + users.length < matching.length ? users.at(-1).id : null,
       overview: overview(),
       billingMode: "manual",
     })
@@ -232,6 +316,8 @@ async function handleApi(request, response, url) {
       startsAt: now,
       endsAt: body.endsAt || now + body.durationDays * day,
       notes: body.notes,
+      cancelAtPeriodEnd: false,
+      canceledAt: null,
       bindingRevision: user.subscription?.bindingRevision ?? 0,
       devices: user.subscription?.devices ?? [],
       deviceLimit: 2,
@@ -254,6 +340,10 @@ async function handleApi(request, response, url) {
       if (!body.deviceId) subscription.bindingRevision++
     }
     if (body.action === "update-notes") subscription.notes = body.notes
+    if (["cancel-renewal", "resume-renewal"].includes(body.action)) {
+      subscription.cancelAtPeriodEnd = body.action === "cancel-renewal"
+      subscription.canceledAt = subscription.cancelAtPeriodEnd ? now : null
+    }
     subscription.revision++
     subscription.updatedAt = now
   }
@@ -286,6 +376,9 @@ function customerAccount() {
           status: subscription.status,
           startsAt: subscription.startsAt,
           endsAt: subscription.endsAt,
+          revision: subscription.revision,
+          cancelAtPeriodEnd: subscription.cancelAtPeriodEnd,
+          canceledAt: subscription.canceledAt,
           devices: subscription.devices.map(({ id, activatedAt }) => ({
             id,
             activatedAt,
@@ -312,7 +405,34 @@ async function customerApi(request, response) {
           : "Session expired",
     })
   }
-  const action = body.action === "request-renewal" ? "renewal" : "reset-device"
+  if (
+    ["cancel-renewal", "resume-renewal", "remove-device"].includes(body.action)
+  ) {
+    const subscription = state.users[0].subscription
+    if (body.expectedRevision !== subscription.revision)
+      return respond(response, 409, { error: "Revision conflict" })
+    if (body.action === "remove-device") {
+      if (!subscription.devices.some((device) => device.id === body.deviceId))
+        return respond(response, 409, {
+          error: "This Mac is no longer connected. Refresh your account.",
+        })
+      subscription.devices = subscription.devices.filter(
+        (device) => device.id !== body.deviceId
+      )
+    } else {
+      subscription.cancelAtPeriodEnd = body.action === "cancel-renewal"
+      subscription.canceledAt = subscription.cancelAtPeriodEnd
+        ? Date.now()
+        : null
+    }
+    subscription.revision++
+    return respond(response, 200, {
+      subscription: customerAccount().subscription,
+    })
+  }
+  if (body.action !== "request-renewal")
+    return respond(response, 400, { error: "Unsupported account action" })
+  const action = "renewal"
   const existing = state.accountRequests.find(
     (item) =>
       item.userId === "user_alice" &&
@@ -384,8 +504,9 @@ async function requestsApi(request, response, url) {
           user: (() => {
             const user = state.users.find((user) => user.id === item.userId)
             if (!user) return null
-            const { subscription, ...account } = user
-            return account
+            return Object.fromEntries(
+              Object.entries(user).filter(([key]) => key !== "subscription")
+            )
           })(),
           subscription:
             state.users.find((user) => user.id === item.userId)?.subscription ??
@@ -495,6 +616,43 @@ async function remindersApi(request, response) {
   })
 }
 
+function waitlistApi(response, url) {
+  const query = (url.searchParams.get("q") || "").toLowerCase()
+  const matches = state.waitlist.filter((entry) =>
+    [entry.email, entry.firstName, entry.lastName, entry.heardAboutUs]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase()
+      .includes(query)
+  )
+  const cursor = url.searchParams.get("cursor")
+  const remaining = matches.filter(
+    (entry) => !cursor || entry.id < Number(cursor)
+  )
+  const entries = remaining.slice(0, 2)
+  const sources = [
+    ...new Set(state.waitlist.map((entry) => entry.heardAboutUs)),
+  ].map((source) => ({
+    source,
+    count: state.waitlist.filter((entry) => entry.heardAboutUs === source)
+      .length,
+  }))
+  return respond(response, 200, {
+    entries,
+    nextCursor:
+      remaining.length > entries.length ? String(entries.at(-1).id) : null,
+    totalMatches: matches.length,
+    overview: {
+      total: state.waitlist.length,
+      last30Days: state.waitlist.filter(
+        (entry) => entry.createdAt >= Date.now() - 30 * day
+      ).length,
+      sources,
+      asOf: Date.now(),
+    },
+  })
+}
+
 before(async () => {
   await readFile(join(builtAssets, "admin/subscriptions.html"))
   assets = await mkdtemp(join(tmpdir(), "photodepot-dashboard-assets-"))
@@ -505,8 +663,29 @@ before(async () => {
       const url = new URL(request.url, "http://localhost")
       if (url.pathname === "/api/admin/subscriptions")
         return await handleApi(request, response, url)
+      if (url.pathname === "/api/admin/waitlist")
+        return waitlistApi(response, url)
       if (url.pathname === "/api/account/subscription")
         return await customerApi(request, response)
+      if (url.pathname === "/api/account/dashboard-access") {
+        state.dashboardAccessQueries.push(Object.fromEntries(url.searchParams))
+        if (state.dashboardAccessDelay)
+          await new Promise((resolve) =>
+            setTimeout(resolve, state.dashboardAccessDelay)
+          )
+        return respond(response, state.dashboardAccessStatus, {
+          user: {
+            id: state.dashboardAccess ? "user_owner" : "user_alice",
+            email: state.dashboardAccess
+              ? "owner@example.test"
+              : "alice@example.test",
+          },
+          canAccessAdmin: state.dashboardAccess,
+          ...(state.dashboardAccessStatus === 200
+            ? {}
+            : { error: "Test dashboard access unavailable" }),
+        })
+      }
       if (url.pathname === "/api/admin/subscription-requests")
         return await requestsApi(request, response, url)
       if (url.pathname === "/api/admin/subscription-reminders")
@@ -584,55 +763,455 @@ async function save(name) {
 async function loadAll() {
   await page.getByRole("button", { name: "Load more accounts" }).click()
   await expect(
-    page.getByText("Showing 5 of 5 loaded accounts.", { exact: false })
+    page.getByText("5 accounts shown", { exact: false })
   ).toBeVisible()
 }
 
-test("manual access policy, overview, loaded-account filters, and pagination are accurate", async () => {
+test("Owners can switch between their individual and admin dashboards", async () => {
+  const switcher = page.getByRole("button", {
+    name: "Switch dashboard",
+    exact: true,
+  })
+  await expect(switcher).toBeVisible()
+  await expect(switcher).toContainText("Admin dashboard")
+  await switcher.click()
   await expect(
-    page.getByText(/Access is assigned manually by an Owner/)
+    page.getByRole("menuitem", { name: "Individual dashboard", exact: true })
   ).toBeVisible()
   await expect(
-    page.getByText(/Creating an account does not grant access/)
-  ).toBeVisible()
-  await expect(page.getByText("1 trial · 1 standard")).toBeVisible()
-  await expect(
-    page.getByText(/search and filters apply only to loaded accounts/)
+    page.getByRole("menuitem", { name: "Admin dashboard", exact: true })
   ).toBeVisible()
   await page
-    .getByRole("searchbox", { name: "Search loaded accounts" })
-    .fill("Dan")
+    .getByRole("menuitem", { name: "Individual dashboard", exact: true })
+    .click()
+  await expect(page).toHaveURL(`${origin}/account`)
   await expect(
-    page.getByText("No loaded accounts match these filters.")
+    page.getByRole("heading", { name: "Plan & connected Macs" })
   ).toBeVisible()
-  await page.getByRole("button", { name: "Load more accounts" }).click()
+  await expect(switcher).toContainText("Individual dashboard")
+  await switcher.click()
+  await page
+    .getByRole("menuitem", { name: "Admin dashboard", exact: true })
+    .click()
+  await expect(page).toHaveURL(`${origin}/admin`)
+  await expect(
+    page.getByRole("heading", { name: "Overview", exact: true })
+  ).toBeVisible()
+  assert.ok(
+    state.dashboardAccessQueries.some((query) => query.dashboard === "admin")
+  )
+  assert.ok(
+    state.dashboardAccessQueries.some(
+      (query) => query.dashboard === "individual"
+    )
+  )
+})
+
+test("ordinary customers have no dashboard switcher or admin entry", async () => {
+  state.dashboardAccess = false
+  await page.goto(`${origin}/account`)
+  await expect(
+    page.getByRole("heading", { name: "Plan & connected Macs" })
+  ).toBeVisible()
+  await expect
+    .poll(() => state.dashboardAccessQueries.at(-1)?.dashboard)
+    .toBe("individual")
+  await expect(
+    page.getByRole("button", { name: "Switch dashboard", exact: true })
+  ).toHaveCount(0)
+  await expect(page.getByText("Admin dashboard", { exact: true })).toHaveCount(
+    0
+  )
+  await expect(page.locator('a[href="/admin"]')).toHaveCount(0)
+  await expect(
+    page.getByRole("navigation", { name: "Account navigation" })
+  ).toBeVisible()
+  await expect(
+    page.getByRole("button", { name: "Cancel renewal", exact: true })
+  ).toBeEnabled()
+})
+
+test("dashboard switching stays hidden while access loads or cannot be verified", async () => {
+  for (const status of [403, 503]) {
+    state.dashboardAccessStatus = status
+    state.dashboardAccessDelay = 350
+    const lookup = page.waitForResponse((response) =>
+      response.url().includes("/api/account/dashboard-access?")
+    )
+    await page.goto(`${origin}/account`)
+    await expect(
+      page.getByRole("button", { name: "Switch dashboard", exact: true })
+    ).toHaveCount(0)
+    await lookup
+    await expect(
+      page.getByRole("button", { name: "Switch dashboard", exact: true })
+    ).toHaveCount(0)
+    await expect(
+      page.getByText("Admin dashboard", { exact: true })
+    ).toHaveCount(0)
+    await expect(
+      page.getByRole("button", { name: "Request renewal", exact: true })
+    ).toBeEnabled()
+  }
+})
+
+test("the shadcn sidebar collapses by trigger and keyboard while preserving navigation", async () => {
+  const sidebar = page.locator('[data-slot="sidebar"][data-state]')
+  const trigger = page.locator('[data-slot="sidebar-trigger"]')
+  await expect(sidebar).toHaveAttribute("data-state", "expanded")
+  await expect(trigger).toHaveAccessibleName("Toggle Sidebar")
+  await trigger.click()
+  await expect(sidebar).toHaveAttribute("data-state", "collapsed")
+  await expect(sidebar).toHaveAttribute("data-collapsible", "icon")
+  await page.keyboard.press("Control+b")
+  await expect(sidebar).toHaveAttribute("data-state", "expanded")
+  const nav = page.getByRole("navigation", { name: "Admin navigation" })
+  await nav.getByRole("button", { name: /^Waitlist/ }).click()
+  await expect(
+    page.getByRole("heading", { name: "Waitlist", exact: true })
+  ).toBeVisible()
+})
+
+test("mobile sidebars open from the header and close after navigating", async () => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto(`${origin}/admin`)
+  await expect(
+    page.getByRole("navigation", { name: "Admin navigation" })
+  ).toBeHidden()
+  await page.locator('[data-slot="sidebar-trigger"]').click()
+  await expect(
+    page.getByRole("dialog", { name: "Sidebar", exact: true })
+  ).toBeVisible()
+  const nav = page.getByRole("navigation", { name: "Admin navigation" })
+  await nav.getByRole("button", { name: /^Waitlist/ }).click()
+  await expect(
+    page.getByRole("dialog", { name: "Sidebar", exact: true })
+  ).toBeHidden()
+  await expect(
+    page.getByRole("heading", { name: "Waitlist", exact: true })
+  ).toBeVisible()
+
+  state.dashboardAccess = false
+  await page.goto(`${origin}/account`)
+  await page.locator('[data-slot="sidebar-trigger"]').click()
+  const accountNav = page.getByRole("navigation", {
+    name: "Account navigation",
+  })
+  await expect(accountNav).toBeVisible()
+  await expect(
+    page.getByRole("button", { name: "Switch dashboard", exact: true })
+  ).toHaveCount(0)
+  await accountNav
+    .getByRole("link", { name: "Connected Macs", exact: true })
+    .click()
+  await expect(
+    page.getByRole("dialog", { name: "Sidebar", exact: true })
+  ).toBeHidden()
+  await expect(page).toHaveURL(`${origin}/account#devices`)
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth
+      )
+    )
+    .toBe(true)
+})
+
+test("sidebar account menus keep logout bound to the displayed dashboard session", async () => {
+  await page.route("**/api/**/logout", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body: "<p>Signed out</p>",
+    })
+  )
+  for (const [dashboard, logout] of [
+    ["/admin", "/api/auth/logout"],
+    ["/account", "/api/account/auth/logout"],
+  ]) {
+    await page.goto(`${origin}${dashboard}`)
+    const accountMenu = page.getByRole("button", {
+      name: "Account menu",
+      exact: true,
+    })
+    await accountMenu.click()
+    await expect(
+      page.getByRole("menuitem", { name: "Sign out", exact: true })
+    ).toBeEnabled()
+    await page.keyboard.press("Escape")
+    await expect(accountMenu).toBeFocused()
+    await accountMenu.click()
+    const request = page.waitForRequest(`${origin}${logout}`)
+    await page.getByRole("menuitem", { name: "Sign out", exact: true }).click()
+    assert.equal((await request).method(), "POST")
+    await expect(page).toHaveURL(`${origin}${logout}`)
+  }
+})
+
+test("server-side search, subscription segments, and pagination include the complete directory", async () => {
+  await expect(
+    page.getByRole("searchbox", { name: "Search accounts" })
+  ).toBeVisible()
+  await page.getByRole("searchbox", { name: "Search accounts" }).fill("Dan")
   await expect(
     page.getByRole("button", { name: "View dan@example.test", exact: true })
   ).toBeVisible()
   await expect(
     page.getByRole("button", { name: "View alice@example.test", exact: true })
   ).toHaveCount(0)
-  await expect(page.getByText(/All accounts are loaded/)).toBeVisible()
+  assert.equal(state.listQueries.at(-1).q, "Dan")
   await page.getByRole("button", { name: "Clear filters" }).click()
-  await page.getByLabel("Status", { exact: true }).selectOption("Revoked")
+  await page.getByRole("tab", { name: "Revoked", exact: true }).click()
   await expect(page.locator("tbody tr")).toHaveCount(1)
-  await page.getByRole("button", { name: "Clear filters" }).click()
-  await page.getByLabel("Type", { exact: true }).selectOption("trial")
+  await expect(
+    page.getByRole("button", { name: "View dan@example.test", exact: true })
+  ).toBeVisible()
+  await page.getByRole("tab", { name: "Trials", exact: true }).click()
   await expect(page.locator("tbody tr")).toHaveCount(1)
-  await page.getByRole("button", { name: "Clear filters" }).click()
-  await page.getByLabel("Expiry", { exact: true }).selectOption("7")
+  await expect(
+    page.getByRole("button", { name: "View alice@example.test", exact: true })
+  ).toBeVisible()
+  await page.getByLabel("Expiry", { exact: true }).selectOption("expiring")
+  await expect.poll(() => state.listQueries.at(-1).filter).toBe("expiring")
   await expect(page.locator("tbody tr")).toHaveCount(1)
   await page.getByRole("button", { name: "Clear filters" }).click()
   await page.getByRole("searchbox").fill("Pilot account")
   await expect(page.locator("tbody tr")).toHaveCount(1)
   assert.equal(await page.evaluate(() => window.injected), undefined)
   await page.getByRole("button", { name: "Clear filters" }).click()
-  await page.getByLabel("Sort", { exact: true }).selectOption("email")
-  assert.match(await page.locator("tbody tr").first().innerText(), /Alice/)
+  await loadAll()
   await page.screenshot({
     path: join(screenshots, "subscriptions-desktop.png"),
     fullPage: true,
   })
+})
+
+test("the admin overview links live counts to active access and canceled renewal segments", async () => {
+  await page.goto(`${origin}/admin`)
+  await expect(
+    page.getByRole("heading", { name: "Overview", exact: true })
+  ).toBeVisible()
+  await expect(
+    page.getByText("1 trial · 1 standard", { exact: true })
+  ).toBeVisible()
+  await page.screenshot({
+    path: join(screenshots, "admin-overview-desktop.png"),
+    fullPage: true,
+  })
+  await page
+    .getByRole("button", { name: "View active subscriptions", exact: true })
+    .click()
+  await expect(page.locator("tbody tr")).toHaveCount(2)
+  await expect(
+    page.getByRole("button", { name: "View eva@example.test", exact: true })
+  ).toBeVisible()
+  await page.getByRole("tab", { name: "Renewal canceled", exact: true }).click()
+  await expect(page.locator("tbody tr")).toHaveCount(1)
+  const row = page.locator("tbody tr").filter({ hasText: "eva@example.test" })
+  await expect(row.getByText("Active", { exact: true })).toBeVisible()
+  await expect(row.getByText("Canceled", { exact: true })).toBeVisible()
+  assert.equal(state.users[4].subscription.status, "active")
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto(`${origin}/admin`)
+  await expect(
+    page.getByRole("heading", { name: "Overview", exact: true })
+  ).toBeVisible()
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth
+      )
+    )
+    .toBe(true)
+  await page.screenshot({
+    path: join(screenshots, "admin-overview-mobile.png"),
+    fullPage: true,
+  })
+})
+
+test("waitlist signups have real source counts, server search, pagination, and a scoped export", async () => {
+  await page
+    .getByRole("navigation", { name: "Admin navigation" })
+    .getByRole("button", { name: /^Waitlist/ })
+    .click()
+  await expect(
+    page.getByRole("heading", { name: "Waitlist", exact: true })
+  ).toBeVisible()
+  await expect(page.getByText("2 of 3 matching signups")).toBeVisible()
+  await expect(page.getByText("Search · 2", { exact: true })).toBeVisible()
+  await page.getByRole("button", { name: "Load more signups" }).click()
+  await expect(page.getByText("3 of 3 matching signups")).toBeVisible()
+  await page.getByRole("searchbox", { name: "Search waitlist" }).fill("Zoe")
+  await expect(page.getByText("1 of 1 matching signups")).toBeVisible()
+  await expect(
+    page.getByText("zoe@example.test", { exact: true })
+  ).toBeVisible()
+  const download = page.waitForEvent("download")
+  await page.getByRole("button", { name: "Export loaded (1)" }).click()
+  const exported = await download
+  assert.equal(exported.suggestedFilename(), "photodepot-waitlist.csv")
+  const csv = await readFile(await exported.path(), "utf8")
+  assert.match(csv, /zoe@example.test/)
+  assert.doesNotMatch(csv, /wendy@example.test/)
+  await page.getByRole("searchbox", { name: "Search waitlist" }).fill("")
+  await expect(page.getByText("2 of 3 matching signups")).toBeVisible()
+  await page.screenshot({
+    path: join(screenshots, "admin-waitlist-desktop.png"),
+    fullPage: true,
+  })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth
+      )
+    )
+    .toBe(true)
+})
+
+test("a user profile opens directly and manages renewal without changing the access end date", async () => {
+  await page.goto(`${origin}/admin?view=users&user=user_eva`)
+  await expect(
+    page.getByRole("heading", { name: "User management", exact: true })
+  ).toBeVisible()
+  await expect(
+    page.getByRole("heading", { name: "Eva Example", exact: true })
+  ).toBeVisible()
+  await expect(
+    page.getByText("Browser test history reason", { exact: true })
+  ).toBeVisible()
+  const endsAt = state.users[4].subscription.endsAt
+  await page
+    .getByRole("button", { name: "Resume renewal", exact: true })
+    .click()
+  await expect(page.getByRole("dialog")).toBeVisible()
+  await save("Resume renewal")
+  assert.equal(state.requests.at(-1).action, "resume-renewal")
+  assert.equal(state.users[4].subscription.cancelAtPeriodEnd, false)
+  assert.equal(state.users[4].subscription.endsAt, endsAt)
+  await expect(
+    page.getByRole("button", { name: "Cancel renewal", exact: true })
+  ).toBeVisible()
+  await page.reload()
+  await expect(
+    page.getByRole("heading", { name: "Eva Example", exact: true })
+  ).toBeVisible()
+  await page.screenshot({
+    path: join(screenshots, "admin-user-profile-desktop.png"),
+    fullPage: true,
+  })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth
+      )
+    )
+    .toBe(true)
+  await page.screenshot({
+    path: join(screenshots, "admin-user-profile-mobile.png"),
+    fullPage: true,
+  })
+})
+
+test("opening a profile while search is debouncing preserves account details", async () => {
+  await page.getByRole("searchbox", { name: "Search accounts" }).fill("Alice")
+  await page
+    .getByRole("button", { name: "View alice@example.test", exact: true })
+    .click()
+  await expect(
+    page.getByRole("heading", { name: "User management", exact: true })
+  ).toBeVisible()
+  await expect(
+    page.getByText("Browser test history reason", { exact: true })
+  ).toBeVisible()
+  await expect(
+    page.getByRole("button", { name: `Reset Mac ${firstMac}`, exact: true })
+  ).toBeEnabled()
+  await expect
+    .poll(() => state.listQueries.some((query) => query.q === "Alice"))
+    .toBe(true)
+  await expect(
+    page.getByText("Browser test history reason", { exact: true })
+  ).toBeVisible()
+})
+
+test("all workspace sections navigate and failed refreshes can recover", async () => {
+  const nav = page.getByRole("navigation", { name: "Admin navigation" })
+  for (const name of [
+    "Overview",
+    "Subscriptions",
+    "Users",
+    "Waitlist",
+    "Operations",
+  ]) {
+    await nav.getByRole("button", { name: new RegExp(`^${name}`) }).click()
+    await expect(page.getByRole("heading", { name, exact: true })).toBeVisible()
+    assert.equal(new URL(page.url()).pathname, "/admin")
+  }
+  await nav.getByRole("button", { name: "Subscriptions", exact: true }).click()
+  state.listFailure = true
+  await page.getByRole("button", { name: "Refresh", exact: true }).click()
+  await expect(page.getByRole("main").getByRole("alert")).toContainText(
+    "Test service unavailable"
+  )
+  state.listFailure = false
+  await page.getByRole("button", { name: "Refresh", exact: true }).click()
+  await expect(page.getByRole("main").getByRole("alert")).toHaveCount(0)
+  await expect(
+    page.getByRole("button", { name: "View alice@example.test", exact: true })
+  ).toBeVisible()
+})
+
+test("workspace Refresh updates the visible waitlist and operations panels", async () => {
+  const nav = page.getByRole("navigation", { name: "Admin navigation" })
+  await nav.getByRole("button", { name: /^Waitlist/ }).click()
+  await expect(page.getByText("2 of 3 matching signups")).toBeVisible()
+  state.waitlist.unshift({
+    id: 4,
+    firstName: "New",
+    lastName: "Photographer",
+    email: "new@example.test",
+    heardAboutUs: "A friend",
+    createdAt: Date.now(),
+  })
+  await expect(page.getByText("new@example.test", { exact: true })).toHaveCount(
+    0
+  )
+  await page.getByRole("button", { name: "Refresh", exact: true }).click()
+  await expect(
+    page.getByText("new@example.test", { exact: true })
+  ).toBeVisible()
+  await expect(page.getByText("2 of 4 matching signups")).toBeVisible()
+  await nav.getByRole("button", { name: /^Operations/ }).click()
+  await expect(
+    page.getByText("No customer requests in this view.", { exact: true })
+  ).toBeVisible()
+  state.accountRequests.push({
+    id: "request_00000000-0000-4000-8000-000000000006",
+    userId: "user_alice",
+    email: "alice@example.test",
+    action: "renewal",
+    deviceId: null,
+    message: "Please extend my access",
+    status: "pending",
+    revision: 1,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    adminNote: "",
+    handledBy: "",
+  })
+  state.reminderMode = "resend"
+  await page.getByRole("button", { name: "Refresh", exact: true }).click()
+  const requests = page.getByRole("region", { name: /Customer requests/ })
+  await expect(
+    requests.getByText("Renewal · alice@example.test", { exact: true })
+  ).toBeVisible()
+  await expect(
+    requests.getByRole("button", { name: "Review request", exact: true })
+  ).toBeVisible()
+  await expect(page.getByText(/Reminder delivery is configured/)).toBeVisible()
+  assert.equal(state.requests.length, 0)
 })
 
 test("grants support 7-day trials, standard presets, custom durations, and exact expiry", async () => {
@@ -718,24 +1297,19 @@ test("details, notes, extension, revoke, restore, and Mac reset use guarded muta
   assert.equal(state.users[0].subscription.endsAt, currentExpiry + 14 * day)
   assert.equal(state.users[0].subscription.startsAt, startsAt)
   await openAction("Revoke access")
-  assert.equal(
-    await page
+  await expect(
+    page
       .getByRole("dialog")
       .getByRole("button", { name: "Close account dialog" })
-      .evaluate((button) => button === document.activeElement),
-    true
-  )
+  ).toBeFocused()
   await page.keyboard.press("Escape")
   await expect(page.getByRole("dialog")).toHaveCount(0)
-  assert.equal(
-    await page
-      .getByRole("button", {
-        name: "Revoke access for alice@example.test",
-        exact: true,
-      })
-      .evaluate((button) => button === document.activeElement),
-    true
-  )
+  await expect(
+    page.getByRole("button", {
+      name: "Revoke access for alice@example.test",
+      exact: true,
+    })
+  ).toBeFocused()
   await openAction("Revoke access")
   await page.getByLabel(/Reason for this change/).fill("Access review")
   await save("Revoke access")
@@ -743,9 +1317,6 @@ test("details, notes, extension, revoke, restore, and Mac reset use guarded muta
   await openAction("Restore access")
   await save("Restore subscription")
   assert.equal(state.users[0].subscription.status, "active")
-  await page
-    .getByRole("button", { name: "View alice@example.test", exact: true })
-    .click()
   await page
     .getByRole("button", { name: `Reset Mac ${firstMac}`, exact: true })
     .click()
@@ -759,6 +1330,7 @@ test("details, notes, extension, revoke, restore, and Mac reset use guarded muta
   )
   assert.equal(state.requests.at(-1).deviceId, firstMac)
   assert.equal(state.requests.at(-1).action, "reset-device")
+  await page.getByRole("button", { name: "Back to users", exact: true }).click()
   await loadAll()
   await openAction("Restore access", "dan@example.test")
   state.users[3].subscription.endsAt = Date.now() - day
@@ -850,12 +1422,13 @@ test("conflicts, server failures, and session expiry never report a successful c
 
 test("mobile layout and modal keyboard focus remain usable", async () => {
   await page.setViewportSize({ width: 390, height: 844 })
-  assert.equal(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= window.innerWidth
-    ),
-    true
-  )
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth
+      )
+    )
+    .toBe(true)
   await expect(page.getByRole("searchbox")).toBeVisible()
   await page.screenshot({
     path: join(screenshots, "subscriptions-mobile.png"),
@@ -864,20 +1437,21 @@ test("mobile layout and modal keyboard focus remain usable", async () => {
   await openAction("Grant subscription", "cara@example.test")
   const dialog = page.getByRole("dialog")
   await expect(dialog).toBeVisible()
+  await expect(
+    dialog.getByRole("button", { name: "Close account dialog", exact: true })
+  ).toBeFocused()
   await page.keyboard.press("Shift+Tab")
-  assert.equal(
-    await dialog.evaluate((element) =>
-      element.contains(document.activeElement)
-    ),
-    true
-  )
+  await expect
+    .poll(() =>
+      dialog.evaluate((element) => element.contains(document.activeElement))
+    )
+    .toBe(true)
   await page.keyboard.press("Tab")
-  assert.equal(
-    await dialog.evaluate((element) =>
-      element.contains(document.activeElement)
-    ),
-    true
-  )
+  await expect
+    .poll(() =>
+      dialog.evaluate((element) => element.contains(document.activeElement))
+    )
+    .toBe(true)
   await page.screenshot({
     path: join(screenshots, "subscription-grant-mobile.png"),
   })
@@ -885,7 +1459,7 @@ test("mobile layout and modal keyboard focus remain usable", async () => {
   await expect(dialog).toHaveCount(0)
 })
 
-test("the customer portal displays only customer data and submits renewal and selected-Mac requests", async () => {
+test("the customer portal displays only customer data and submits renewal requests", async () => {
   await page.goto(`${origin}/account`)
   await expect(
     page.getByRole("heading", { name: "Plan & connected Macs" })
@@ -910,26 +1484,8 @@ test("the customer portal displays only customer data and submits renewal and se
   assert.equal(state.customerMutations.at(-1).action, "request-renewal")
   assert.equal(state.users[0].subscription.revision, 1)
   assert.equal(await page.evaluate(() => window.injected), undefined)
-  await page
-    .getByRole("button", { name: "Request removal for Mac 1", exact: true })
-    .click()
-  await expect(
-    page.getByRole("dialog").getByText(firstMac, { exact: true })
-  ).toBeVisible()
-  await page
-    .getByRole("button", { name: "Submit request", exact: true })
-    .click()
-  await expect(page.getByRole("dialog")).toHaveCount(0)
-  await expect(
-    page.getByRole("button", {
-      name: "Removal requested for Mac 1",
-      exact: true,
-    })
-  ).toBeDisabled()
-  await expect(
-    page.getByRole("button", { name: "Request removal for Mac 2", exact: true })
-  ).toBeEnabled()
-  assert.equal(state.customerMutations.at(-1).deviceId, firstMac)
+  assert.equal(state.accountRequests.length, 1)
+  assert.equal(state.accountRequests[0].action, "renewal")
   assert.equal(state.users[0].subscription.devices.length, 2)
   state.accountRequests.find((item) => item.action === "renewal").adminNote =
     "Secret admin context"
@@ -953,16 +1509,231 @@ test("the customer portal displays only customer data and submits renewal and se
     page.getByRole("button", { name: "Request renewal", exact: true })
   ).toBeVisible()
   await expect(page.locator("header")).toHaveCount(1)
-  assert.equal(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= window.innerWidth
-    ),
-    true
-  )
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth
+      )
+    )
+    .toBe(true)
   await page.screenshot({
     path: join(screenshots, "customer-account-mobile.png"),
     fullPage: true,
   })
+})
+
+test("customer Mac removal requires confirmation and removes only the selected Mac immediately", async () => {
+  await page.goto(`${origin}/account`)
+  const subscriptionBefore = structuredClone(state.users[0].subscription)
+  const firstRemove = page.getByRole("button", {
+    name: "Remove Mac 1",
+    exact: true,
+  })
+  await expect(firstRemove).toBeEnabled()
+  await expect(page.getByText("Request removal", { exact: true })).toHaveCount(
+    0
+  )
+  await firstRemove.click()
+  const dialog = page.getByRole("dialog")
+  await expect(
+    dialog.getByRole("heading", { name: "Remove this Mac?", exact: true })
+  ).toBeVisible()
+  await expect(dialog.getByText(firstMac, { exact: true })).toBeVisible()
+  await page.screenshot({
+    path: join(screenshots, "customer-remove-mac-confirmation.png"),
+    fullPage: true,
+  })
+  assert.equal(state.customerMutations.length, 0)
+  assert.deepEqual(state.users[0].subscription, subscriptionBefore)
+  await page.keyboard.press("Escape")
+  await expect(dialog).toHaveCount(0)
+  assert.equal(state.customerMutations.length, 0)
+  await expect(firstRemove).toBeFocused()
+  await firstRemove.click()
+  await dialog.getByRole("button", { name: "Remove Mac", exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  await expect(page.getByText("1 / 2", { exact: true })).toBeVisible()
+  await expect(page.getByText(firstMac, { exact: true })).toHaveCount(0)
+  await expect(page.getByText(secondMac, { exact: true })).toHaveCount(1)
+  assert.deepEqual(state.customerMutations, [
+    { action: "remove-device", deviceId: firstMac, expectedRevision: 1 },
+  ])
+  assert.equal(state.accountRequests.length, 0)
+  assert.equal(state.users[0].subscription.devices.length, 1)
+  assert.deepEqual(
+    state.users[0].subscription.devices[0],
+    subscriptionBefore.devices[1]
+  )
+  for (const key of [
+    "type",
+    "status",
+    "startsAt",
+    "endsAt",
+    "bindingRevision",
+    "cancelAtPeriodEnd",
+    "canceledAt",
+  ])
+    assert.equal(state.users[0].subscription[key], subscriptionBefore[key], key)
+  assert.equal(state.users[0].subscription.revision, 2)
+  await expect(firstRemove).toBeEnabled()
+})
+
+test("customer Mac removal conflicts require fresh account data and a new confirmation", async () => {
+  await page.goto(`${origin}/account`)
+  await page.getByRole("button", { name: "Remove Mac 1", exact: true }).click()
+  state.users[0].subscription.revision++
+  const dialog = page.getByRole("dialog")
+  await dialog.getByRole("button", { name: "Remove Mac", exact: true }).click()
+  await expect(dialog.getByRole("alert")).toContainText("Revision conflict")
+  await expect(
+    dialog.getByRole("button", { name: "Remove Mac", exact: true })
+  ).toBeDisabled()
+  assert.equal(state.users[0].subscription.devices.length, 2)
+  assert.equal(state.accountRequests.length, 0)
+  await dialog
+    .getByRole("button", { name: "Refresh account", exact: true })
+    .click()
+  await expect(dialog).toHaveCount(0)
+  assert.equal(state.customerMutations.length, 1)
+  await page.getByRole("button", { name: "Remove Mac 1", exact: true }).click()
+  await dialog.getByRole("button", { name: "Remove Mac", exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  assert.deepEqual(
+    state.users[0].subscription.devices.map((device) => device.id),
+    [secondMac]
+  )
+  assert.equal(state.customerMutations.at(-1).expectedRevision, 2)
+  assert.equal(state.accountRequests.length, 0)
+})
+
+test("customer Mac removal preserves devices when the session expires", async () => {
+  await page.goto(`${origin}/account`)
+  const subscriptionBefore = structuredClone(state.users[0].subscription)
+  await page.getByRole("button", { name: "Remove Mac 2", exact: true }).click()
+  state.customerFailNext = 401
+  const dialog = page.getByRole("dialog")
+  await dialog.getByRole("button", { name: "Remove Mac", exact: true }).click()
+  await expect(dialog.getByRole("alert")).toContainText("Your session expired")
+  await expect(
+    dialog.getByRole("button", { name: "Remove Mac", exact: true })
+  ).toBeDisabled()
+  await expect(
+    dialog.getByRole("link", { name: "Sign in", exact: true })
+  ).toHaveAttribute("target", "_blank")
+  assert.deepEqual(state.users[0].subscription, subscriptionBefore)
+  assert.equal(state.accountRequests.length, 0)
+  await page.keyboard.press("Escape")
+  await expect(dialog).toHaveCount(0)
+  await expect(
+    page.getByRole("button", { name: "Remove Mac 1", exact: true })
+  ).toBeDisabled()
+  await expect(
+    page.getByRole("button", { name: "Remove Mac 2", exact: true })
+  ).toBeDisabled()
+})
+
+test("an existing Mac removal request does not block direct customer removal", async () => {
+  state.accountRequests.push({
+    id: "request_00000000-0000-4000-8000-000000000007",
+    userId: "user_alice",
+    email: "alice@example.test",
+    action: "reset-device",
+    deviceId: firstMac,
+    message: "Previously requested removal",
+    status: "pending",
+    revision: 1,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    adminNote: "",
+    handledBy: "",
+  })
+  await page.goto(`${origin}/account`)
+  const remove = page.getByRole("button", { name: "Remove Mac 1", exact: true })
+  await expect(remove).toBeEnabled()
+  await remove.click()
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Remove Mac", exact: true })
+    .click()
+  await expect(page.getByRole("dialog")).toHaveCount(0)
+  assert.deepEqual(
+    state.users[0].subscription.devices.map((device) => device.id),
+    [secondMac]
+  )
+  assert.equal(state.accountRequests.length, 1)
+  assert.equal(state.accountRequests[0].revision, 1)
+})
+
+test("customers can cancel and resume renewal without losing paid-through access", async () => {
+  await page.goto(`${origin}/account`)
+  const endsAt = state.users[0].subscription.endsAt
+  await page
+    .getByRole("button", { name: "Cancel renewal", exact: true })
+    .click()
+  const dialog = page.getByRole("dialog")
+  await expect(
+    dialog.getByRole("heading", { name: "Cancel your renewal?" })
+  ).toBeVisible()
+  await expect(dialog.getByRole("button", { name: "Go back" })).toBeFocused()
+  await dialog.getByRole("button", { name: "Confirm cancellation" }).click()
+  await expect(dialog).toHaveCount(0)
+  await expect(
+    page.getByText("Renewal canceled", { exact: true })
+  ).toBeVisible()
+  await expect(
+    page.getByRole("button", { name: "Request renewal", exact: true })
+  ).toBeDisabled()
+  assert.equal(state.users[0].subscription.cancelAtPeriodEnd, true)
+  assert.equal(state.users[0].subscription.endsAt, endsAt)
+  assert.equal(state.users[0].subscription.status, "active")
+  assert.equal(state.accountRequests.length, 0)
+  assert.equal(state.customerMutations.at(-1).expectedRevision, 1)
+  await page
+    .getByRole("button", { name: "Resume renewal", exact: true })
+    .click()
+  await expect(
+    dialog.getByRole("heading", { name: "Resume your renewal?" })
+  ).toBeVisible()
+  await dialog
+    .getByRole("button", { name: "Confirm renewal preference" })
+    .click()
+  await expect(dialog).toHaveCount(0)
+  await expect(
+    page.getByRole("button", { name: "Cancel renewal", exact: true })
+  ).toBeVisible()
+  assert.equal(state.users[0].subscription.cancelAtPeriodEnd, false)
+  assert.equal(state.users[0].subscription.endsAt, endsAt)
+  assert.equal(state.customerMutations.at(-1).expectedRevision, 2)
+})
+
+test("customer renewal conflicts require a refreshed account and a new confirmation", async () => {
+  await page.goto(`${origin}/account`)
+  await page
+    .getByRole("button", { name: "Cancel renewal", exact: true })
+    .click()
+  state.users[0].subscription.revision++
+  await page
+    .getByRole("button", { name: "Confirm cancellation", exact: true })
+    .click()
+  const dialog = page.getByRole("dialog")
+  await expect(dialog.getByRole("alert")).toContainText("Revision conflict")
+  await expect(
+    dialog.getByRole("button", { name: "Confirm cancellation", exact: true })
+  ).toBeDisabled()
+  assert.equal(state.users[0].subscription.cancelAtPeriodEnd, false)
+  await dialog
+    .getByRole("button", { name: "Refresh account", exact: true })
+    .click()
+  await expect(dialog).toHaveCount(0)
+  await page
+    .getByRole("button", { name: "Cancel renewal", exact: true })
+    .click()
+  await page
+    .getByRole("button", { name: "Confirm cancellation", exact: true })
+    .click()
+  await expect(dialog).toHaveCount(0)
+  assert.equal(state.users[0].subscription.cancelAtPeriodEnd, true)
+  assert.equal(state.customerMutations.at(-1).expectedRevision, 2)
 })
 
 test("customer request forms preserve keyboard focus and handle rate and session errors", async () => {
@@ -971,12 +1742,9 @@ test("customer request forms preserve keyboard focus and handle rate and session
     .getByRole("button", { name: "Request renewal", exact: true })
     .click()
   const dialog = page.getByRole("dialog")
-  assert.equal(
-    await dialog
-      .getByRole("button", { name: "Cancel" })
-      .evaluate((button) => document.activeElement === button),
-    true
-  )
+  await expect(
+    dialog.getByRole("button", { name: "Cancel", exact: true })
+  ).toBeFocused()
   await page.keyboard.press("Tab")
   assert.equal(
     await dialog.evaluate((element) =>
@@ -1025,6 +1793,10 @@ test("the admin request queue reviews requests without mutating subscription acc
     },
   ]
   await page
+    .getByRole("navigation", { name: "Admin navigation" })
+    .getByRole("button", { name: /^Operations/ })
+    .click()
+  await page
     .getByRole("button", { name: "Refresh requests", exact: true })
     .click()
   await page
@@ -1041,10 +1813,11 @@ test("the admin request queue reviews requests without mutating subscription acc
   assert.equal(await page.evaluate(() => window.injected), undefined)
   await page.getByRole("button", { name: "Open account", exact: true }).click()
   await expect(
-    page.getByRole("dialog").getByRole("heading", { name: "Account details" })
+    page.getByRole("heading", { name: "User management", exact: true })
   ).toBeVisible()
   await page
-    .getByRole("button", { name: "Close account dialog", exact: true })
+    .getByRole("navigation", { name: "Admin navigation" })
+    .getByRole("button", { name: /^Operations/ })
     .click()
   await page
     .getByRole("button", { name: "Review request", exact: true })
@@ -1090,6 +1863,10 @@ test("request conflicts require refresh and daily reminder checks require config
     },
   ]
   await page
+    .getByRole("navigation", { name: "Admin navigation" })
+    .getByRole("button", { name: /^Operations/ })
+    .click()
+  await page
     .getByRole("button", { name: "Refresh requests", exact: true })
     .click()
   await page
@@ -1103,6 +1880,10 @@ test("request conflicts require refresh and daily reminder checks require config
   await expect(
     page.getByRole("button", { name: "Save review", exact: true })
   ).toBeDisabled()
+  await page
+    .getByRole("navigation", { name: "Admin navigation" })
+    .getByRole("button", { name: /^Operations/ })
+    .click()
   await page
     .getByRole("button", { name: "Refresh requests", exact: true })
     .click()
@@ -1148,6 +1929,10 @@ test("queue account details preserve verification and signup metadata", async ()
   state.users[0].emailVerified = false
   state.users[0].createdAt = Date.now() - 20 * day
   state.reminderDeletedUser = true
+  await page
+    .getByRole("navigation", { name: "Admin navigation" })
+    .getByRole("button", { name: /^Operations/ })
+    .click()
   await page.getByRole("button", { name: "Refresh renewal queue" }).click()
   const reminders = page.getByRole("region", { name: "Daily renewal queue" })
   await expect(
@@ -1157,18 +1942,19 @@ test("queue account details preserve verification and signup metadata", async ()
     reminders.getByRole("button", { name: "Review access", exact: true })
   ).toHaveCount(1)
   await page.getByRole("button", { name: "Review access", exact: true }).click()
-  const dialog = page.getByRole("dialog")
-  await expect(dialog.getByText("Not verified", { exact: true })).toBeVisible()
+  const profile = page.getByRole("region", {
+    name: "User management",
+    exact: true,
+  })
   await expect(
-    dialog
-      .locator("dl > div")
-      .filter({ has: page.getByText("Joined", { exact: true }) })
-      .locator("time")
-  ).toHaveAttribute(
-    "datetime",
-    new Date(state.users[0].createdAt).toISOString()
-  )
-  await dialog.getByRole("button", { name: "Close account dialog" }).click()
+    profile.getByText("Email unverified", { exact: true })
+  ).toBeVisible()
+  const joined = new Date(state.users[0].createdAt).toLocaleString("en-US", {
+    timeZone: "America/New_York",
+    dateStyle: "medium",
+    timeStyle: "short",
+  })
+  await expect(profile.getByText(joined, { exact: true })).toBeVisible()
   state.accountRequests = [
     {
       id: "request_00000000-0000-4000-8000-000000000003",
@@ -1200,6 +1986,10 @@ test("queue account details preserve verification and signup metadata", async ()
     },
   ]
   await page
+    .getByRole("navigation", { name: "Admin navigation" })
+    .getByRole("button", { name: /^Operations/ })
+    .click()
+  await page
     .getByRole("button", { name: "Refresh requests", exact: true })
     .click()
   const queue = page.getByRole("region", { name: /Customer requests/ })
@@ -1214,16 +2004,10 @@ test("queue account details preserve verification and signup metadata", async ()
     .filter({ hasText: "alice@example.test" })
     .getByRole("button", { name: "Open account", exact: true })
     .click()
-  await expect(dialog.getByText("Not verified", { exact: true })).toBeVisible()
   await expect(
-    dialog
-      .locator("dl > div")
-      .filter({ has: page.getByText("Joined", { exact: true }) })
-      .locator("time")
-  ).toHaveAttribute(
-    "datetime",
-    new Date(state.users[0].createdAt).toISOString()
-  )
+    profile.getByText("Email unverified", { exact: true })
+  ).toBeVisible()
+  await expect(profile.getByText(joined, { exact: true })).toBeVisible()
 })
 
 test("request review retries transient failures and ignores history from a closed review", async () => {
@@ -1243,6 +2027,10 @@ test("request review retries transient failures and ignores history from a close
       handledBy: "",
     },
   ]
+  await page
+    .getByRole("navigation", { name: "Admin navigation" })
+    .getByRole("button", { name: /^Operations/ })
+    .click()
   await page
     .getByRole("button", { name: "Refresh requests", exact: true })
     .click()
@@ -1285,6 +2073,10 @@ test("non-JSON unauthorized responses disable customer and reminder mutations un
       body: "Unauthorized",
     })
   )
+  await page
+    .getByRole("navigation", { name: "Admin navigation" })
+    .getByRole("button", { name: /^Operations/ })
+    .click()
   await page.getByRole("button", { name: "Refresh renewal queue" }).click()
   const reminders = page.getByRole("region", { name: "Daily renewal queue" })
   await expect(reminders.getByRole("alert")).toContainText("session expired")
@@ -1311,4 +2103,32 @@ test("non-JSON unauthorized responses disable customer and reminder mutations un
   await expect(
     page.getByRole("button", { name: "Submit request", exact: true })
   ).toBeDisabled()
+})
+
+test("waitlist session expiry provides a sign-in path and recovers after refreshing", async () => {
+  await page.route("**/api/admin/waitlist?*", (route) =>
+    route.fulfill({
+      status: 401,
+      contentType: "text/plain",
+      body: "Unauthorized",
+    })
+  )
+  await page.goto(`${origin}/admin?view=waitlist`)
+  const waitlist = page.getByRole("region", {
+    name: "Waitlist signups",
+    exact: true,
+  })
+  await expect(waitlist.getByRole("alert")).toContainText(/session expired/i)
+  await expect(waitlist.getByRole("link", { name: "Sign in" })).toHaveAttribute(
+    "target",
+    "_blank"
+  )
+  await page.unroute("**/api/admin/waitlist?*")
+  await page
+    .getByRole("button", { name: "Refresh waitlist", exact: true })
+    .click()
+  await expect(
+    page.getByText("wendy@example.test", { exact: true })
+  ).toBeVisible()
+  await expect(waitlist.getByRole("alert")).toHaveCount(0)
 })

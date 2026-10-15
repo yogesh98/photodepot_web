@@ -240,7 +240,7 @@ export async function handleAccountPairing(
       return json(
         {
           error:
-            "This sign-in request is no longer available, or both Mac slots are in use. Start again or request a Mac reset from your account page.",
+            "This sign-in request is no longer available, or both Mac slots are in use. Start again or remove a Mac from your account page.",
         },
         409
       )
@@ -257,7 +257,9 @@ export async function handleAccountPairing(
           status: "active",
           challenge: row.challenge,
           revision: binding.subscription.revision,
-          ...(request.headers.get("Photodepot-Receipt-Version") === "2"
+          ...(["2", "3"].includes(
+            request.headers.get("Photodepot-Receipt-Version") ?? ""
+          )
             ? { subscriptionEndsAt: binding.subscription.endsAt }
             : {}),
         },
@@ -386,7 +388,7 @@ export async function handleAccountApproval(request: Request, env: Env) {
       return respond(
         page(
           "Mac limit reached",
-          `<p>Signed in as <strong>${escape(user.email)}</strong>.</p><p>Your account already has ${subscription.deviceLimit} connected Macs.</p><p><a href="/account">Open your account page</a> to request a Mac reset before connecting another Mac.</p>${signOutForm}`,
+          `<p>Signed in as <strong>${escape(user.email)}</strong>.</p><p>Your account already has ${subscription.deviceLimit} connected Macs.</p><p><a href="/account">Open your account page</a> to remove a Mac before connecting another Mac.</p>${signOutForm}`,
           409
         )
       )

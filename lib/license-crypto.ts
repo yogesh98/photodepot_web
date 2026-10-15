@@ -78,6 +78,7 @@ export function signedReceipt(
     challenge: string
     revision: number
     subscriptionEndsAt?: number
+    revocationReason?: "device-removed"
   },
   now = Date.now(),
   maxExpiresAt?: number
@@ -105,10 +106,15 @@ export function signedReceipt(
     }
   }
   const receipt = envelope(details)
-  if (details.subscriptionEndsAt === undefined) return receipt
+  if (
+    details.subscriptionEndsAt === undefined &&
+    details.revocationReason === undefined
+  )
+    return receipt
   // Existing collaboration guests parse a strict v1 payload. New hosts receive
   // the same signed grant without the optional account date for their proofs.
   const compatibleDetails = { ...details }
   delete compatibleDetails.subscriptionEndsAt
+  delete compatibleDetails.revocationReason
   return { ...receipt, collaborationReceipt: envelope(compatibleDetails) }
 }

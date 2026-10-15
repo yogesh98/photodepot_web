@@ -1,11 +1,11 @@
 # Photodepot installers
 
-Version 0.2.3 separates development storage and uses the Photodepot name in
-production Keychain entries. Keep both signed, notarized
-installers here, outside the public website:
+Version 0.2.4 automatically ends local access when an online Mac receives its
+signed removal, without restarting the app. Keep both signed, notarized installers
+here, outside the public website:
 
-- `photodepot-0.2.3-arm64.dmg`
-- `photodepot-0.2.3-x64.dmg`
+- `photodepot-0.2.4-arm64.dmg`
+- `photodepot-0.2.4-x64.dmg`
 
 DMGs are ignored by Git. `pnpm downloads:upload` uploads them to the private R2
 bucket, and `pnpm downloads:upload:local` seeds local development storage.

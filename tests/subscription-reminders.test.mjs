@@ -9,6 +9,7 @@ import {
 import {
   setSubscription,
   changeSubscription,
+  changeSubscriptionRenewal,
 } from "../lib/subscription-store.ts"
 import { handleScheduledReminders } from "../functions/api/internal/subscription-reminders.ts"
 import { triggerReminders } from "../workers/subscription-reminders.ts"
@@ -455,4 +456,49 @@ test("internal triggers require a dedicated secret and scheduler obeys bounded b
     }),
     /Invalid/
   )
+})
+
+test("renewal cancellation suppresses new reminders and stops queued delivery without revoking access", async () => {
+  const canceled = await grant("user_canceled_renewal")
+  await changeSubscriptionRenewal(
+    env.DB,
+    canceled.userId,
+    "cancel-renewal",
+    canceled.revision,
+    "customer@example.test",
+    now
+  )
+  const active = await grant("user_cancel_during_lookup")
+  let sent = 0
+  const previousFetch = globalThis.fetch
+  globalThis.fetch = async (input, options) => {
+    if (String(input).includes(`/users/${active.userId}`))
+      await changeSubscriptionRenewal(
+        env.DB,
+        active.userId,
+        "cancel-renewal",
+        active.revision,
+        "customer@example.test",
+        now
+      )
+    return previousFetch(input, options)
+  }
+  try {
+    const result = await runSubscriptionReminders(env, {
+      now,
+      fetch: async () => {
+        sent++
+        return Response.json({ id: "should-not-send" })
+      },
+    })
+    assert.equal(sent, 0)
+    assert.equal(result.sent, 0)
+    assert.equal(result.cancelled, 1)
+    const reminders = await rows()
+    assert.equal(reminders.length, 1)
+    assert.equal(reminders[0].user_id, active.userId)
+    assert.equal(reminders[0].status, "cancelled")
+  } finally {
+    globalThis.fetch = previousFetch
+  }
 })

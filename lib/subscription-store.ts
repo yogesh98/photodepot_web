@@ -23,6 +23,7 @@ export interface SubscriptionRow {
   revision: number
   notes: string
   binding_revision: number
+  canceled_at?: number | null
   current_devices_json?: string
 }
 
@@ -103,6 +104,8 @@ export function subscriptionSummary(
     bindingRevision: row.binding_revision,
     devices: JSON.parse(row.current_devices_json ?? "[]"),
     deviceLimit: SUBSCRIPTION_DEVICE_LIMIT,
+    cancelAtPeriodEnd: row.canceled_at != null,
+    canceledAt: row.canceled_at ?? null,
   }
 }
 
@@ -174,11 +177,25 @@ export async function getSubscriptionOverview(
        COALESCE(SUM(status = 'active' AND end_at <= ?), 0) AS expired,
        COALESCE(SUM(status = 'revoked'), 0) AS revoked,
        COALESCE(SUM(status = 'active' AND end_at > ? AND end_at <= ?), 0) AS expiringSoon,
+       COALESCE(SUM(status = 'active' AND end_at > ? AND canceled_at IS NOT NULL), 0) AS canceling,
+       (SELECT COUNT(*) FROM waitlist) AS waitlistTotal,
+       (SELECT COUNT(*) FROM waitlist WHERE julianday(created_at) >= julianday(?) AND julianday(created_at) <= julianday(?)) AS waitlistLast30Days,
+       (SELECT COUNT(*) FROM subscription_requests WHERE status IN ('pending', 'acknowledged')) AS openRequests,
        (SELECT COUNT(*) FROM account_devices d JOIN subscriptions owner ON owner.user_id = d.user_id
          WHERE d.active = 1 AND d.binding_revision = owner.binding_revision) AS assignedMacs
        FROM subscriptions`
     )
-    .bind(now, now, now, now, now, expiringAt)
+    .bind(
+      now,
+      now,
+      now,
+      now,
+      now,
+      expiringAt,
+      now,
+      new Date(Math.max(0, now - 30 * millisecondsPerDay)).toISOString(),
+      new Date(now).toISOString()
+    )
     .first<Omit<SubscriptionOverview, "asOf" | "expiringWithinDays">>()
   if (!row) throw new Error("Subscription overview is unavailable")
   return { ...row, asOf: now, expiringWithinDays: SUBSCRIPTION_EXPIRING_DAYS }
@@ -189,7 +206,14 @@ async function mutateWithAudit(
   mutation: D1PreparedStatement,
   userId: string,
   expectedRevision: number,
-  action: "set" | "revoke" | "restore" | "extend" | "update-notes",
+  action:
+    | "set"
+    | "revoke"
+    | "restore"
+    | "extend"
+    | "update-notes"
+    | "cancel-renewal"
+    | "resume-renewal",
   actor: string,
   detail: string,
   reason: string,
@@ -394,6 +418,58 @@ export async function updateSubscriptionNotes(
     actor,
     `Updated administrator notes: ${normalizedNotes || "(cleared)"}`,
     normalizedReason,
+    now
+  )
+}
+
+/** Records manual renewal intent without changing access, Mac assignments or billing. */
+export async function changeSubscriptionRenewal(
+  database: D1Database,
+  userId: string,
+  action: "cancel-renewal" | "resume-renewal",
+  expectedRevision: number,
+  actor: string,
+  now = Date.now(),
+  reason?: string
+): Promise<SubscriptionSummary> {
+  validateMutation(userId, expectedRevision, actor, now)
+  if (
+    !["cancel-renewal", "resume-renewal"].includes(action) ||
+    expectedRevision < 1
+  )
+    throw new TypeError("Invalid renewal preference.")
+  const existing = await getSubscription(database, userId, now)
+  if (!existing || existing.revision !== expectedRevision)
+    throw new SubscriptionConflictError()
+  if (existing.status !== "active")
+    throw new TypeError(
+      "Renewal preferences can only be changed while access is active."
+    )
+  if (existing.cancelAtPeriodEnd === (action === "cancel-renewal"))
+    throw new TypeError(
+      action === "cancel-renewal"
+        ? "Renewal is already canceled."
+        : "Renewal is already available."
+    )
+  const cancel = action === "cancel-renewal"
+  const mutation = database
+    .prepare(
+      `UPDATE subscriptions SET canceled_at = ?, updated_at = ?, revision = revision + 1
+     WHERE user_id = ? AND revision = ? AND status = 'active' AND end_at > ?
+     AND ${cancel ? "canceled_at IS NULL" : "canceled_at IS NOT NULL"} RETURNING *`
+    )
+    .bind(cancel ? now : null, now, userId, expectedRevision, now)
+  return mutateWithAudit(
+    database,
+    mutation,
+    userId,
+    expectedRevision,
+    action,
+    actor,
+    cancel
+      ? "Canceled renewal; access remains available until the current expiration."
+      : "Resumed eligibility for manual renewal; no automatic charge or extension.",
+    subscriptionReason(reason),
     now
   )
 }

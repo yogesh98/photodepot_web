@@ -11,17 +11,13 @@ import {
   sameOrigin,
   type Env,
 } from "../../../lib/cloudflare.ts"
-import {
-  listWorkOSUsers,
-  getWorkOSUser,
-  WORKOS_USER_ID,
-} from "../../../lib/workos-users.ts"
+import { getWorkOSUser, WORKOS_USER_ID } from "../../../lib/workos-users.ts"
 import {
   changeSubscription,
+  changeSubscriptionRenewal,
   getSubscription,
   getSubscriptionOverview,
   listSubscriptionAudit,
-  listSubscriptions,
   setSubscription,
   SubscriptionConflictError,
   updateSubscriptionNotes,
@@ -30,6 +26,8 @@ import {
   listSubscriptionDevices,
   resetSubscriptionDevice,
 } from "../../../lib/subscription-devices.ts"
+import { listAdminUsers } from "../../../lib/admin-directory.ts"
+import { listUserAdminRequests } from "../../../lib/account-requests.ts"
 
 export async function handleAdminSubscriptions(request: Request, env: Env) {
   const auth = await authenticateLicenseAdmin(request, env)
@@ -46,35 +44,38 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
         const userId = query.get("userId") ?? ""
         if (!WORKOS_USER_ID.test(userId))
           return json({ error: "Invalid user." }, 400)
-        const [subscription, devices, audit] = await Promise.all([
-          getSubscription(env.DB, userId, now),
-          listSubscriptionDevices(env.DB, userId),
-          listSubscriptionAudit(env.DB, userId),
-        ])
-        return json({ subscription, devices, audit })
+        const [user, subscription, devices, audit, requests] =
+          await Promise.all([
+            getWorkOSUser(env, userId),
+            getSubscription(env.DB, userId, now),
+            listSubscriptionDevices(env.DB, userId),
+            listSubscriptionAudit(env.DB, userId),
+            listUserAdminRequests(env.DB, userId),
+          ])
+        if (!user)
+          return json({ error: "This user no longer exists in WorkOS." }, 404)
+        return json({
+          user: {
+            id: user.id,
+            email: user.email,
+            firstName: user.firstName,
+            lastName: user.lastName,
+            emailVerified: user.emailVerified,
+            createdAt: Date.parse(user.createdAt),
+            subscription,
+          },
+          subscription,
+          devices,
+          audit,
+          requests,
+        })
       }
-      const cursor = query.get("cursor") ?? undefined
-      if (cursor && !WORKOS_USER_ID.test(cursor))
-        return json({ error: "Invalid page." }, 400)
       const [page, overview] = await Promise.all([
-        listWorkOSUsers(env, cursor),
+        listAdminUsers(env, query, now),
         getSubscriptionOverview(env.DB, now),
       ])
-      const subscriptions = await listSubscriptions(
-        env.DB,
-        page.users.map((user) => user.id),
-        now
-      )
       return json({
-        users: page.users.map((user) => ({
-          id: user.id,
-          email: user.email,
-          firstName: user.firstName,
-          lastName: user.lastName,
-          emailVerified: user.emailVerified,
-          createdAt: Date.parse(user.createdAt),
-          subscription: subscriptions.get(user.id) ?? null,
-        })),
+        users: page.users,
         nextCursor: page.nextCursor,
         overview,
         billingMode: "manual",
@@ -112,6 +113,8 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
         "restore",
         "reset-device",
         "update-notes",
+        "cancel-renewal",
+        "resume-renewal",
       ].includes(body.action as string)
     )
       return json({ error: "Invalid subscription action." }, 400)
@@ -194,36 +197,46 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
             auth.email,
             now
           )
-        : body.action === "update-notes"
-          ? await updateSubscriptionNotes(
+        : body.action === "cancel-renewal" || body.action === "resume-renewal"
+          ? await changeSubscriptionRenewal(
               env.DB,
               user.id,
-              body.notes as string,
+              body.action,
               revision,
               auth.email,
               now,
               reason
             )
-          : body.action === "reset-device"
-            ? await resetSubscriptionDevice(
+          : body.action === "update-notes"
+            ? await updateSubscriptionNotes(
                 env.DB,
                 user.id,
+                body.notes as string,
                 revision,
                 auth.email,
                 now,
-                reason,
-                body.deviceId as string | undefined
+                reason
               )
-            : await changeSubscription(
-                env.DB,
-                user.id,
-                body.action as "extend" | "revoke" | "restore",
-                revision,
-                auth.email,
-                body.durationDays as number | undefined,
-                now,
-                { reason, endsAt: body.endsAt as number | undefined }
-              )
+            : body.action === "reset-device"
+              ? await resetSubscriptionDevice(
+                  env.DB,
+                  user.id,
+                  revision,
+                  auth.email,
+                  now,
+                  reason,
+                  body.deviceId as string | undefined
+                )
+              : await changeSubscription(
+                  env.DB,
+                  user.id,
+                  body.action as "extend" | "revoke" | "restore",
+                  revision,
+                  auth.email,
+                  body.durationDays as number | undefined,
+                  now,
+                  { reason, endsAt: body.endsAt as number | undefined }
+                )
     return json(
       { subscription },
       body.action === "set" && revision === 0 ? 201 : 200

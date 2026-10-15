@@ -237,6 +237,11 @@ test("the built Pages Worker enforces organization-scoped Owner authorization on
     { role: "member", roles: ["org-owner"] },
   ]) {
     for (const path of [
+      "/admin",
+      "/admin/",
+      "/admin.html",
+      "/admin.txt",
+      "/admin/__next._full.txt",
       "/admin/licenses",
       "/admin/subscriptions",
       "/admin/subscriptions.html",
@@ -431,7 +436,13 @@ test("the built Pages Worker denies subscription administration after Owner memb
       return new Response("dashboard")
     }
   )
-  for (const path of ["/admin/subscriptions", "/api/admin/subscriptions"]) {
+  for (const path of [
+    "/admin",
+    "/admin.html",
+    "/admin.txt",
+    "/admin/subscriptions",
+    "/api/admin/subscriptions",
+  ]) {
     const response = await worker.dispatchFetch(`${origin}${path}`, {
       headers: { cookie: await sessionCookie(jwt({ exp: 1 })) },
     })
@@ -499,6 +510,9 @@ test("the built Pages Worker fails closed when WorkOS session configuration is m
     { WORKOS_COOKIE_PASSWORD: "" }
   )
   for (const path of [
+    "/admin",
+    "/admin.html",
+    "/admin.txt",
     "/admin/licenses",
     "/admin/subscriptions",
     "/api/admin/licenses",
@@ -606,4 +620,68 @@ test("the built Pages Worker preserves sessions during WorkOS key and refresh ou
   )
   assert.equal(refreshFailure.status, 503)
   assert.equal(refreshFailure.headers.get("set-cookie"), null)
+})
+
+test("the built Pages Worker returns dashboard access for the selected signed-in identity", async (t) => {
+  let activeOwner = true
+  const worker = runtime(
+    t,
+    (request) => {
+      if (request.url === jwksUrl) return Response.json({ keys: [jwk] })
+      const url = new URL(request.url)
+      assert.equal(url.pathname, "/user_management/organization_memberships")
+      assert.equal(url.searchParams.get("user_id"), userId)
+      assert.equal(url.searchParams.get("organization_id"), organizationId)
+      assert.equal(url.searchParams.get("statuses"), "active")
+      assert.equal(
+        request.headers.get("authorization"),
+        "Bearer sk_test_runtime_membership"
+      )
+      return Response.json({
+        data: activeOwner
+          ? [
+              {
+                object: "organization_membership",
+                id: "om_runtime_test",
+                organization_id: organizationId,
+                organization_name: "Photodepot Administration",
+                user_id: userId,
+                status: "active",
+                role: { slug: "owner" },
+              },
+            ]
+          : [],
+        list_metadata: { before: null, after: null },
+      })
+    },
+    undefined,
+    { WORKOS_API_KEY: "sk_test_runtime_membership" }
+  )
+  const accountCookie = (
+    await sessionCookie(jwt({ org_id: undefined, role: undefined }), {
+      audience: "account",
+    })
+  ).replace("__Host-photodepot-admin=", "__Host-photodepot-account=")
+  const cookie = `${accountCookie}; ${await sessionCookie()}`
+  for (const dashboard of ["individual", "admin"]) {
+    const response = await worker.dispatchFetch(
+      `${origin}/api/account/dashboard-access?dashboard=${dashboard}`,
+      { headers: { cookie } }
+    )
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), {
+      user: { id: userId, email: adminEmail },
+      canAccessAdmin: true,
+    })
+    assert.equal(response.headers.get("cache-control"), "private, no-store")
+  }
+  activeOwner = false
+  const removed = await worker.dispatchFetch(
+    `${origin}/api/account/dashboard-access?dashboard=individual`,
+    { headers: { cookie } }
+  )
+  assert.deepEqual(await removed.json(), {
+    user: { id: userId, email: adminEmail },
+    canAccessAdmin: false,
+  })
 })

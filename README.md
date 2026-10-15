@@ -21,7 +21,7 @@ local network, and changes are shared across the project.
 Ingest and export remain with the host. The complete Ingest, Cull, Organize, and
 Export workflow is also explained. Joining the waitlist
 is its only call to action. The original download page lives at `/tester`, with
-its Apple Silicon and Intel download buttons for version 0.2.3. An active account
+its Apple Silicon and Intel download buttons for version 0.2.4. An active account
 subscription or compatible license is required in the desktop app to open or
 create local projects.
 
@@ -95,15 +95,16 @@ signs are literal; there is no Next.js-style variable expansion.
 
 ### Downloads and releases
 
-Version 0.2.3 separates development storage and uses the Photodepot name in
-production Keychain entries. Account sign-in, administrator-assigned subscriptions,
-and up to two connected Macs remain available. Both signed, notarized installers
-are published together.
+Version 0.2.4 lets customers remove their own Mac from the account dashboard.
+An online Mac automatically saves and closes local work when it receives the signed
+removal, without restarting the app. Account sign-in, administrator-assigned
+subscriptions, and up to two connected Macs remain available. Both signed,
+notarized installers are published together.
 
 For that release, keep DMGs in the ignored `downloads/` folder, **outside `public/`**:
 
-- `photodepot-0.2.3-arm64.dmg`
-- `photodepot-0.2.3-x64.dmg`
+- `photodepot-0.2.4-arm64.dmg`
+- `photodepot-0.2.4-x64.dmg`
 
 Update the versioned keys in `lib/download-files.ts` for a new release, upload
 both installers, then deploy. Upload commands validate both files before writing
@@ -196,8 +197,8 @@ and static asset leakage prevention.
 
 The dashboard and customer account browser tests run against the built site and
 isolated mock APIs. They cover manual grants, extensions, notes, revocation,
-restoration, individual Mac resets, customer requests, admin review, reminder
-delivery settings, filtering, pagination, stale edits, session errors, and mobile keyboard
+restoration, individual Mac resets, direct customer Mac removal, renewal requests, admin review, reminder
+delivery settings, server filtering, waitlist export, cancel/resume renewal, linkable user profiles, pagination, stale edits, session errors, and mobile keyboard
 access. Run them separately with an LTS Node.js release:
 
 ```sh
@@ -222,7 +223,7 @@ Photography credits are in `public/photography/pexels/README.md`; the Inter font
 
 ## Account subscriptions
 
-Subscription administration is available at `/admin/subscriptions`. Creating an account or signing in does not grant access. An Owner must manually assign Trial or Standard access to each approved account. Signups never receive administration membership. Only the `owner` role in `WORKOS_ADMIN_ORGANIZATION_ID` can manage access. See [subscription setup and protocol](deploy/LICENSES.md).
+Subscription administration is available at `/admin`. The previous `/admin/subscriptions` and `/admin/licenses` URLs still open the subscription directory. Creating an account or signing in does not grant access. An Owner must manually assign Trial or Standard access to each approved account. Signups never receive administration membership. Only the `owner` role in `WORKOS_ADMIN_ORGANIZATION_ID` can manage access. See [subscription setup and protocol](deploy/LICENSES.md).
 
 Set `WORKOS_CLIENT_ID`, `WORKOS_ADMIN_ORGANIZATION_ID`,
 `WORKOS_REDIRECT_URI=https://photodepot.app/api/auth/callback`, and a random
@@ -230,23 +231,46 @@ Set `WORKOS_CLIENT_ID`, `WORKOS_ADMIN_ORGANIZATION_ID`,
 The server uses PKCE and encrypted HttpOnly session cookies. Add the server-only
 encrypted `WORKOS_API_KEY` secret for listing users and checking account status.
 Never include the key in browser assets or desktop builds. Apply D1
-migrations through `0009` before starting the updated backend. The existing
+migrations through `0010_subscription_renewal_preferences.sql` before starting the updated backend. Migration 0010 adds cancellation preferences and preserves existing access, device assignments, and audit history. The existing
 `https://photodepot.app/api/account/webhook` endpoint still acknowledges signed
 WorkOS notifications when `WORKOS_WEBHOOK_SECRET` is configured, but it does not
 read or change subscriptions. A webhook is not required for manual access grants.
 
-The dashboard shows whole-database subscription totals, trials,
-expirations in the next seven days, and Mac assignments. Search and status/type
-filters apply to loaded WorkOS users, with explicit pagination. Admins can grant
-Trial or Standard access by duration or exact end date, extend, revoke, restore,
-reset an individual Mac or both Macs, record a reason, keep internal notes, and
-inspect audit history. The customer request queue shows renewals and requests to
-remove a specific Mac. Admins can acknowledge, complete, or decline a request with
-internal review notes. Review status changes never grant access or reset a device;
-apply those changes from account details, then complete the request.
-Visible pages refresh every 30 seconds while no dialog or mutation is open.
-Revision checks reject stale writes. If a session expires, Sign in opens a new
-tab; return and select Refresh. No payment provider or charging flow is connected.
+The admin workspace has Overview, Subscriptions, Users, Waitlist, and Operations
+views. Dashboard counts cover the complete database, including active trials,
+standard subscriptions, canceled renewals that still have access, upcoming
+expirations, waitlist signups, open requests, and Mac assignments. Search and
+subscription filters run on the server across the WorkOS directory. Filtered
+requests scan at most ten provider pages; a continuation remains available when
+more accounts need to be searched, even if the current result is empty.
+
+Each user has a linkable management view at `/admin?view=users&user=USER_ID`,
+with identity information, subscription dates, renewal preference, notes, Macs,
+requests, and activity history. Admins can grant Trial or Standard access by
+duration or exact date, extend, revoke, restore, reset an individual Mac or both
+Macs, and record reasons and internal notes. Waitlist search includes name,
+email, and referral source, with signup dates, source counts, and a CSV export
+of exactly the loaded results. CSV cells are escaped against formula execution.
+
+Operations contains customer requests and renewal reminders. Admins can
+acknowledge, complete, or decline a request with internal review notes. Review
+status changes never grant access or reset a device; apply those changes from
+user management, then complete the request. Visible directory pages refresh
+every 30 seconds while no profile, dialog, or mutation is open. Revision checks
+reject stale writes. Expired sessions show a sign-in link and refresh recovery.
+No payment provider or charging flow is connected.
+
+The UI reuses the desktop app's shadcn Base Mira / stone configuration and
+component source, including the `sidebar-07` block on both dashboards. Owners
+can switch between Individual and Admin in the sidebar header. The switcher is
+hidden until `/api/account/dashboard-access` confirms access. Individual sessions
+check the current user's active Owner membership in the configured administration
+organization; missing configuration or provider outages keep it hidden. Admin
+sessions use the same authorization as the protected dashboard. The separate
+account and admin session cookies remain audience-bound. Its sidebar, summary metrics, and table organization were
+informed by [Subscription Management & Tracking Dashboard](https://dribbble.com/shots/18902481-Subscription-Management-Tracking-Dashboard)
+and [Invoice Dashboard](https://dribbble.com/shots/20606044-Invoice-Dashboard-Subscription-management).
+No visual assets or sample customer records from those designs are shipped.
 
 Desktop account sign-in opens WorkOS in the external browser and asks the user
 to approve the Mac. The desktop receives a signed finite receipt, with no WorkOS
@@ -254,8 +278,14 @@ tokens or API key. One account supports up to two Macs. An individual reset
 releases only the selected Mac and leaves the other Mac’s access intact. Resetting
 all Macs invalidates both assignments and earlier approved pairing requests.
 Receipt expiry is capped at the subscription end
-and 48 hours. An admitted session keeps its work and collaboration until quit;
-expiry, revocation, and offline limits are enforced on the next app launch.
+and 48 hours. Ordinary subscription expiry, revocation, and offline limits retain
+the admitted session until quit. Removing a Mac is different: receipt v3 carries
+a signed `device-removed` reason that immediately closes its running local
+access when received. Updated account clients verify every 15 seconds, including
+retry after an outage, and verify again on app focus or sleep resume. Local work
+is saved, sharing and playback stop, and the Mac must complete a fresh sign-in
+and browser approval to reconnect. An offline Mac learns of removal when it can
+reach the server. Legacy verification remains on its five-minute cadence.
 Device identity and receipts use encrypted local storage, which can access macOS
 Keychain. The app exposes account sign-in and subscription access.
 
@@ -264,15 +294,26 @@ Keychain. The app exposes account sign-in and subscription access.
 Users can sign in at `/account` to view their trial or standard plan, expiry, and
 connected Macs. Account cookies are separate from admin cookies. Customers see
 only their own subscription and latest 50 requests; administrator notes, review
-notes, subscription audits, device keys, and internal revisions are excluded.
+notes, subscription audits, and device keys are excluded. A subscription revision is returned only to guard concurrent preference changes.
 
-Renewal and Mac removal requests require the signed-in account and same-origin
-JSON submission. A Mac removal must select one of that account’s current Macs.
-At most one open request is allowed per account, request type, and Mac; retries
-return the existing request instead of duplicating it. Acknowledged requests stay
-open until completed or declined. New requests are limited to five per rolling
-24 hours. Requests never immediately change access and never collect payment.
-Admin reviews use revision checks and retain a separate administrator audit.
+Users remove a connected Mac directly with a same-origin `remove-device` action,
+its device ID, and the subscription revision. The server accepts only that
+account's current assignment, invalidates its pairing epoch, records the action,
+and frees its slot. The other Mac and subscription remain unchanged. Stale edits
+require refreshing the account. New Mac removal requests are rejected; existing
+request history remains available.
+
+Renewal requests still require administrator review. Retries return the existing
+open request, with up to five new requests per rolling 24 hours. Acknowledged
+requests stay open until completed or declined. Requests never extend access or
+collect payment. Admin reviews use revision checks and retain a separate audit.
+
+Customers and Owners can cancel or resume renewal while a subscription is active.
+Canceling records an opt-out and suppresses trial renewal reminders; it does not
+revoke access, reset Macs, or change the end date. Resuming restores the renewal
+preference without extending access or collecting payment. Active canceled
+subscriptions must resume before submitting a renewal request; expired accounts
+can request a new term. These preferences and their actors appear in admin history.
 
 ### Daily renewal queue and trial reminders
 

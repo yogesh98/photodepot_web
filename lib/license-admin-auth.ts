@@ -213,16 +213,57 @@ function owner(
     return unauthenticated()
   if (
     claims.org_id !== config.organizationId ||
-    !(
-      claims.role === "owner" ||
-      (Array.isArray(claims.roles) && claims.roles.includes("owner"))
-    )
+    !hasOwnerRole(claims.role, claims.roles)
   )
     return denied()
   return {
     email: session.user.email,
     userId: session.user.id,
     sessionId: claims.sid as string,
+  }
+}
+function hasOwnerRole(role: unknown, roles: unknown) {
+  return role === "owner" || (Array.isArray(roles) && roles.includes("owner"))
+}
+/** An account session may be unscoped; check its own current membership, not an admin cookie. */
+export async function accountCanAccessLicenseAdmin(
+  auth: AdminAuth,
+  env: Env
+): Promise<boolean> {
+  const organizationId = env.WORKOS_ADMIN_ORGANIZATION_ID
+  if (
+    !organizationId ||
+    !/^org_[a-zA-Z0-9_]+$/.test(organizationId) ||
+    !env.WORKOS_API_KEY ||
+    !env.WORKOS_CLIENT_ID
+  )
+    return false
+  try {
+    const memberships = await createWorkOS({
+      apiKey: env.WORKOS_API_KEY,
+      clientId: env.WORKOS_CLIENT_ID,
+      timeout: 5000,
+      maxRetries: 0,
+    }).userManagement.listOrganizationMemberships({
+      userId: auth.userId,
+      organizationId,
+      statuses: ["active"],
+      limit: 100,
+    })
+    return memberships.data.some(
+      (membership) =>
+        membership.userId === auth.userId &&
+        membership.organizationId === organizationId &&
+        membership.status === "active" &&
+        hasOwnerRole(
+          membership.role?.slug,
+          membership.roles?.map((role) => role.slug)
+        )
+    )
+  } catch {
+    // Capabilities only control navigation. Missing provider access or an outage
+    // must keep administration hidden; its shell and APIs authenticate separately.
+    return false
   }
 }
 function account(
@@ -539,9 +580,7 @@ export async function handleAdminCallback(request: Request, env: Env) {
             "returnPath"
           )
         const returnPath =
-          config.audience === "account"
-            ? transaction.returnPath!
-            : "/admin/subscriptions"
+          config.audience === "account" ? transaction.returnPath! : "/admin"
         response = redirect(returnPath, 303)
         response.headers.append(
           "Set-Cookie",

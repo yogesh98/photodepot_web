@@ -5,6 +5,7 @@ import { after, before, beforeEach, test } from "node:test"
 import { sealData } from "iron-session"
 import { getPlatformProxy, unstable_splitSqlQuery } from "wrangler"
 import { handleAdminSubscriptions } from "../functions/api/admin/subscriptions.ts"
+import { handleAdminWaitlist } from "../functions/api/admin/waitlist.ts"
 import { setSubscription } from "../lib/subscription-store.ts"
 
 const origin = "https://photodepot.app"
@@ -158,6 +159,7 @@ beforeEach(async () => {
       "DELETE FROM account_devices",
       "DELETE FROM subscription_audit",
       "DELETE FROM subscriptions",
+      "DELETE FROM waitlist",
     ].map((sql) => env.DB.prepare(sql))
   )
 })
@@ -628,6 +630,10 @@ test("dashboard overview counts the whole subscription database rather than the 
     revoked: 1,
     expiringSoon: 1,
     assignedMacs: 0,
+    canceling: 0,
+    waitlistTotal: 0,
+    waitlistLast30Days: 0,
+    openRequests: 0,
     asOf: now,
     expiringWithinDays: 7,
   })
@@ -891,4 +897,140 @@ test("admin device identifiers are validated before WorkOS lookup and only accep
   )
   assert.equal(userRequests.length, 0)
   assert.equal(await count("subscription_audit"), 0)
+})
+
+test("server filters and search find subscriptions beyond the initial WorkOS page", async () => {
+  workosUsers = Array.from({ length: 205 }, (_, index) =>
+    user(`user_search_${index}`, `person${index}@example.test`)
+  )
+  listPageSize = 20
+  await api(
+    setBody("user_search_204", {
+      type: "regular",
+      notes: "Priority portrait studio",
+    })
+  )
+  const canceled = await api({
+    action: "cancel-renewal",
+    userId: "user_search_204",
+    expectedRevision: 1,
+  })
+  assert.equal(canceled.status, 200)
+  assert.equal((await canceled.json()).subscription.cancelAtPeriodEnd, true)
+  // Ten source pages are a bounded scan; its cursor must not imply an empty directory.
+  const initial = await (await api(undefined, "?filter=canceling")).json()
+  assert.deepEqual(initial.users, [])
+  assert.equal(initial.overview.canceling, 1)
+  assert.equal(initial.nextCursor, "user_search_199")
+  const next = await (
+    await api(undefined, `?filter=canceling&cursor=${initial.nextCursor}`)
+  ).json()
+  assert.deepEqual(
+    next.users.map(({ id }) => id),
+    ["user_search_204"]
+  )
+  assert.equal(next.nextCursor, null)
+  const searched = await (
+    await api(undefined, "?q=person204&cursor=user_search_199")
+  ).json()
+  assert.equal(searched.users[0].id, "user_search_204")
+  const notesSearch = await (
+    await api(undefined, "?q=portrait%20studio&cursor=user_search_199")
+  ).json()
+  assert.equal(notesSearch.users[0].id, "user_search_204")
+  for (const query of ["?filter=paid", `?q=${"x".repeat(201)}`])
+    assert.equal((await api(undefined, query)).status, 400)
+  const stale = await api({
+    action: "resume-renewal",
+    userId: "user_search_204",
+    expectedRevision: 1,
+  })
+  assert.equal(stale.status, 409)
+  const resumed = await api({
+    action: "resume-renewal",
+    userId: "user_search_204",
+    expectedRevision: 2,
+  })
+  assert.equal(resumed.status, 200)
+  assert.equal((await resumed.json()).subscription.cancelAtPeriodEnd, false)
+})
+
+test("waitlist is Owner-only, globally searchable, paginated and counted independently of the current page", async () => {
+  const path = `${origin}/api/admin/waitlist`
+  for (const [value, status] of [
+    [undefined, 401],
+    [await cookie({}, "account"), 401],
+    [await cookie({ role: "member" }), 403],
+  ]) {
+    const response = await handleAdminWaitlist(
+      new Request(path, { headers: value ? { cookie: value } : {} }),
+      env
+    )
+    assert.equal(response.status, status)
+    assert.equal(response.headers.get("cache-control"), "private, no-store")
+  }
+  const now = Date.now()
+  await env.DB.batch(
+    Array.from({ length: 55 }, (_, index) =>
+      env.DB.prepare(
+        "INSERT INTO waitlist (first_name,last_name,email,heard_about_us,created_at) VALUES (?,?,?,?,?)"
+      ).bind(
+        `Person ${index}`,
+        index === 0 ? "Unique" : null,
+        `wait${index}@example.test`,
+        index % 2 ? "Friend" : "Search",
+        new Date(now - (index < 5 ? 40 : 1) * day).toISOString()
+      )
+    )
+  )
+  const owner = await cookie()
+  const read = (query = "") =>
+    handleAdminWaitlist(
+      new Request(path + query, { headers: { cookie: owner } }),
+      env
+    )
+  const firstResponse = await read()
+  assert.equal(firstResponse.headers.get("cache-control"), "private, no-store")
+  const first = await firstResponse.json()
+  assert.equal(first.entries.length, 50)
+  assert.equal(first.totalMatches, 55)
+  assert.equal(first.overview.total, 55)
+  assert.equal(first.overview.last30Days, 50)
+  assert.equal(
+    first.overview.sources.reduce((sum, item) => sum + item.count, 0),
+    55
+  )
+  const second = await (await read(`?cursor=${first.nextCursor}`)).json()
+  assert.equal(second.entries.length, 5)
+  assert.equal(second.nextCursor, null)
+  assert.equal(
+    new Set([...first.entries, ...second.entries].map(({ id }) => id)).size,
+    55
+  )
+  const search = await (await read("?q=unique")).json()
+  assert.equal(search.entries[0].email, "wait0@example.test")
+  assert.equal(search.totalMatches, 1)
+  assert.equal(search.overview.total, 55)
+  assert.equal(typeof search.entries[0].createdAt, "number")
+  const percent = await (await read("?q=%25")).json()
+  assert.equal(percent.totalMatches, 0)
+  for (const query of [
+    "?cursor=-1",
+    "?cursor=1.5",
+    "?cursor=bad",
+    "?cursor=9007199254740992",
+  ])
+    assert.equal((await read(query)).status, 400)
+  assert.equal(
+    (
+      await handleAdminWaitlist(
+        new Request(path, { method: "POST", headers: { cookie: owner } }),
+        env
+      )
+    ).status,
+    405
+  )
+  const overview = (await (await api()).json()).overview
+  assert.equal(overview.waitlistTotal, 55)
+  assert.equal(overview.waitlistLast30Days, 50)
 })

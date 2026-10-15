@@ -138,15 +138,11 @@ export async function handleLicenseRequest(
         ])
       )
         return json({ error: "Device verification failed." }, 401)
-      const user = await getWorkOSUser(env, accountDevice.userId)
-      // WorkOS lookup is an asynchronous boundary: an administrator may revoke
-      // access or reset this Mac while it is in flight. Re-read the assignment
-      // before signing so the receipt reflects the latest local entitlement.
-      const currentDevice = await getSubscriptionDevice(
-        env.DB,
-        body.deviceId,
-        Date.now()
-      )
+      // Check a removed assignment again before bypassing WorkOS: a fresh
+      // browser approval may have reconnected it since the first database read.
+      let currentDevice = accountDevice.active
+        ? accountDevice
+        : await getSubscriptionDevice(env.DB, body.deviceId, Date.now())
       if (
         !currentDevice ||
         currentDevice.userId !== accountDevice.userId ||
@@ -156,7 +152,34 @@ export async function handleLicenseRequest(
           { error: "This Mac assignment changed. Sign in again." },
           403
         )
+      let user = null
+      if (currentDevice.active) {
+        let lookupError: unknown
+        try {
+          user = await getWorkOSUser(env, currentDevice.userId)
+        } catch (error) {
+          lookupError = error
+        }
+        // WorkOS lookup is an asynchronous boundary. Re-read even after an
+        // outage so a concurrent removal still yields signed local revocation.
+        currentDevice = await getSubscriptionDevice(
+          env.DB,
+          body.deviceId,
+          Date.now()
+        )
+        if (
+          !currentDevice ||
+          currentDevice.userId !== accountDevice.userId ||
+          currentDevice.publicKey !== accountDevice.publicKey
+        )
+          return json(
+            { error: "This Mac assignment changed. Sign in again." },
+            403
+          )
+        if (lookupError && currentDevice.active) throw lookupError
+      }
       const verifiedAt = Date.now()
+      const receiptVersion = request.headers.get("Photodepot-Receipt-Version")
       const active =
         user?.id === currentDevice.userId &&
         user.emailVerified &&
@@ -175,8 +198,11 @@ export async function handleLicenseRequest(
             status: active ? "active" : "revoked",
             challenge: body.challenge,
             revision: currentDevice.subscription.revision,
-            ...(request.headers.get("Photodepot-Receipt-Version") === "2"
+            ...(["2", "3"].includes(receiptVersion ?? "")
               ? { subscriptionEndsAt: currentDevice.subscription.endsAt }
+              : {}),
+            ...(receiptVersion === "3" && !currentDevice.active
+              ? { revocationReason: "device-removed" as const }
               : {}),
           },
           verifiedAt,

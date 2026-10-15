@@ -1,7 +1,6 @@
 .page {
   min-height: 100svh;
-  padding: 0 max(28px, calc((100vw - 1400px) / 2)) 32px;
-  background: #fcfbf8;
+
   color: #24231f;
   font-size: 14px;
 }
@@ -64,25 +63,15 @@
   line-height: 1.6;
   font-size: 12px;
 }
-.page button {
-  padding: 10px 15px;
-  border: 1px solid #24231f;
-  border-radius: 4px;
-  background: #24231f;
-  color: #fcfbf8;
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.page button:disabled {
+
+.page button:not([data-slot="button"]):not([role="tab"]):disabled {
   cursor: default;
   opacity: 0.45;
 }
-.page button:focus-visible,
-.page input:focus-visible,
+.page button:not([data-slot="button"]):not([role="tab"]):focus-visible,
+.page input:not([data-slot="input"]):focus-visible,
 .page select:focus-visible,
-.page textarea:focus-visible,
+.page textarea:not([data-slot="textarea"]):focus-visible,
 .page a:focus-visible,
 .tableScroll:focus-visible {
   outline: 2px solid #a05521;
@@ -190,9 +179,10 @@
   gap: 8px;
   font-size: 12px;
 }
-.page input,
-.page select,
-.page textarea {
+.page input:not([data-slot="input"]),
+.formFields select,
+.queueReview select,
+.page textarea:not([data-slot="textarea"]) {
   width: 100%;
   min-height: 40px;
   padding: 10px 12px;
@@ -203,7 +193,7 @@
   font: inherit;
   font-size: 13px;
 }
-.page textarea {
+.page textarea:not([data-slot="textarea"]) {
   resize: vertical;
   line-height: 1.6;
 }
@@ -298,7 +288,7 @@
   display: inline-block;
   padding: 3px 8px;
   border-radius: 4px;
-  font-size: 10px;
+  font-size: 9px;
   white-space: nowrap;
 }
 .active {
@@ -527,7 +517,7 @@
   padding: 24px;
   border: 1px solid #dedbd3;
   border-radius: 5px;
-  background: #f5f3ee;
+  background: white;
 }
 .queue .sectionHeading > div > p {
   margin-top: 8px;
@@ -723,7 +713,7 @@
   }
 }
 @media (prefers-reduced-motion: no-preference) {
-  .page button {
+  .page button:not([data-slot="button"]):not([role="tab"]) {
     transition:
       background-color 0.15s,
       border-color 0.15s;
@@ -733,3 +723,9 @@
     background: #f1efe9;
   }
 }
+
+.page [data-slot="button"] { min-height: 30px; }
+.rowActions [data-slot="button"] { min-height: 25px; padding: 3px 7px; font-size: 9px; border-color: #e6e5dc; }
+.notice { display:flex; align-items:center; gap:9px; }
+
+.dialogHeading { justify-content: flex-end; }

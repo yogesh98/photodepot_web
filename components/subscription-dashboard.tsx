@@ -1,6 +1,38 @@
 "use client"
 
-import Link from "next/link"
+import { DashboardFrame } from "@/components/dashboard-frame"
+import { SidebarTrigger } from "@/components/ui/sidebar"
+import { Separator } from "@/components/ui/separator"
+import {
+  ArrowRight,
+  ChevronRight,
+  CreditCard,
+  LayoutDashboard,
+  ListChecks,
+  Search,
+  Users,
+  UserRound,
+  RefreshCw,
+  CircleCheck,
+} from "lucide-react"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
+import { Badge } from "@/components/ui/badge"
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table"
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
+import { AdminOverview } from "./admin-overview"
+import { AdminWaitlist } from "./admin-waitlist"
+import { AdminUserProfile, type ProfileDetails } from "./admin-user-profile"
+import layout from "./admin-dashboard.module.css"
 import {
   useCallback,
   useEffect,
@@ -10,8 +42,6 @@ import {
   type ReactNode,
 } from "react"
 import type {
-  SubscriptionAudit,
-  SubscriptionDeviceHistory,
   SubscriptionOverview,
   SubscriptionSummary,
   SubscriptionType,
@@ -31,6 +61,8 @@ type DialogAction =
   | "reset-device"
   | "update-notes"
   | "details"
+  | "cancel-renewal"
+  | "resume-renewal"
 type PendingDialog = {
   user: WorkOSUserSummary
   action: DialogAction
@@ -41,11 +73,7 @@ type UserPage = {
   nextCursor: string | null
   overview: SubscriptionOverview
 }
-type AccountDetails = {
-  subscription: SubscriptionSummary | null
-  audit: SubscriptionAudit[]
-  devices: SubscriptionDeviceHistory[]
-}
+type AccountDetails = ProfileDetails
 type Status = "Active" | "Expired" | "Revoked" | "No subscription"
 
 class ApiError extends Error {
@@ -186,53 +214,26 @@ function DashboardDialog({
   children: ReactNode
   onClose: () => void
 }) {
-  const dialog = useRef<HTMLDialogElement>(null)
-  useEffect(() => {
-    const element = dialog.current
-    const previouslyFocused = document.activeElement as HTMLElement | null
-    element?.showModal()
-    element?.querySelector<HTMLElement>("[data-dialog-focus]")?.focus()
-    return () => {
-      element?.close()
-      previouslyFocused?.focus()
-    }
-  }, [])
   return (
-    <dialog
-      ref={dialog}
-      className={styles.overlay}
-      aria-labelledby="subscription-dialog-title"
-      onCancel={(event) => {
-        event.preventDefault()
-        onClose()
-      }}
-      onKeyDown={(event) => {
-        if (event.key !== "Tab") return
-        const focusable = Array.from(
-          event.currentTarget.querySelectorAll<HTMLElement>(
-            "button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex='0']"
-          )
-        ).filter((element) => element.getClientRects().length > 0)
-        const first = focusable[0]
-        const last = focusable.at(-1)
-        if (!first || !last) return
-        if (
-          event.shiftKey &&
-          (document.activeElement === first ||
-            document.activeElement === event.currentTarget)
-        ) {
-          event.preventDefault()
-          last.focus()
-        } else if (!event.shiftKey && document.activeElement === last) {
-          event.preventDefault()
-          first.focus()
-        }
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose()
       }}
     >
-      <section className={styles.modal}>{children}</section>
-    </dialog>
+      <DialogContent
+        initialFocus={() =>
+          document.querySelector<HTMLElement>("[data-dialog-focus]")
+        }
+        className={`${styles.modal} ${layout.actionDialog}`}
+        showCloseButton={false}
+      >
+        {children}
+      </DialogContent>
+    </Dialog>
   )
 }
+
 function mergeUsers(
   previous: WorkOSUserSummary[],
   incoming: WorkOSUserSummary[]
@@ -251,7 +252,16 @@ function validatePage(result: UserPage) {
   return result
 }
 
-export function SubscriptionDashboard() {
+export function SubscriptionDashboard({
+  initialView = "overview",
+}: {
+  initialView?: string
+}) {
+  const [view, setView] = useState(initialView)
+  const [profile, setProfile] = useState<WorkOSUserSummary | null>(null)
+  const [profileId, setProfileId] = useState<string | null>(null)
+  const [query, setQuery] = useState("")
+  const [refreshVersion, setRefreshVersion] = useState(0)
   const [users, setUsers] = useState<WorkOSUserSummary[]>([])
   const [cursor, setCursor] = useState<string | null>(null)
   const [overview, setOverview] = useState<SubscriptionOverview | null>(null)
@@ -265,9 +275,6 @@ export function SubscriptionDashboard() {
   const [lastUpdated, setLastUpdated] = useState<number | null>(null)
   const [search, setSearch] = useState("")
   const [statusFilter, setStatusFilter] = useState("all")
-  const [typeFilter, setTypeFilter] = useState("all")
-  const [expiryFilter, setExpiryFilter] = useState("all")
-  const [sort, setSort] = useState("newest")
   const [dialog, setDialog] = useState<PendingDialog | null>(null)
   const [dialogError, setDialogError] = useState("")
   const [selectedType, setSelectedType] = useState<SubscriptionType>("trial")
@@ -307,7 +314,7 @@ export function SubscriptionDashboard() {
       try {
         const first = validatePage(
           await api<UserPage>(
-            next ? `?cursor=${encodeURIComponent(next)}` : "",
+            `?${new URLSearchParams({ filter: statusFilter, q: query, ...(next ? { cursor: next } : {}) })}`,
             undefined,
             controller.signal
           )
@@ -319,7 +326,7 @@ export function SubscriptionDashboard() {
           while (pages < pageCount.current && nextCursor) {
             const page = validatePage(
               await api<UserPage>(
-                `?cursor=${encodeURIComponent(nextCursor)}`,
+                `?${new URLSearchParams({ filter: statusFilter, q: query, cursor: nextCursor })}`,
                 undefined,
                 controller.signal
               )
@@ -347,22 +354,34 @@ export function SubscriptionDashboard() {
         }
       }
     },
-    [handleError]
+    [handleError, statusFilter, query]
   )
   useEffect(() => {
     mounted.current = true
-    queueMicrotask(() => {
-      if (mounted.current) void loadUsers()
-    })
     return () => {
       mounted.current = false
       listRequest.current?.abort()
-      listRequest.current = null
       detailsRequest.current?.abort()
+    }
+  }, [])
+  useEffect(() => {
+    queueMicrotask(() => {
+      if (mounted.current) {
+        setLoading(true)
+        setHasLoaded(false)
+        setUsers([])
+        setCursor(null)
+        pageCount.current = 1
+        void loadUsers()
+      }
+    })
+    return () => {
+      listRequest.current?.abort()
+      listRequest.current = null
     }
   }, [loadUsers])
   useEffect(() => {
-    if (dialog || busy || sessionExpired || reloadRequired) return
+    if (dialog || profileId || busy || sessionExpired || reloadRequired) return
     const poll = () => {
       if (document.visibilityState === "visible" && !listRequest.current) {
         setLoading(true)
@@ -375,7 +394,7 @@ export function SubscriptionDashboard() {
       window.clearInterval(interval)
       document.removeEventListener("visibilitychange", poll)
     }
-  }, [dialog, busy, sessionExpired, reloadRequired, loadUsers])
+  }, [dialog, profileId, busy, sessionExpired, reloadRequired, loadUsers])
   useEffect(() => {
     if (!dialog || !["set", "extend"].includes(dialog.action)) return
     const interval = window.setInterval(() => setPreviewNow(Date.now()), 1000)
@@ -383,7 +402,8 @@ export function SubscriptionDashboard() {
   }, [dialog])
 
   const loadDetails = useCallback(
-    async (user: WorkOSUserSummary) => {
+    async (user: WorkOSUserSummary | string) => {
+      const id = typeof user === "string" ? user : user.id
       detailsRequest.current?.abort()
       const controller = new AbortController()
       detailsRequest.current = controller
@@ -392,7 +412,7 @@ export function SubscriptionDashboard() {
       setDialogError("")
       try {
         const result = await api<AccountDetails>(
-          `?userId=${encodeURIComponent(user.id)}&history=1`,
+          `?userId=${encodeURIComponent(id)}&history=1`,
           undefined,
           controller.signal
         )
@@ -407,20 +427,15 @@ export function SubscriptionDashboard() {
           throw new Error("Unable to read account details. Try again.")
         if (!controller.signal.aborted && mounted.current) {
           setDetails(result)
-          setDialog((current) =>
-            current?.user.id === user.id
-              ? {
-                  ...current,
-                  user: { ...current.user, subscription: result.subscription },
-                }
-              : current
-          )
+          const nextUser = result.user
+            ? { ...result.user, subscription: result.subscription }
+            : typeof user !== "string"
+              ? { ...user, subscription: result.subscription }
+              : null
+          setProfile(nextUser)
+          if (!nextUser) throw new Error("This user could not be found.")
           setUsers((current) =>
-            current.map((item) =>
-              item.id === user.id
-                ? { ...item, subscription: result.subscription }
-                : item
-            )
+            current.map((item) => (item.id === id ? nextUser : item))
           )
         }
       } catch (cause) {
@@ -435,8 +450,74 @@ export function SubscriptionDashboard() {
     },
     [handleError]
   )
+  useEffect(() => {
+    const timer = window.setTimeout(() => setQuery(search.trim()), 250)
+    return () => window.clearTimeout(timer)
+  }, [search])
+  useEffect(() => {
+    const sync = () => {
+      const params = new URLSearchParams(window.location.search)
+      const target = params.get("view") ?? initialView
+      setView(
+        [
+          "overview",
+          "subscriptions",
+          "users",
+          "waitlist",
+          "operations",
+        ].includes(target)
+          ? target
+          : "overview"
+      )
+      setProfileId(params.get("user"))
+      setStatusFilter(params.get("filter") ?? "all")
+    }
+    queueMicrotask(sync)
+    window.addEventListener("popstate", sync)
+    return () => window.removeEventListener("popstate", sync)
+  }, [initialView])
+  useEffect(() => {
+    if (profileId)
+      queueMicrotask(() => {
+        void loadDetails(profileId)
+      })
+    return () => {
+      detailsRequest.current?.abort()
+    }
+  }, [profileId, loadDetails])
+  const navigate = useCallback((target: string, filter = "all") => {
+    setView(target)
+    setProfileId(null)
+    setProfile(null)
+    setDialogError("")
+    setStatusFilter(filter)
+    setSearch("")
+    const params = new URLSearchParams()
+    if (target !== "overview") params.set("view", target)
+    if (filter !== "all") params.set("filter", filter)
+    window.history.pushState(
+      null,
+      "",
+      `/admin${params.size ? `?${params}` : ""}`
+    )
+  }, [])
+  const showProfile = useCallback((user: WorkOSUserSummary) => {
+    setProfile(user)
+    setProfileId(user.id)
+    setView("users")
+    setDialogError("")
+    window.history.pushState(
+      null,
+      "",
+      `/admin?view=users&user=${encodeURIComponent(user.id)}`
+    )
+  }, [])
   const openDialog = useCallback(
     (user: WorkOSUserSummary, action: DialogAction, deviceId?: string) => {
+      if (action === "details") {
+        showProfile(user)
+        return
+      }
       listRequest.current?.abort()
       listRequest.current = null
       detailsRequest.current?.abort()
@@ -459,10 +540,8 @@ export function SubscriptionDashboard() {
       )
       setReason("")
       setNotes(user.subscription?.notes ?? "")
-      setDetails(null)
-      if (action === "details") void loadDetails(user)
     },
-    [loadDetails]
+    [showProfile]
   )
   function closeDialog() {
     if (busy) return
@@ -475,12 +554,18 @@ export function SubscriptionDashboard() {
     closeDialog()
     setLoading(true)
     void loadUsers()
+    if (profileId) void loadDetails(profileId)
+  }
+  function changeFilter(value: string) {
+    setStatusFilter(value)
+    const url = new URL(window.location.href)
+    if (value === "all") url.searchParams.delete("filter")
+    else url.searchParams.set("filter", value)
+    window.history.replaceState(null, "", url)
   }
   function clearFilters() {
     setSearch("")
-    setStatusFilter("all")
-    setTypeFilter("all")
-    setExpiryFilter("all")
+    changeFilter("all")
   }
   const durationDays = Number(
     durationPreset === "custom" ? customDays : durationPreset
@@ -552,9 +637,10 @@ export function SubscriptionDashboard() {
         )
       )
       setNotice(
-        `${dialog.action === "revoke" ? "Access revoked" : dialog.action === "restore" ? "Subscription restored; its expiry is unchanged" : dialog.action === "reset-device" ? "Mac assignment reset; this account can sign in on another Mac" : dialog.action === "update-notes" ? "Account notes saved" : dialog.action === "extend" ? "Subscription extended" : "Subscription saved"} for ${dialog.user.email}.`
+        `${dialog.action === "cancel-renewal" ? "Renewal canceled; access continues until expiry" : dialog.action === "resume-renewal" ? "Renewal preference restored" : dialog.action === "revoke" ? "Access revoked" : dialog.action === "restore" ? "Subscription restored; its expiry is unchanged" : dialog.action === "reset-device" ? "Mac assignment reset; this account can sign in on another Mac" : dialog.action === "update-notes" ? "Account notes saved" : dialog.action === "extend" ? "Subscription extended" : "Subscription saved"} for ${dialog.user.email}.`
       )
       setDialog(null)
+      if (profileId) await loadDetails(profileId)
       setReloadRequired(true)
       setLoading(true)
       await loadUsers()
@@ -567,74 +653,48 @@ export function SubscriptionDashboard() {
   const actionsDisabled = busy || sessionExpired || reloadRequired || !hasLoaded
   const now = lastUpdated ?? 0
   const filteredUsers = users
-    .filter((user) => {
-      const currentStatus = status(user, now)
-      const matchesSearch = [
-        userName(user),
-        user.email,
-        user.id,
-        user.subscription?.notes ?? "",
-      ]
-        .join(" ")
-        .toLowerCase()
-        .includes(search.trim().toLowerCase())
-      return (
-        matchesSearch &&
-        (statusFilter === "all" || currentStatus === statusFilter) &&
-        (typeFilter === "all" || user.subscription?.type === typeFilter) &&
-        (expiryFilter === "all" ||
-          (currentStatus === "Active" &&
-            !!user.subscription &&
-            user.subscription.endsAt <= now + Number(expiryFilter) * day))
-      )
-    })
-    .sort((a, b) =>
-      sort === "email"
-        ? a.email.localeCompare(b.email)
-        : sort === "expiry"
-          ? (a.subscription?.endsAt ?? Infinity) -
-            (b.subscription?.endsAt ?? Infinity)
-          : b.createdAt - a.createdAt
-    )
-  const filtersActive =
-    !!search ||
-    statusFilter !== "all" ||
-    typeFilter !== "all" ||
-    expiryFilter !== "all"
+  const filtersActive = !!search || statusFilter !== "all"
   function accountActions(user: WorkOSUserSummary, inDetails = false) {
+    const disabled =
+      actionsDisabled ||
+      (inDetails && (detailsLoading || !!dialogError || !details))
     return (
       <div className={styles.rowActions}>
         {!inDetails && (
-          <button
+          <Button
+            variant="outline"
             type="button"
             disabled={busy || sessionExpired}
             onClick={() => openDialog(user, "details")}
             aria-label={`View ${user.email}`}
           >
             Details
-          </button>
+          </Button>
         )}
-        <button
+        <Button
+          variant="outline"
           type="button"
-          disabled={actionsDisabled}
+          disabled={disabled}
           onClick={() => openDialog(user, "set")}
           aria-label={`${user.subscription ? "Edit subscription" : "Grant subscription"} for ${user.email}`}
         >
           {user.subscription ? "Edit" : "Grant access"}
-        </button>
+        </Button>
         {user.subscription && (
           <>
-            <button
+            <Button
+              variant="outline"
               type="button"
-              disabled={actionsDisabled}
+              disabled={disabled}
               onClick={() => openDialog(user, "extend")}
               aria-label={`Extend subscription for ${user.email}`}
             >
               Extend
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="outline"
               type="button"
-              disabled={actionsDisabled}
+              disabled={disabled}
               onClick={() =>
                 openDialog(
                   user,
@@ -644,25 +704,25 @@ export function SubscriptionDashboard() {
               aria-label={`${user.subscription.status === "revoked" ? "Restore" : "Revoke"} access for ${user.email}`}
             >
               {user.subscription.status === "revoked" ? "Restore" : "Revoke"}
-            </button>
+            </Button>
             {inDetails && (
               <>
-                <button
+                <Button
+                  variant="outline"
                   type="button"
-                  disabled={actionsDisabled}
+                  disabled={disabled}
                   onClick={() => openDialog(user, "update-notes")}
                 >
                   Edit notes
-                </button>
-                <button
+                </Button>
+                <Button
+                  variant="outline"
                   type="button"
-                  disabled={
-                    actionsDisabled || !user.subscription.devices.length
-                  }
+                  disabled={disabled || !user.subscription.devices.length}
                   onClick={() => openDialog(user, "reset-device")}
                 >
                   Reset all Macs
-                </button>
+                </Button>
               </>
             )}
           </>
@@ -670,579 +730,453 @@ export function SubscriptionDashboard() {
       </div>
     )
   }
+  const titles: Record<string, string> = {
+    overview: "Overview",
+    subscriptions: "Subscriptions",
+    users: "Users",
+    waitlist: "Waitlist",
+    operations: "Operations",
+  }
+  const navigation = [
+    { id: "overview", label: "Overview", icon: LayoutDashboard },
+    { id: "subscriptions", label: "Subscriptions", icon: CreditCard },
+    { id: "users", label: "Users", icon: UserRound },
+    { id: "waitlist", label: "Waitlist", icon: Users },
+    { id: "operations", label: "Operations", icon: ListChecks },
+  ]
+  const filterOptions = [
+    { value: "all", label: "All" },
+    { value: "active", label: "Active" },
+    { value: "canceling", label: "Renewal canceled" },
+    { value: "trial", label: "Trials" },
+    { value: "standard", label: "Standard" },
+    { value: "expired", label: "Expired" },
+    { value: "revoked", label: "Revoked" },
+    { value: "unassigned", label: "No subscription" },
+  ]
   return (
-    <main className={styles.page}>
-      <header className={styles.header}>
-        <Link href="/" className={styles.brand}>
-          photodepot
-        </Link>
-        <div className={styles.accountActions}>
-          <form action="/api/auth/logout" method="post">
-            <button type="submit" className={styles.quiet} disabled={busy}>
-              Sign out
-            </button>
-          </form>
-        </div>
-      </header>
-      <div className={styles.heading}>
+    <DashboardFrame
+      mode="admin"
+      className={layout.workspace}
+      disabled={busy}
+      items={navigation.map(({ id, label, icon: Icon }) => ({
+        title: label,
+        icon: <Icon size={17} />,
+        isActive: view === id,
+        onSelect: () => navigate(id),
+        badge:
+          id === "operations"
+            ? overview?.openRequests
+            : id === "waitlist"
+              ? overview?.waitlistTotal
+              : undefined,
+      }))}
+    >
+      <header className={layout.topbar}>
         <div>
-          <p className={styles.eyebrow}>Administration · manual access</p>
-          <h1>Subscriptions</h1>
-          <p>
-            Manage trials, subscription expiry, and access to two Macs per
-            account.
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={() => {
-            setLoading(true)
-            void loadUsers()
-          }}
-          disabled={loading || busy}
-        >
-          {loading && hasLoaded ? "Refreshing…" : "Refresh"}
-        </button>
-      </div>
-      <p className={styles.policy}>
-        Access is assigned manually by an Owner. Creating an account does not
-        grant access. No payment is collected.
-      </p>
-      {error && (
-        <ErrorMessage message={error} sessionExpired={sessionExpired} />
-      )}
-      {reloadRequired && !dialog && (
-        <p role="alert" className={styles.error}>
-          Refresh subscription data before making another change.
-        </p>
-      )}
-      {notice && (
-        <p role="status" className={styles.notice}>
-          {notice}
-        </p>
-      )}
-      <section
-        className={styles.overview}
-        aria-labelledby="overview-title"
-        aria-busy={loading}
-      >
-        <div className={styles.sectionHeading}>
-          <h2 id="overview-title">Access overview</h2>
-          <p>Across all recorded subscriptions.</p>
-        </div>
-        <dl className={styles.cards}>
-          <div>
-            <dt>Active access</dt>
-            <dd>{overview?.active ?? "—"}</dd>
-            <p>
-              {overview
-                ? `${overview.activeTrials} trial · ${overview.activeStandard} standard`
-                : "Trial and standard subscriptions"}
-            </p>
-          </div>
-          <div>
-            <dt>Expiring in 7 days</dt>
-            <dd>{overview?.expiringSoon ?? "—"}</dd>
-            <p>Active subscriptions ending soon</p>
-          </div>
-          <div>
-            <dt>Expired / revoked</dt>
-            <dd>
-              {overview ? `${overview.expired} / ${overview.revoked}` : "—"}
-            </dd>
-            <p>
-              {overview
-                ? `${overview.totalSubscriptions} subscriptions recorded`
-                : "Accounts without current access"}
-            </p>
-          </div>
-          <div>
-            <dt>Assigned Macs</dt>
-            <dd>{overview?.assignedMacs ?? "—"}</dd>
-            <p>Current device assignments</p>
-          </div>
-        </dl>
-      </section>
-      <AdminSubscriptionRequests
-        disabled={actionsDisabled}
-        onReview={(user) => openDialog(user, "details")}
-      />
-      <AdminSubscriptionReminders
-        disabled={actionsDisabled}
-        onReview={(user) => openDialog(user, "details")}
-      />
-      <section
-        className={styles.tableSection}
-        aria-labelledby="users-title"
-        aria-busy={loading}
-      >
-        <div className={styles.sectionHeading}>
-          <h2 id="users-title">
-            Accounts{" "}
-            <span>
-              {users.length}
-              {cursor ? "+" : ""}
-            </span>
-          </h2>
-          <p>Updates every 30 seconds while this page is visible.</p>
-        </div>
-        <div className={styles.filters}>
-          <label className={styles.search}>
-            Search loaded accounts
-            <input
-              type="search"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="Name, email, account ID, or notes"
-            />
-          </label>
-          <label>
-            Status
-            <select
-              aria-label="Status"
-              value={statusFilter}
-              onChange={(event) => setStatusFilter(event.target.value)}
-            >
-              <option value="all">All statuses</option>
-              {["Active", "Expired", "Revoked", "No subscription"].map(
-                (value) => (
-                  <option key={value}>{value}</option>
-                )
-              )}
-            </select>
-          </label>
-          <label>
-            Type
-            <select
-              aria-label="Type"
-              value={typeFilter}
-              onChange={(event) => setTypeFilter(event.target.value)}
-            >
-              <option value="all">All types</option>
-              <option value="trial">Trial</option>
-              <option value="regular">Standard</option>
-            </select>
-          </label>
-          <label>
-            Expiry
-            <select
-              aria-label="Expiry"
-              value={expiryFilter}
-              onChange={(event) => setExpiryFilter(event.target.value)}
-            >
-              <option value="all">Any expiry</option>
-              <option value="7">Next 7 days</option>
-              <option value="30">Next 30 days</option>
-            </select>
-          </label>
-          <label>
-            Sort
-            <select
-              aria-label="Sort"
-              value={sort}
-              onChange={(event) => setSort(event.target.value)}
-            >
-              <option value="newest">Newest accounts</option>
-              <option value="expiry">Earliest expiry</option>
-              <option value="email">Email A–Z</option>
-            </select>
-          </label>
-        </div>
-        <div className={styles.listMeta}>
-          <p role="status">
-            {!hasLoaded ? (
-              loading ? (
-                "Loading account list…"
-              ) : (
-                "Account list is unavailable."
-              )
-            ) : (
-              <>
-                Showing {filteredUsers.length} of {users.length} loaded
-                accounts.
-                {cursor
-                  ? " More accounts are available; search and filters apply only to loaded accounts."
-                  : " All accounts are loaded."}
-              </>
-            )}
-          </p>
-          {filtersActive && (
-            <button
-              type="button"
-              className={styles.quiet}
-              onClick={clearFilters}
-            >
-              Clear filters
-            </button>
-          )}
-        </div>
-        {lastUpdated && (
-          <p className={styles.updated}>
-            Last updated <DateTime value={lastUpdated} />
-            {error ? ". Showing the last available data." : "."}
-          </p>
-        )}
-        <p className={styles.tableHint}>
-          Scroll across the table to view expiry and actions.
-        </p>
-        <div
-          className={styles.tableScroll}
-          tabIndex={0}
-          role="region"
-          aria-label="Subscription accounts table"
-        >
-          <table>
-            <thead>
-              <tr>
-                <th scope="col">Account</th>
-                <th scope="col">Access</th>
-                <th scope="col">Expiry</th>
-                <th scope="col">Mac</th>
-                <th scope="col">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredUsers.map((user) => (
-                <tr key={user.id}>
-                  <td>
-                    <strong>{userName(user)}</strong>
-                    {userName(user) !== user.email && (
-                      <a href={`mailto:${user.email}`}>{user.email}</a>
-                    )}
-                    {!user.emailVerified && (
-                      <span className={styles.unverified}>
-                        Email not verified
-                      </span>
-                    )}
-                    <small>
-                      Joined <DateTime value={user.createdAt} />
-                    </small>
-                    {user.subscription?.notes && (
-                      <p
-                        className={styles.notePreview}
-                        title={user.subscription.notes}
-                      >
-                        {user.subscription.notes}
-                      </p>
-                    )}
-                  </td>
-                  <td>
-                    <StatusBadge value={status(user, now)} />
-                    <small>
-                      {user.subscription
-                        ? subscriptionType(user.subscription.type)
-                        : "No access granted"}
-                    </small>
-                  </td>
-                  <td>
-                    {user.subscription ? (
-                      <>
-                        <DateTime value={user.subscription.endsAt} />
-                        <small>
-                          {remaining(user.subscription.endsAt, now)}
-                        </small>
-                      </>
-                    ) : (
-                      <span className={styles.muted}>—</span>
-                    )}
-                  </td>
-                  <td>
-                    {user.subscription?.devices.length ? (
-                      <>
-                        <span>
-                          {user.subscription.devices.length}/
-                          {user.subscription.deviceLimit} assigned
-                        </span>
-                        <small>
-                          Latest{" "}
-                          <DateTime
-                            value={Math.max(
-                              ...user.subscription.devices.map(
-                                (device) => device.activatedAt
-                              )
-                            )}
-                          />
-                        </small>
-                      </>
-                    ) : (
-                      <span className={styles.muted}>Unassigned</span>
-                    )}
-                  </td>
-                  <td>{accountActions(user)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        {!filteredUsers.length && (
-          <div className={styles.empty}>
-            {loading && !hasLoaded ? (
-              "Loading accounts…"
-            ) : !hasLoaded ? (
-              "The account list is unavailable. Select Refresh to try again."
-            ) : users.length ? (
-              <>
-                <p>No loaded accounts match these filters.</p>
-                {cursor && <p>Load more accounts to search the next page.</p>}
-              </>
-            ) : (
-              "No accounts yet. Users will appear here after signing up."
-            )}
-          </div>
-        )}
-        {cursor && (
-          <button
-            type="button"
-            className={styles.more}
-            onClick={() => {
-              setLoading(true)
-              void loadUsers(cursor)
-            }}
-            disabled={loading || busy || sessionExpired}
-          >
-            {loading ? "Loading…" : "Load more accounts"}
-          </button>
-        )}
-      </section>
-      <footer className={styles.footer}>
-        Up to two Macs per account. Dates use your browser’s time zone. Each
-        subscription day adds 24 hours.
-      </footer>
-      {dialog && (
-        <DashboardDialog
-          key={`${dialog.user.id}-${dialog.action}`}
-          onClose={closeDialog}
-        >
-          <div className={styles.dialogHeading}>
-            <p className={styles.eyebrow}>Account access</p>
-            <button
-              type="button"
-              className={styles.quiet}
-              onClick={closeDialog}
-              disabled={busy}
-              data-dialog-focus
-              aria-label="Close account dialog"
-            >
-              Close
-            </button>
-          </div>
-          <h2 id="subscription-dialog-title">
-            {dialog.action === "details"
-              ? "Account details"
-              : dialog.action === "set"
-                ? dialog.user.subscription
-                  ? "Edit subscription"
-                  : "Grant subscription"
-                : dialog.action === "extend"
-                  ? "Extend subscription"
-                  : dialog.action === "reset-device"
-                    ? dialog.deviceId
-                      ? "Reset this Mac assignment?"
-                      : "Reset all Mac assignments?"
-                    : dialog.action === "update-notes"
-                      ? "Edit account notes"
-                      : `${dialog.action === "revoke" ? "Revoke" : "Restore"} access?`}
-          </h2>
-          <p className={styles.dialogAccount}>
-            <strong>{userName(dialog.user)}</strong>
-            {userName(dialog.user) !== dialog.user.email && (
-              <>
-                <br />
-                {dialog.user.email}
-              </>
-            )}
-          </p>
-          {dialogError && (
-            <ErrorMessage
-              message={dialogError}
-              sessionExpired={sessionExpired}
-            />
-          )}
-          {reloadRequired && (
-            <button
-              type="button"
-              onClick={refreshAfterConflict}
-              disabled={busy}
-            >
-              Refresh account data
-            </button>
-          )}
-          {dialog.action === "details" ? (
+          <SidebarTrigger className="-ml-1" />
+          <Separator
+            orientation="vertical"
+            className="mr-2 data-vertical:h-4 data-vertical:self-auto"
+          />
+          Admin
+          <ChevronRight size={13} />
+          <strong>{titles[view]}</strong>
+          {profileId && (
             <>
-              <dl className={styles.accountDetails}>
-                <div>
-                  <dt>Account ID</dt>
-                  <dd>{dialog.user.id}</dd>
-                </div>
-                <div>
-                  <dt>Email</dt>
-                  <dd>
-                    {dialog.user.emailVerified ? "Verified" : "Not verified"}
-                  </dd>
-                </div>
-                <div>
-                  <dt>Joined</dt>
-                  <dd>
-                    <DateTime value={dialog.user.createdAt} />
-                  </dd>
-                </div>
-              </dl>
-              {detailsLoading ? (
-                <p role="status">Loading subscription and history…</p>
-              ) : dialogError ? (
-                <button
-                  type="button"
-                  onClick={() => void loadDetails(dialog.user)}
-                  disabled={sessionExpired}
-                >
+              <ChevronRight size={13} />
+              <span>User management</span>
+            </>
+          )}
+        </div>
+        <span className={layout.ownerBadge}>
+          <ShieldIcon />
+          Owner access
+        </span>
+      </header>
+      <div className={`${styles.page} ${layout.content}`}>
+        <div className={layout.pageHeading}>
+          <div>
+            <h1>{profileId ? "User management" : titles[view]}</h1>
+          </div>
+          <Button
+            variant="outline"
+            size="lg"
+            onClick={() => {
+              setRefreshVersion((value) => value + 1)
+              setLoading(true)
+              void loadUsers()
+              if (profileId) void loadDetails(profileId)
+            }}
+            disabled={loading || busy}
+          >
+            <RefreshCw className={loading ? layout.spinning : ""} />
+            {loading && hasLoaded ? "Refreshing…" : "Refresh"}
+          </Button>
+        </div>
+        {error && (
+          <ErrorMessage message={error} sessionExpired={sessionExpired} />
+        )}
+        {notice && (
+          <p className={styles.notice} role="status">
+            <CircleCheck size={16} />
+            {notice}
+          </p>
+        )}
+        {reloadRequired && !dialog && (
+          <p role="alert" className={styles.error}>
+            Refresh subscription data before making another change.
+          </p>
+        )}
+        {profileId ? (
+          profile ? (
+            <AdminUserProfile
+              user={profile}
+              now={now}
+              details={details}
+              loading={detailsLoading}
+              error={dialogError}
+              actions={accountActions(profile, true)}
+              onBack={() => navigate("users")}
+              onRetry={() => void loadDetails(profileId)}
+              onReset={(id) => openDialog(profile, "reset-device", id)}
+              onRenewal={() =>
+                openDialog(
+                  profile,
+                  profile.subscription?.cancelAtPeriodEnd
+                    ? "resume-renewal"
+                    : "cancel-renewal"
+                )
+              }
+              disabled={actionsDisabled || detailsLoading || !!dialogError}
+            />
+          ) : (
+            <div className={layout.empty}>
+              <UserRound size={30} />
+              <strong>{dialogError || "Loading user…"}</strong>
+              <Button variant="outline" onClick={() => navigate("users")}>
+                Back to users
+              </Button>
+              {dialogError && (
+                <Button onClick={() => void loadDetails(profileId)}>
                   Retry details
-                </button>
-              ) : (
-                details && (
+                </Button>
+              )}
+            </div>
+          )
+        ) : (
+          <>
+            {view === "overview" && (
+              <AdminOverview overview={overview} navigate={navigate} />
+            )}
+            {view === "waitlist" && (
+              <AdminWaitlist refreshVersion={refreshVersion} />
+            )}
+            {view === "operations" && (
+              <>
+                <AdminSubscriptionRequests
+                  refreshVersion={refreshVersion}
+                  disabled={actionsDisabled}
+                  onReview={(user) => openDialog(user, "details")}
+                />
+                <AdminSubscriptionReminders
+                  refreshVersion={refreshVersion}
+                  disabled={actionsDisabled}
+                  onReview={(user) => openDialog(user, "details")}
+                />
+              </>
+            )}
+            {(view === "users" ||
+              view === "subscriptions" ||
+              view === "overview") && (
+              <section
+                className={layout.tableCard}
+                aria-label="Accounts"
+                aria-busy={loading}
+              >
+                <div className={layout.tableHeading}>
+                  <div>
+                    <h2>
+                      {view === "overview"
+                        ? "Recent accounts"
+                        : view === "users"
+                          ? "User directory"
+                          : "All subscriptions"}
+                    </h2>
+                    {statusFilter === "canceling" && (
+                      <p>Access remains active until expiry.</p>
+                    )}
+                  </div>
+                  {view === "overview" ? (
+                    <Button variant="outline" onClick={() => navigate("users")}>
+                      View all users
+                      <ArrowRight />
+                    </Button>
+                  ) : (
+                    <Badge variant="secondary">
+                      {users.length}
+                      {cursor ? "+" : ""} accounts
+                    </Badge>
+                  )}
+                </div>
+                {view !== "overview" && (
                   <>
-                    <div className={styles.detailSection}>
-                      <h3>Current subscription</h3>
-                      {dialog.user.subscription ? (
-                        <>
-                          <dl className={styles.accountDetails}>
-                            <div>
-                              <dt>Status</dt>
-                              <dd>
-                                <StatusBadge
-                                  value={status(dialog.user, previewNow)}
-                                />
-                              </dd>
-                            </div>
-                            <div>
-                              <dt>Type</dt>
-                              <dd>
-                                {subscriptionType(
-                                  dialog.user.subscription.type
-                                )}
-                              </dd>
-                            </div>
-                            <div>
-                              <dt>Started</dt>
-                              <dd>
-                                <DateTime
-                                  value={dialog.user.subscription.startsAt}
-                                />
-                              </dd>
-                            </div>
-                            <div>
-                              <dt>Expires</dt>
-                              <dd>
-                                <DateTime
-                                  value={dialog.user.subscription.endsAt}
-                                />
-                              </dd>
-                            </div>
-                            <div>
-                              <dt>Last changed</dt>
-                              <dd>
-                                <DateTime
-                                  value={dialog.user.subscription.updatedAt}
-                                />
-                              </dd>
-                            </div>
-                            <div>
-                              <dt>Revision</dt>
-                              <dd>{dialog.user.subscription.revision}</dd>
-                            </div>
-                          </dl>
-                          <h4>Admin notes</h4>
-                          <p className={styles.notes}>
-                            {dialog.user.subscription.notes ||
-                              "No admin notes."}
-                          </p>
-                        </>
-                      ) : (
-                        <p>No subscription has been granted.</p>
-                      )}
-                      {accountActions(dialog.user, true)}
-                    </div>
-                    <div className={styles.detailSection}>
-                      <h3>Mac assignments</h3>
-                      <p>
-                        Up to two current Mac assignments are allowed. Reset a
-                        chosen Mac to release its slot, or reset all Macs from
-                        the account actions.
-                      </p>
-                      {details.devices.length ? (
-                        <ol className={styles.devices}>
-                          {details.devices.map((device) => (
-                            <li key={`${device.id}-${device.bindingRevision}`}>
-                              <span
-                                className={
-                                  device.current
-                                    ? styles.active
-                                    : styles.noSubscription
-                                }
-                              >
-                                {device.current
-                                  ? "Current Mac"
-                                  : "Previous Mac"}
-                              </span>
-                              <code>{device.id}</code>
-                              <small>
-                                Assigned <DateTime value={device.activatedAt} />
-                              </small>
-                              {device.current && (
-                                <button
-                                  type="button"
-                                  className={styles.quiet}
-                                  disabled={actionsDisabled}
-                                  onClick={() =>
-                                    openDialog(
-                                      dialog.user,
-                                      "reset-device",
-                                      device.id
-                                    )
-                                  }
-                                  aria-label={`Reset Mac ${device.id}`}
-                                >
-                                  Reset this Mac
-                                </button>
-                              )}
-                            </li>
-                          ))}
-                        </ol>
-                      ) : (
-                        <p>No Mac has been assigned.</p>
-                      )}
-                    </div>
-                    <div className={styles.detailSection}>
-                      <h3>Activity history</h3>
-                      <p>
-                        The latest 100 subscription and device changes, newest
-                        first.
-                      </p>
-                      {details.audit.length ? (
-                        <ol className={styles.history}>
-                          {details.audit.map((entry) => (
-                            <li key={entry.id}>
-                              <strong>{entry.detail}</strong>
-                              {entry.reason && (
-                                <p className={styles.auditReason}>
-                                  {entry.reason}
-                                </p>
-                              )}
-                              <span>
-                                <DateTime value={entry.createdAt} /> ·{" "}
-                                {entry.actor}
-                              </span>
-                            </li>
-                          ))}
-                        </ol>
-                      ) : (
-                        <p>No subscription changes recorded.</p>
-                      )}
+                    <Tabs
+                      value={statusFilter}
+                      onValueChange={(value) => changeFilter(String(value))}
+                      className={layout.filterTabs}
+                    >
+                      <TabsList variant="line">
+                        {filterOptions.map((option) => (
+                          <TabsTrigger key={option.value} value={option.value}>
+                            {option.label}
+                          </TabsTrigger>
+                        ))}
+                      </TabsList>
+                    </Tabs>
+                    <div className={layout.tableToolbar}>
+                      <div className={layout.searchBox}>
+                        <Search size={16} />
+                        <Input
+                          type="search"
+                          aria-label="Search accounts"
+                          placeholder="Search name, email, account ID, or notes…"
+                          value={search}
+                          onChange={(event) => setSearch(event.target.value)}
+                        />
+                      </div>
+                      <div className={layout.toolbarActions}>
+                        <label className={layout.expiryFilter}>
+                          Access window
+                          <select
+                            aria-label="Expiry"
+                            value={
+                              statusFilter === "expiring" ? "expiring" : "all"
+                            }
+                            onChange={(event) =>
+                              changeFilter(event.target.value)
+                            }
+                          >
+                            <option value="all">Any expiry</option>
+                            <option value="expiring">Next 7 days</option>
+                          </select>
+                        </label>
+                        {filtersActive && (
+                          <Button variant="ghost" onClick={clearFilters}>
+                            Clear filters
+                          </Button>
+                        )}
+                      </div>
                     </div>
                   </>
-                )
+                )}
+                <div className={layout.accountTable}>
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Account</TableHead>
+                        <TableHead>Plan</TableHead>
+                        <TableHead>Status</TableHead>
+                        <TableHead>Renewal</TableHead>
+                        <TableHead>Access ends</TableHead>
+                        <TableHead>Macs</TableHead>
+                        <TableHead className={layout.actionsColumn}>
+                          Manage
+                        </TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {(view === "overview"
+                        ? filteredUsers.slice(0, 5)
+                        : filteredUsers
+                      ).map((user) => (
+                        <TableRow key={user.id}>
+                          <TableCell>
+                            <button
+                              className={layout.accountName}
+                              onClick={() => openDialog(user, "details")}
+                            >
+                              <span className={layout.avatar}>
+                                {userName(user).slice(0, 1).toUpperCase()}
+                              </span>
+                              <span>
+                                <strong>{userName(user)}</strong>
+                                <small>{user.email}</small>
+                                {!user.emailVerified && (
+                                  <small className={layout.unverified}>
+                                    Email not verified
+                                  </small>
+                                )}
+                              </span>
+                            </button>
+                          </TableCell>
+                          <TableCell>
+                            {user.subscription ? (
+                              <Badge variant="outline">
+                                {subscriptionType(user.subscription.type)}
+                              </Badge>
+                            ) : (
+                              "—"
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            <StatusBadge value={status(user, now)} />
+                          </TableCell>
+                          <TableCell>
+                            {user.subscription ? (
+                              <span
+                                className={
+                                  user.subscription.cancelAtPeriodEnd
+                                    ? layout.renewalCanceled
+                                    : layout.renewalOpen
+                                }
+                              >
+                                {user.subscription.cancelAtPeriodEnd
+                                  ? "Canceled"
+                                  : "Open to renewal"}
+                              </span>
+                            ) : (
+                              "—"
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            {user.subscription ? (
+                              <>
+                                <span>
+                                  {new Date(
+                                    user.subscription.endsAt
+                                  ).toLocaleDateString(undefined, {
+                                    dateStyle: "medium",
+                                  })}
+                                </span>
+                                <small className={layout.cellSecondary}>
+                                  {remaining(user.subscription.endsAt, now)}
+                                </small>
+                              </>
+                            ) : (
+                              "—"
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            {user.subscription
+                              ? `${user.subscription.devices.length} / ${user.subscription.deviceLimit}`
+                              : "—"}
+                          </TableCell>
+                          <TableCell>{accountActions(user)}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+                {!filteredUsers.length && (
+                  <div className={layout.empty}>
+                    <Users size={28} />
+                    <strong>
+                      {loading
+                        ? "Loading accounts…"
+                        : !hasLoaded
+                          ? "The account list is unavailable"
+                          : filtersActive
+                            ? "No matching accounts"
+                            : "No accounts yet"}
+                    </strong>
+                    {!loading && cursor && (
+                      <p>More accounts are available on the next page.</p>
+                    )}
+                  </div>
+                )}
+                <div className={layout.tableFooter}>
+                  <span role="status">
+                    {hasLoaded
+                      ? `${view === "overview" ? Math.min(5, users.length) : users.length} accounts shown${cursor ? " · More results available" : ""}`
+                      : "Loading account list…"}
+                    {lastUpdated && (
+                      <small>
+                        Updated{" "}
+                        {new Date(lastUpdated).toLocaleTimeString(undefined, {
+                          hour: "numeric",
+                          minute: "2-digit",
+                        })}
+                      </small>
+                    )}
+                  </span>
+                  {cursor && view !== "overview" && (
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        setLoading(true)
+                        void loadUsers(cursor)
+                      }}
+                      disabled={loading || busy || sessionExpired}
+                    >
+                      {loading ? "Loading…" : "Load more accounts"}
+                    </Button>
+                  )}
+                </div>
+              </section>
+            )}
+          </>
+        )}
+        {dialog && (
+          <DashboardDialog
+            key={`${dialog.user.id}-${dialog.action}`}
+            onClose={closeDialog}
+          >
+            <div className={styles.dialogHeading}>
+              <Button
+                type="button"
+                className={styles.quiet}
+                onClick={closeDialog}
+                disabled={busy}
+                data-dialog-focus
+                aria-label="Close account dialog"
+              >
+                Close
+              </Button>
+            </div>
+            <DialogTitle id="subscription-dialog-title">
+              {dialog.action === "cancel-renewal"
+                ? "Cancel renewal?"
+                : dialog.action === "resume-renewal"
+                  ? "Resume renewal?"
+                  : dialog.action === "set"
+                    ? dialog.user.subscription
+                      ? "Edit subscription"
+                      : "Grant subscription"
+                    : dialog.action === "extend"
+                      ? "Extend subscription"
+                      : dialog.action === "reset-device"
+                        ? dialog.deviceId
+                          ? "Reset this Mac assignment?"
+                          : "Reset all Mac assignments?"
+                        : dialog.action === "update-notes"
+                          ? "Edit account notes"
+                          : `${dialog.action === "revoke" ? "Revoke" : "Restore"} access?`}
+            </DialogTitle>
+            <p className={styles.dialogAccount}>
+              <strong>{userName(dialog.user)}</strong>
+              {userName(dialog.user) !== dialog.user.email && (
+                <>
+                  <br />
+                  {dialog.user.email}
+                </>
               )}
-            </>
-          ) : (
+            </p>
+            {dialogError && (
+              <ErrorMessage
+                message={dialogError}
+                sessionExpired={sessionExpired}
+              />
+            )}
+            {reloadRequired && (
+              <Button
+                type="button"
+                onClick={refreshAfterConflict}
+                disabled={busy}
+              >
+                Refresh account data
+              </Button>
+            )}
             <form onSubmit={save}>
               {(dialog.action === "set" || dialog.action === "extend") && (
                 <>
@@ -1288,7 +1222,7 @@ export function SubscriptionDashboard() {
                     {expiryMode === "date" ? (
                       <label>
                         New expiry
-                        <input
+                        <Input
                           type="datetime-local"
                           value={customExpiry}
                           onChange={(event) =>
@@ -1330,7 +1264,7 @@ export function SubscriptionDashboard() {
                         {durationPreset === "custom" && (
                           <label>
                             Number of days
-                            <input
+                            <Input
                               type="number"
                               min={1}
                               max={3650}
@@ -1367,9 +1301,19 @@ export function SubscriptionDashboard() {
                         (dialog.action === "extend"
                           ? " Access stays revoked; restore it separately."
                           : " This grant restores access.")}
+                      {dialog.user.subscription?.cancelAtPeriodEnd &&
+                        " Renewal remains canceled until you explicitly resume it."}
                     </p>
                   </div>
                 </>
+              )}
+              {(dialog.action === "cancel-renewal" ||
+                dialog.action === "resume-renewal") && (
+                <p>
+                  {dialog.action === "cancel-renewal"
+                    ? "Mark renewal as canceled. The subscription remains active until its existing expiry date; access is not revoked."
+                    : "Reopen this subscription for renewal. This does not extend access or collect a payment."}
+                </p>
               )}
               {dialog.action === "revoke" && (
                 <p>
@@ -1414,7 +1358,7 @@ export function SubscriptionDashboard() {
                     <span className={styles.optional}>
                       Optional · visible to admins
                     </span>
-                    <textarea
+                    <Textarea
                       value={notes}
                       onChange={(event) => setNotes(event.target.value)}
                       maxLength={2000}
@@ -1431,7 +1375,7 @@ export function SubscriptionDashboard() {
                   <span className={styles.optional}>
                     Optional · recorded in activity history
                   </span>
-                  <textarea
+                  <Textarea
                     value={reason}
                     onChange={(event) => setReason(event.target.value)}
                     maxLength={1000}
@@ -1441,7 +1385,7 @@ export function SubscriptionDashboard() {
                 </label>
               </div>
               <div className={styles.actions}>
-                <button
+                <Button
                   type="submit"
                   disabled={
                     actionsDisabled ||
@@ -1454,33 +1398,40 @@ export function SubscriptionDashboard() {
                 >
                   {busy
                     ? "Saving…"
-                    : dialog.action === "revoke"
-                      ? "Revoke access"
-                      : dialog.action === "restore"
-                        ? "Restore subscription"
-                        : dialog.action === "reset-device"
-                          ? dialog.deviceId
-                            ? "Reset Mac assignment"
-                            : "Reset all Mac assignments"
-                          : dialog.action === "update-notes"
-                            ? "Save notes"
-                            : dialog.action === "extend"
-                              ? "Extend subscription"
-                              : "Save subscription"}
-                </button>
-                <button
+                    : dialog.action === "cancel-renewal"
+                      ? "Cancel renewal"
+                      : dialog.action === "resume-renewal"
+                        ? "Resume renewal"
+                        : dialog.action === "revoke"
+                          ? "Revoke access"
+                          : dialog.action === "restore"
+                            ? "Restore subscription"
+                            : dialog.action === "reset-device"
+                              ? dialog.deviceId
+                                ? "Reset Mac assignment"
+                                : "Reset all Mac assignments"
+                              : dialog.action === "update-notes"
+                                ? "Save notes"
+                                : dialog.action === "extend"
+                                  ? "Extend subscription"
+                                  : "Save subscription"}
+                </Button>
+                <Button
                   type="button"
                   className={styles.quiet}
                   onClick={closeDialog}
                   disabled={busy}
                 >
                   Cancel
-                </button>
+                </Button>
               </div>
             </form>
-          )}
-        </DashboardDialog>
-      )}
-    </main>
+          </DashboardDialog>
+        )}
+      </div>
+    </DashboardFrame>
   )
+}
+function ShieldIcon() {
+  return <CircleCheck size={13} />
 }

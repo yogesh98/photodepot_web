@@ -1,7 +1,7 @@
 # Subscription reminder delivery
 
 The customer portal is `/account`. The admin dashboard shows active subscriptions
-ending in the next seven days, renewal and Mac reset requests, and reminder history.
+ending in the next seven days, renewal requests, and reminder history.
 One trial-ending reminder is eligible in the final 48 hours of each active trial
 term. The hourly scheduler catches newly due terms and retries temporary failures.
 Standard subscriptions are listed in the admin queue but do not receive trial mail.
@@ -22,7 +22,7 @@ no user login authority and can only trigger bounded reminder batches. It must
 never appear in browser assets or desktop settings. Its endpoint denies unsigned
 and incorrect-token requests.
 
-After deploying the website with migrations through `0009`, compile the scheduler
+After deploying the website with migrations through `0010`, compile the scheduler
 with `pnpm reminders:build`, deploy it with `pnpm reminders:deploy`, and add the token:
 
 ```sh

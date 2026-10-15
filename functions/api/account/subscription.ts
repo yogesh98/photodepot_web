@@ -10,13 +10,40 @@ import {
   sameOrigin,
   type Env,
 } from "../../../lib/cloudflare.ts"
-import { getSubscription } from "../../../lib/subscription-store.ts"
+import {
+  changeSubscriptionRenewal,
+  getSubscription,
+  SubscriptionConflictError,
+} from "../../../lib/subscription-store.ts"
+import type { SubscriptionSummary } from "../../../lib/subscription-types.ts"
+import { resetSubscriptionDevice } from "../../../lib/subscription-devices.ts"
 import {
   AccountRequestLimitError,
   createAccountRequest,
   listAccountRequests,
   type CustomerSubscription,
 } from "../../../lib/account-requests.ts"
+
+function customerSubscription(
+  subscription: SubscriptionSummary | null
+): CustomerSubscription | null {
+  return subscription
+    ? {
+        type: subscription.type,
+        status: subscription.status,
+        startsAt: subscription.startsAt,
+        endsAt: subscription.endsAt,
+        revision: subscription.revision,
+        cancelAtPeriodEnd: subscription.cancelAtPeriodEnd,
+        canceledAt: subscription.canceledAt,
+        deviceLimit: subscription.deviceLimit,
+        devices: subscription.devices.map((device) => ({
+          id: device.id,
+          activatedAt: device.activatedAt,
+        })),
+      }
+    : null
+}
 
 export async function handleAccountSubscription(request: Request, env: Env) {
   const auth = await authenticateWorkOSAccount(request, env)
@@ -48,9 +75,12 @@ export async function handleAccountSubscription(request: Request, env: Env) {
       const body = supplied as Record<string, unknown>
       if (
         body.userId !== undefined ||
-        !["request-renewal", "request-device-reset"].includes(
-          body.action as string
-        ) ||
+        ![
+          "request-renewal",
+          "remove-device",
+          "cancel-renewal",
+          "resume-renewal",
+        ].includes(body.action as string) ||
         (body.message !== undefined &&
           (typeof body.message !== "string" || body.message.length > 1000))
       )
@@ -59,45 +89,89 @@ export async function handleAccountSubscription(request: Request, env: Env) {
           auth
         )
       if (
-        body.action === "request-device-reset" &&
-        (typeof body.deviceId !== "string" ||
-          !subscription?.devices.some((device) => device.id === body.deviceId))
-      )
+        body.action === "cancel-renewal" ||
+        body.action === "resume-renewal"
+      ) {
+        if (body.deviceId !== undefined || body.message !== undefined)
+          return withAdminSession(
+            json(
+              {
+                error:
+                  "A renewal preference does not select a Mac or create a support request.",
+              },
+              400
+            ),
+            auth
+          )
+        const updated = await changeSubscriptionRenewal(
+          env.DB,
+          auth.userId,
+          body.action,
+          body.expectedRevision as number,
+          auth.email,
+          Date.now(),
+          "Customer self-service"
+        )
         return withAdminSession(
-          json({ error: "Choose one of your current Mac assignments." }, 400),
+          json({ subscription: customerSubscription(updated) }),
           auth
         )
+      }
+      if (body.action === "remove-device") {
+        if (
+          typeof body.deviceId !== "string" ||
+          !subscription?.devices.some(
+            (device) => device.id === body.deviceId
+          ) ||
+          body.message !== undefined
+        )
+          return withAdminSession(
+            json({ error: "Choose one of your current Mac assignments." }, 400),
+            auth
+          )
+        const updated = await resetSubscriptionDevice(
+          env.DB,
+          auth.userId,
+          body.expectedRevision as number,
+          auth.email,
+          Date.now(),
+          "Customer self-service Mac removal",
+          body.deviceId
+        )
+        return withAdminSession(
+          json({ subscription: customerSubscription(updated) }),
+          auth
+        )
+      }
       if (body.action === "request-renewal" && body.deviceId !== undefined)
         return withAdminSession(
           json({ error: "A renewal request does not select a Mac." }, 400),
           auth
         )
+      if (
+        body.action === "request-renewal" &&
+        subscription?.cancelAtPeriodEnd &&
+        subscription.status === "active"
+      )
+        return withAdminSession(
+          json(
+            { error: "Resume renewal before submitting a renewal request." },
+            400
+          ),
+          auth
+        )
       const result = await createAccountRequest(env.DB, {
         userId: auth.userId,
         email: auth.email,
-        action: body.action === "request-renewal" ? "renewal" : "reset-device",
-        deviceId: body.deviceId as string | undefined,
+        action: "renewal",
         message: body.message as string | undefined,
       })
       return withAdminSession(json(result, result.created ? 201 : 200), auth)
     }
-    const safeSubscription: CustomerSubscription | null = subscription
-      ? {
-          type: subscription.type,
-          status: subscription.status,
-          startsAt: subscription.startsAt,
-          endsAt: subscription.endsAt,
-          deviceLimit: subscription.deviceLimit,
-          devices: subscription.devices.map((device) => ({
-            id: device.id,
-            activatedAt: device.activatedAt,
-          })),
-        }
-      : null
     return withAdminSession(
       json({
         user: { email: auth.email },
-        subscription: safeSubscription,
+        subscription: customerSubscription(subscription),
         requests: await listAccountRequests(env.DB, auth.userId),
       }),
       auth
@@ -108,9 +182,11 @@ export async function handleAccountSubscription(request: Request, env: Env) {
         ? error.status
         : error instanceof AccountRequestLimitError
           ? 429
-          : error instanceof TypeError
-            ? 400
-            : 503
+          : error instanceof SubscriptionConflictError
+            ? 409
+            : error instanceof TypeError
+              ? 400
+              : 503
     return withAdminSession(
       json(
         {

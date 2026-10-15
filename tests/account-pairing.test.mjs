@@ -292,7 +292,7 @@ test("pairing receipts preserve legacy payloads and expose subscription expiry t
     assert.equal(payload.expiresAt, subscription.endsAt)
     assert.equal(
       payload.subscriptionEndsAt,
-      version === "2" ? subscription.endsAt : undefined
+      ["2", "3"].includes(version) ? subscription.endsAt : undefined
     )
     assert.deepEqual(
       Object.keys(payload).sort(),
@@ -306,7 +306,7 @@ test("pairing receipts preserve legacy payloads and expose subscription expiry t
         "revision",
         "issuedAt",
         "expiresAt",
-        ...(version === "2" ? ["subscriptionEndsAt"] : []),
+        ...(["2", "3"].includes(version) ? ["subscriptionEndsAt"] : []),
       ].sort()
     )
     assert.deepEqual(
@@ -314,10 +314,10 @@ test("pairing receipts preserve legacy payloads and expose subscription expiry t
       [
         "payload",
         "signature",
-        ...(version === "2" ? ["collaborationReceipt"] : []),
+        ...(["2", "3"].includes(version) ? ["collaborationReceipt"] : []),
       ].sort()
     )
-    if (version === "2") {
+    if (["2", "3"].includes(version)) {
       const compatible = decodeReceipt(receipt.collaborationReceipt)
       const expected = { ...payload }
       delete expected.subscriptionEndsAt
