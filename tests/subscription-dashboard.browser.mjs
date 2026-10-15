@@ -221,10 +221,12 @@ async function handleApi(request, response, url) {
           (item) => item.userId === user.id
         ),
         devices:
+          user.devices ??
           user.subscription?.devices.map((device) => ({
             ...device,
             current: true,
-          })) ?? [],
+          })) ??
+          [],
         audit: [
           {
             id: "audit_test",
@@ -1114,6 +1116,29 @@ test("a user profile opens directly and manages renewal without changing the acc
   })
 })
 
+test("a free account profile lists its signed-in Macs without offering an unsupported administrative reset", async () => {
+  const user = state.users.find(({ id }) => id === "user_cara")
+  user.devices = [
+    {
+      id: firstMac,
+      bindingRevision: 1,
+      assignmentRevision: 1,
+      activatedAt: Date.now(),
+      current: true,
+    },
+  ]
+  await page.goto(`${origin}/admin?view=users&user=user_cara`)
+  const profile = page.getByRole("region", {
+    name: "User management",
+    exact: true,
+  })
+  await expect(profile.getByText(firstMac, { exact: true })).toBeVisible()
+  await expect(profile.getByText("1 of 2 slots in use.")).toBeVisible()
+  await expect(
+    profile.getByRole("button", { name: `Reset Mac ${firstMac}`, exact: true })
+  ).toHaveCount(0)
+})
+
 test("opening a profile while search is debouncing preserves account details", async () => {
   await page.getByRole("searchbox", { name: "Search accounts" }).fill("Alice")
   await page
@@ -1522,11 +1547,49 @@ test("the customer portal displays only customer data and submits renewal reques
   })
 })
 
+test("connected computers show their names and last use in removal confirmation", async () => {
+  const account = customerAccount()
+  account.devices = state.users[0].subscription.devices.map(
+    (device, index) => ({
+      id: device.id,
+      activatedAt: device.activatedAt,
+      sessionId: null,
+      revision: account.subscription.revision,
+      deviceName: index === 0 ? "Studio MacBook Pro" : null,
+      lastUsedAt: index === 0 ? Date.now() - 3_600_000 : null,
+    })
+  )
+  await page.route("**/api/account/subscription", (route) =>
+    route.fulfill({ json: account })
+  )
+  await page.goto(`${origin}/account`)
+  await expect(
+    page.getByText("Studio MacBook Pro", { exact: true })
+  ).toBeVisible()
+  await expect(page.getByText("Computer 2", { exact: true })).toBeVisible()
+  await expect(page.getByText(/Last used/)).toHaveCount(1)
+  await page
+    .getByRole("button", { name: "Remove Studio MacBook Pro", exact: true })
+    .click()
+  const dialog = page.getByRole("dialog")
+  await expect(
+    dialog.getByRole("heading", {
+      name: "Remove Studio MacBook Pro?",
+      exact: true,
+    })
+  ).toBeVisible()
+  await expect(dialog).toContainText(
+    "End access to Photodepot on Studio MacBook Pro."
+  )
+  await expect(dialog.getByText(firstMac, { exact: true })).toBeVisible()
+  assert.equal(state.customerMutations.length, 0)
+})
+
 test("customer Mac removal requires confirmation and removes only the selected Mac immediately", async () => {
   await page.goto(`${origin}/account`)
   const subscriptionBefore = structuredClone(state.users[0].subscription)
   const firstRemove = page.getByRole("button", {
-    name: "Remove Mac 1",
+    name: "Remove Computer 1",
     exact: true,
   })
   await expect(firstRemove).toBeEnabled()
@@ -1536,7 +1599,7 @@ test("customer Mac removal requires confirmation and removes only the selected M
   await firstRemove.click()
   const dialog = page.getByRole("dialog")
   await expect(
-    dialog.getByRole("heading", { name: "Remove this Mac?", exact: true })
+    dialog.getByRole("heading", { name: "Remove Computer 1?", exact: true })
   ).toBeVisible()
   await expect(dialog.getByText(firstMac, { exact: true })).toBeVisible()
   await page.screenshot({
@@ -1580,7 +1643,9 @@ test("customer Mac removal requires confirmation and removes only the selected M
 
 test("customer Mac removal conflicts require fresh account data and a new confirmation", async () => {
   await page.goto(`${origin}/account`)
-  await page.getByRole("button", { name: "Remove Mac 1", exact: true }).click()
+  await page
+    .getByRole("button", { name: "Remove Computer 1", exact: true })
+    .click()
   state.users[0].subscription.revision++
   const dialog = page.getByRole("dialog")
   await dialog.getByRole("button", { name: "Remove Mac", exact: true }).click()
@@ -1595,7 +1660,9 @@ test("customer Mac removal conflicts require fresh account data and a new confir
     .click()
   await expect(dialog).toHaveCount(0)
   assert.equal(state.customerMutations.length, 1)
-  await page.getByRole("button", { name: "Remove Mac 1", exact: true }).click()
+  await page
+    .getByRole("button", { name: "Remove Computer 1", exact: true })
+    .click()
   await dialog.getByRole("button", { name: "Remove Mac", exact: true }).click()
   await expect(dialog).toHaveCount(0)
   assert.deepEqual(
@@ -1609,7 +1676,9 @@ test("customer Mac removal conflicts require fresh account data and a new confir
 test("customer Mac removal preserves devices when the session expires", async () => {
   await page.goto(`${origin}/account`)
   const subscriptionBefore = structuredClone(state.users[0].subscription)
-  await page.getByRole("button", { name: "Remove Mac 2", exact: true }).click()
+  await page
+    .getByRole("button", { name: "Remove Computer 2", exact: true })
+    .click()
   state.customerFailNext = 401
   const dialog = page.getByRole("dialog")
   await dialog.getByRole("button", { name: "Remove Mac", exact: true }).click()
@@ -1625,10 +1694,10 @@ test("customer Mac removal preserves devices when the session expires", async ()
   await page.keyboard.press("Escape")
   await expect(dialog).toHaveCount(0)
   await expect(
-    page.getByRole("button", { name: "Remove Mac 1", exact: true })
+    page.getByRole("button", { name: "Remove Computer 1", exact: true })
   ).toBeDisabled()
   await expect(
-    page.getByRole("button", { name: "Remove Mac 2", exact: true })
+    page.getByRole("button", { name: "Remove Computer 2", exact: true })
   ).toBeDisabled()
 })
 
@@ -1648,7 +1717,10 @@ test("an existing Mac removal request does not block direct customer removal", a
     handledBy: "",
   })
   await page.goto(`${origin}/account`)
-  const remove = page.getByRole("button", { name: "Remove Mac 1", exact: true })
+  const remove = page.getByRole("button", {
+    name: "Remove Computer 1",
+    exact: true,
+  })
   await expect(remove).toBeEnabled()
   await remove.click()
   await page

@@ -18,6 +18,11 @@ import {
 import type { SubscriptionSummary } from "../../../lib/subscription-types.ts"
 import { resetSubscriptionDevice } from "../../../lib/subscription-devices.ts"
 import {
+  getDesktopSession,
+  listAccountDevices,
+  revokeDesktopSession,
+} from "../../../lib/account-sessions.ts"
+import {
   AccountRequestLimitError,
   createAccountRequest,
   listAccountRequests,
@@ -118,6 +123,52 @@ export async function handleAccountSubscription(request: Request, env: Env) {
         )
       }
       if (body.action === "remove-device") {
+        if (body.sessionId !== undefined) {
+          if (
+            typeof body.sessionId !== "string" ||
+            typeof body.deviceId !== "string" ||
+            body.message !== undefined ||
+            !Number.isSafeInteger(body.expectedSessionRevision) ||
+            (body.expectedSessionRevision as number) < 1
+          )
+            return withAdminSession(
+              json({ error: "Choose one of your current Macs." }, 400),
+              auth
+            )
+          const session = await getDesktopSession(env.DB, body.sessionId)
+          if (
+            !session ||
+            session.user_id !== auth.userId ||
+            session.device_id !== body.deviceId
+          )
+            return withAdminSession(
+              json({ error: "Choose one of your current Macs." }, 400),
+              auth
+            )
+          const removed = await revokeDesktopSession(
+            env.DB,
+            session.id,
+            auth.userId,
+            body.expectedSessionRevision as number
+          )
+          if (!removed)
+            return withAdminSession(
+              json(
+                { error: "This Mac session changed. Refresh and try again." },
+                409
+              ),
+              auth
+            )
+          return withAdminSession(
+            json({
+              subscription: customerSubscription(
+                await getSubscription(env.DB, auth.userId)
+              ),
+              devices: await listAccountDevices(env.DB, auth.userId),
+            }),
+            auth
+          )
+        }
         if (
           typeof body.deviceId !== "string" ||
           !subscription?.devices.some(
@@ -139,7 +190,10 @@ export async function handleAccountSubscription(request: Request, env: Env) {
           body.deviceId
         )
         return withAdminSession(
-          json({ subscription: customerSubscription(updated) }),
+          json({
+            subscription: customerSubscription(updated),
+            devices: await listAccountDevices(env.DB, auth.userId),
+          }),
           auth
         )
       }
@@ -172,6 +226,7 @@ export async function handleAccountSubscription(request: Request, env: Env) {
       json({
         user: { email: auth.email },
         subscription: customerSubscription(subscription),
+        devices: await listAccountDevices(env.DB, auth.userId),
         requests: await listAccountRequests(env.DB, auth.userId),
       }),
       auth

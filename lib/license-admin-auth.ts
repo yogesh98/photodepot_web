@@ -470,7 +470,11 @@ async function beginLogin(
       ...(audience === "admin"
         ? { organizationId: config.organizationId }
         : {}),
-      screenHint: "sign-in",
+      screenHint:
+        audience === "account" &&
+        new URL(request.url).searchParams.get("intent") === "signup"
+          ? "sign-up"
+          : "sign-in",
     })
   const transaction: LoginTransaction = {
     clientId: config.clientId,

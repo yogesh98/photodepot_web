@@ -115,6 +115,8 @@ before(async () => {
   await migrate("0008_account_requests.sql")
   await migrate("0009_subscription_reminders.sql")
   await migrate("0010_subscription_renewal_preferences.sql")
+  await migrate("0011_desktop_account_sessions.sql")
+  await migrate("0012_desktop_device_metadata.sql")
 })
 
 after(async () => {

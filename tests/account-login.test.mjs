@@ -312,6 +312,26 @@ test("direct customer portal login uses its own session and a fixed safe return 
   assert.ok(responseCookie(done, "__Host-photodepot-account"))
   assert.equal(responseCookie(done, "__Host-photodepot-admin"), undefined)
 })
+test("desktop signup opens the signup screen while retaining the exact Mac approval destination", async () => {
+  const response = await handleAccountLogin(
+    request(`/api/account/auth/login?code=${"a".repeat(43)}&intent=signup`),
+    env
+  )
+  assert.equal(response.status, 302)
+  const authorization = new URL(response.headers.get("location"))
+  assert.equal(authorization.searchParams.get("screen_hint"), "sign-up")
+  const cookie = cookiePair(
+    responseCookie(response, "__Host-photodepot-account-login")
+  )
+  const transaction = await unsealData(cookieValue(cookie), {
+    password,
+    ttl: 600,
+  })
+  assert.equal(
+    transaction.returnPath,
+    `/account/activate?code=${"a".repeat(43)}`
+  )
+})
 test("customer sign-in and callback do not depend on administration organization configuration", async () => {
   for (const organization of [undefined, "invalid"]) {
     const accountEnv = { ...env, WORKOS_ADMIN_ORGANIZATION_ID: organization }

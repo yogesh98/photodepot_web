@@ -56,6 +56,9 @@ export function AdminUserProfile({
   const name =
     [user.firstName, user.lastName].filter(Boolean).join(" ") || user.email
   const sub = user.subscription
+  const connectedMacs = details
+    ? details.devices.filter((device) => device.current).length
+    : (sub?.devices.length ?? 0)
   const date = (value: number) =>
     new Date(value).toLocaleString(undefined, {
       dateStyle: "medium",
@@ -212,8 +215,7 @@ export function AdminUserProfile({
               <div>
                 <h2>Connected Macs</h2>
                 <p>
-                  {sub?.devices.length ?? 0} of {sub?.deviceLimit ?? 2} slots in
-                  use.
+                  {connectedMacs} of {sub?.deviceLimit ?? 2} slots in use.
                 </p>
               </div>
               <Laptop size={18} />
@@ -231,7 +233,7 @@ export function AdminUserProfile({
                       <small>Assigned {date(device.activatedAt)}</small>
                       <code title={device.id}>{device.id}</code>
                     </span>
-                    {device.current && (
+                    {device.current && sub && (
                       <Button
                         variant="outline"
                         disabled={disabled}

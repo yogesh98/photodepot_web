@@ -21,9 +21,11 @@ local network, and changes are shared across the project.
 Ingest and export remain with the host. The complete Ingest, Cull, Organize, and
 Export workflow is also explained. Joining the waitlist
 is its only call to action. The original download page lives at `/tester`, with
-its Apple Silicon and Intel download buttons for version 0.2.5. An active account
-subscription or compatible license is required in the desktop app to open or
-create local projects.
+its Apple Silicon and Intel download buttons for version 0.2.5. Updated desktop
+builds require login for all use, and an active account subscription to open or
+create local projects or host collaboration. Joining collaboration is available
+without a subscription. Older installed builds retain their compatible license
+flow until updated.
 
 Screenshots show the actual Photodepot desktop app in light mode with demo
 media. Capture and media provenance are documented in
@@ -271,7 +273,7 @@ Photography credits are in `public/photography/pexels/README.md`; the Inter font
 
 ## Account subscriptions
 
-Subscription administration is available at `/admin`. The previous `/admin/subscriptions` and `/admin/licenses` URLs still open the subscription directory. Creating an account or signing in does not grant access. An Owner must manually assign Trial or Standard access to each approved account. Signups never receive administration membership. Only the `owner` role in `WORKOS_ADMIN_ORGANIZATION_ID` can manage access. See [subscription setup and protocol](deploy/LICENSES.md).
+Subscription administration is available at `/admin`. The previous `/admin/subscriptions` and `/admin/licenses` URLs still open the subscription directory. Creating an account or signing in permits joining collaboration; it does not grant local project or hosting access. An Owner must manually assign Trial or Standard access to each approved account. Signups never receive administration membership. Only the `owner` role in `WORKOS_ADMIN_ORGANIZATION_ID` can manage access. See [subscription setup and protocol](deploy/LICENSES.md).
 
 Set `WORKOS_CLIENT_ID`, `WORKOS_ADMIN_ORGANIZATION_ID`,
 `WORKOS_REDIRECT_URI=https://photodepot.app/api/auth/callback`, and a random
@@ -320,36 +322,47 @@ informed by [Subscription Management & Tracking Dashboard](https://dribbble.com/
 and [Invoice Dashboard](https://dribbble.com/shots/20606044-Invoice-Dashboard-Subscription-management).
 No visual assets or sample customer records from those designs are shipped.
 
-Desktop account sign-in opens WorkOS in the external browser and asks the user
-to approve the Mac. The desktop receives a signed finite receipt, with no WorkOS
-tokens or API key. One account supports up to two Macs. An individual reset
-releases only the selected Mac and leaves the other Mac’s access intact. Resetting
-all Macs invalidates both assignments and earlier approved pairing requests.
-Receipt expiry is capped at the subscription end
-and 48 hours. Ordinary subscription expiry, revocation, and offline limits retain
-the admitted session until quit. Removing a Mac is different: receipt v3 carries
-a signed `device-removed` reason that immediately closes its running local
-access when received. Updated account clients verify every 15 seconds, including
-retry after an outage, and verify again on app focus or sleep resume. Local work
-is saved, sharing and playback stop, and the Mac must complete a fresh sign-in
-and browser approval to reconnect. An offline Mac learns of removal when it can
-reach the server. Legacy verification remains on its five-minute cadence.
-Device identity and receipts use encrypted local storage, which can access macOS
-Keychain. The app exposes account sign-in and subscription access.
+Desktop account sign-in opens WorkOS in the external browser, then asks the user
+to confirm the named computer before using a free slot. If both slots are occupied,
+it shows the named computers and their last use so the user can remove one and finish
+signing in. Every app session requires a signed account session, including
+joining collaboration. The account session is independent of the subscription:
+a subscription enables local projects and hosting; joining collaboration is free
+for signed-in users. The desktop receives signed receipts, never WorkOS tokens.
+One account supports up to two signed-in Macs, including accounts without a plan.
+
+Desktop Log out and the account console's Remove Mac revoke the same device
+session. The app returns to login when it receives signed revocation. Reapproval
+creates a new session ID; old proofs and approved pairing requests cannot restore
+a revoked session. Removing one Mac leaves the other signed in. Updated clients
+verify every 15 seconds and on app focus or sleep resume. Offline account receipts
+last up to 48 hours; an offline Mac learns of removal when it reconnects or its
+receipt expires. Subscription expiry removes local entitlement while preserving
+login and joining collaboration. Device identity and receipts use encrypted local
+storage, which can access macOS Keychain. Existing binaries retain their legacy
+license protocol until updated.
+
+Every desktop approval requires an explicit Approve computer sign-in action naming
+the computer, including browser launches from the app and returns from hosted authentication.
+Browser navigation metadata does not establish which app initiated a request.
+Approval uses a fresh, account/session/pairing-bound CSRF token and a same-origin
+POST; GET does not admit a device. Replacing a computer and admitting the new one
+share one guarded transaction. Cancellation also revokes a concurrently approved
+session in one transaction. Success uses the Photodepot logo and wordmark.
 
 ### Customer account and requests
 
 Users can sign in at `/account` to view their trial or standard plan, expiry, and
 connected Macs. Account cookies are separate from admin cookies. Customers see
 only their own subscription and latest 50 requests; administrator notes, review
-notes, subscription audits, and device keys are excluded. A subscription revision is returned only to guard concurrent preference changes.
+notes, subscription audits, and device keys are excluded. Subscription revisions guard concurrent preference changes. Connected Macs are listed independently of the subscription, so free accounts can remove them too.
 
 Users remove a connected Mac directly with a same-origin `remove-device` action,
-its device ID, and the subscription revision. The server accepts only that
-account's current assignment, invalidates its pairing epoch, records the action,
-and frees its slot. The other Mac and subscription remain unchanged. Stale edits
-require refreshing the account. New Mac removal requests are rejected; existing
-request history remains available.
+its device ID, session ID, and expected session revision. The server accepts only
+the authenticated account's current session, revokes it, and frees its slot. The
+other Mac and subscription remain unchanged. Stale edits require refreshing the
+account. Legacy assignments use the subscription revision while older clients
+remain supported. Existing request history remains available.
 
 Renewal requests still require administrator review. Retries return the existing
 open request, with up to five new requests per rolling 24 hours. Acknowledged

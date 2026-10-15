@@ -139,10 +139,14 @@ export async function bindSubscriptionDevice(
        WHERE user_id = ? AND status = 'active' AND started_at <= ? AND end_at > ?
        AND (? IS NULL OR binding_revision = ?)
        AND NOT EXISTS (SELECT 1 FROM account_devices d WHERE d.device_id = ? AND (d.user_id != ? OR d.public_key != ?))
+       AND NOT EXISTS (SELECT 1 FROM desktop_sessions current WHERE current.device_id = ? AND current.user_id != subscriptions.user_id AND current.active = 1)
        AND (EXISTS (SELECT 1 FROM account_devices d WHERE d.device_id = ? AND d.user_id = subscriptions.user_id
          AND d.active = 1 AND d.binding_revision = subscriptions.binding_revision)
-         OR (SELECT COUNT(*) FROM account_devices d WHERE d.user_id = subscriptions.user_id
-           AND d.active = 1 AND d.binding_revision = subscriptions.binding_revision) < ${SUBSCRIPTION_DEVICE_LIMIT})
+         OR (SELECT COUNT(*) FROM (SELECT d.device_id FROM account_devices d WHERE d.user_id = subscriptions.user_id
+           AND d.active = 1 AND d.binding_revision = subscriptions.binding_revision
+           AND NOT EXISTS (SELECT 1 FROM desktop_sessions current WHERE current.device_id = d.device_id AND current.active = 1)
+           UNION SELECT ds.device_id FROM desktop_sessions ds WHERE ds.user_id = subscriptions.user_id AND ds.active = 1) used
+           WHERE used.device_id != ?) < ${SUBSCRIPTION_DEVICE_LIMIT})
        ${pairingCondition} RETURNING *`
       )
       .bind(
@@ -157,6 +161,8 @@ export async function bindSubscriptionDevice(
         deviceId,
         userId,
         publicKey,
+        deviceId,
+        deviceId,
         deviceId,
         ...(pairing
           ? [
@@ -230,8 +236,9 @@ export async function resetSubscriptionDevice(
        ${
          deviceId === undefined
            ? ""
-           : `AND EXISTS (SELECT 1 FROM account_devices d WHERE d.user_id = subscriptions.user_id
-         AND d.device_id = ? AND d.active = 1 AND d.binding_revision = subscriptions.binding_revision)`
+           : `AND (EXISTS (SELECT 1 FROM account_devices d WHERE d.user_id = subscriptions.user_id
+         AND d.device_id = ? AND d.active = 1 AND d.binding_revision = subscriptions.binding_revision)
+         OR EXISTS (SELECT 1 FROM desktop_sessions ds WHERE ds.user_id = subscriptions.user_id AND ds.device_id = ? AND ds.active = 1))`
        } RETURNING *`
       )
       .bind(
@@ -239,7 +246,7 @@ export async function resetSubscriptionDevice(
         now,
         userId,
         expectedRevision,
-        ...(deviceId === undefined ? [] : [deviceId])
+        ...(deviceId === undefined ? [] : [deviceId, deviceId])
       ),
     database
       .prepare(
@@ -272,10 +279,28 @@ export async function resetSubscriptionDevice(
         ...(deviceId === undefined ? [] : [deviceId]),
         auditId
       ),
+    database
+      .prepare(
+        `UPDATE desktop_sessions SET active = 0, revision = revision + 1, updated_at = ?
+      WHERE user_id = ? AND active = 1 ${deviceId === undefined ? "" : "AND device_id = ?"}
+      AND EXISTS (SELECT 1 FROM subscription_audit WHERE id = ?)`
+      )
+      .bind(
+        now,
+        userId,
+        ...(deviceId === undefined ? [] : [deviceId]),
+        auditId
+      ),
+    database
+      .prepare(
+        `UPDATE account_pairings SET status = 'cancelled' WHERE user_id = ? AND account_version = 1
+      ${deviceId === undefined ? "" : "AND device_id = ?"} AND EXISTS (SELECT 1 FROM subscription_audit WHERE id = ?)`
+      )
+      .bind(userId, ...(deviceId === undefined ? [] : [deviceId]), auditId),
     database.prepare(`${subscriptionQuery} WHERE s.user_id = ?`).bind(userId),
   ])
   if (!results[0].results[0]) throw new SubscriptionConflictError()
-  const row = results[3].results[0]
+  const row = results[5].results[0]
   if (!row) throw new Error("Updated subscription is unavailable")
   return subscriptionSummary(row, now)
 }
@@ -287,12 +312,26 @@ export async function listSubscriptionDevices(
   validateUserId(userId)
   const rows = await database
     .prepare(
-      `SELECT d.device_id AS id, d.binding_revision AS bindingRevision, d.assignment_revision AS assignmentRevision,
-     d.activated_at AS activatedAt, (d.active = 1 AND d.binding_revision = s.binding_revision) AS current
-     FROM account_devices d JOIN subscriptions s ON s.user_id = d.user_id
-     WHERE d.user_id = ? ORDER BY d.activated_at DESC, d.device_id`
+      `WITH assignments AS (
+        SELECT d.device_id AS id, d.binding_revision AS bindingRevision, d.assignment_revision AS assignmentRevision,
+          d.activated_at AS activatedAt,
+          (d.active = 1 AND d.binding_revision = s.binding_revision
+            AND NOT EXISTS (SELECT 1 FROM desktop_sessions current WHERE current.device_id = d.device_id
+              AND current.user_id != d.user_id AND current.active = 1)) AS current,
+          0 AS sessionAssignment, '' AS sessionId
+        FROM account_devices d JOIN subscriptions s ON s.user_id = d.user_id WHERE d.user_id = ?
+        UNION ALL
+        SELECT ds.device_id, COALESCE(s.binding_revision, 1), ds.revision, ds.created_at, ds.active, 1, ds.id
+        FROM desktop_sessions ds LEFT JOIN subscriptions s ON s.user_id = ds.user_id WHERE ds.user_id = ?
+      ), ranked AS (
+        SELECT *, ROW_NUMBER() OVER (PARTITION BY id
+          ORDER BY current DESC, activatedAt DESC, sessionAssignment DESC, sessionId DESC) AS position
+        FROM assignments
+      )
+      SELECT id, bindingRevision, assignmentRevision, activatedAt, current FROM ranked
+      WHERE position = 1 ORDER BY activatedAt DESC, id`
     )
-    .bind(userId)
+    .bind(userId, userId)
     .all<Omit<SubscriptionDeviceHistory, "current"> & { current: number }>()
   return rows.results.map((row) => ({ ...row, current: row.current === 1 }))
 }
