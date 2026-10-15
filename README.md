@@ -21,7 +21,7 @@ local network, and changes are shared across the project.
 Ingest and export remain with the host. The complete Ingest, Cull, Organize, and
 Export workflow is also explained. Joining the waitlist
 is its only call to action. The original download page lives at `/tester`, with
-its Apple Silicon and Intel download buttons for version 0.2.4. An active account
+its Apple Silicon and Intel download buttons for version 0.2.5. An active account
 subscription or compatible license is required in the desktop app to open or
 create local projects.
 
@@ -95,16 +95,18 @@ signs are literal; there is no Next.js-style variable expansion.
 
 ### Downloads and releases
 
-Version 0.2.4 lets customers remove their own Mac from the account dashboard.
-An online Mac automatically saves and closes local work when it receives the signed
-removal, without restarting the app. Account sign-in, administrator-assigned
-subscriptions, and up to two connected Macs remain available. Both signed,
-notarized installers are published together.
+Version 0.2.5 improves recovery after signed Mac removal while preserving remote
+playback. An online Mac saves and closes local work as soon as it receives the
+signed removal, then requires fresh account sign-in and browser approval to
+reconnect. Account sign-in, administrator-assigned subscriptions, and up to two
+connected Macs remain available. Both signed, notarized installers are published
+together. This is the first updater-enabled release; install it manually from
+the DMG to receive future updates in the app.
 
 For that release, keep DMGs in the ignored `downloads/` folder, **outside `public/`**:
 
-- `photodepot-0.2.4-arm64.dmg`
-- `photodepot-0.2.4-x64.dmg`
+- `photodepot-0.2.5-arm64.dmg`
+- `photodepot-0.2.5-x64.dmg`
 
 Update the versioned keys in `lib/download-files.ts` for a new release, upload
 both installers, then deploy. Upload commands validate both files before writing

@@ -1,11 +1,12 @@
 # Photodepot installers
 
-Version 0.2.4 automatically ends local access when an online Mac receives its
-signed removal, without restarting the app. Keep both signed, notarized installers
-here, outside the public website:
+Version 0.2.5 improves recovery after signed Mac removal while preserving remote
+playback. It is the first updater-enabled release and must be installed manually
+from the DMG to receive future updates in the app. Keep both signed, notarized
+installers here, outside the public website:
 
-- `photodepot-0.2.4-arm64.dmg`
-- `photodepot-0.2.4-x64.dmg`
+- `photodepot-0.2.5-arm64.dmg`
+- `photodepot-0.2.5-x64.dmg`
 
 DMGs are ignored by Git. `pnpm downloads:upload` uploads them to the private R2
 bucket, and `pnpm downloads:upload:local` seeds local development storage.

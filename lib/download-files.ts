@@ -9,8 +9,8 @@ export function isArchitecture(value: string): value is Architecture {
 
 // Versioned R2 object keys, shared by the API and release upload script.
 export const DOWNLOAD_FILES: Record<Architecture, string> = {
-  arm64: "photodepot-0.2.4-arm64.dmg",
-  x64: "photodepot-0.2.4-x64.dmg",
+  arm64: "photodepot-0.2.5-arm64.dmg",
+  x64: "photodepot-0.2.5-x64.dmg",
 }
 
 export function downloadRange(header: string | null, size: number) {
