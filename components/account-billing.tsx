@@ -24,6 +24,7 @@ type BillingState = {
   portalEnabled?: boolean
   trialDays: number | null
   accessConnected: boolean
+  accessUnavailable?: boolean
   managedBy: "workos"
 }
 class BillingError extends Error {
@@ -110,6 +111,8 @@ function readBilling(value: unknown): BillingState {
         Object.values(state.prices).some((price) => !validPrice(price)))) ||
     typeof state.hasCustomer !== "boolean" ||
     typeof state.accessConnected !== "boolean" ||
+    (state.accessUnavailable !== undefined &&
+      typeof state.accessUnavailable !== "boolean") ||
     state.managedBy !== "workos" ||
     (state.portalEnabled !== undefined &&
       typeof state.portalEnabled !== "boolean") ||
@@ -167,11 +170,13 @@ export function AccountBilling({
   refreshVersion,
   disabled,
   hasAccess,
+  accessUnavailable: accountAccessUnavailable = false,
   onAccessRefresh,
 }: {
   refreshVersion: number
   disabled: boolean
   hasAccess: boolean
+  accessUnavailable?: boolean
   onAccessRefresh: () => void
 }) {
   const [billing, setBilling] = useState<BillingState | null>(null)
@@ -236,7 +241,13 @@ export function AccountBilling({
     !!subscription && !terminalStatuses.has(subscription.status)
   const healthy =
     subscribed && ["active", "trialing"].includes(subscription.status)
-  const confirming = healthy && !hasAccess && billing?.accessConnected !== false
+  const accessUnavailable =
+    accountAccessUnavailable || billing?.accessUnavailable === true
+  const confirming =
+    healthy &&
+    !hasAccess &&
+    !accessUnavailable &&
+    billing?.accessConnected !== false
   useEffect(() => {
     const refresh = () => {
       if (
@@ -361,9 +372,15 @@ export function AccountBilling({
           Checkout closed. Your plan hasn’t changed.
         </p>
       )}
-      {checkoutReturn === "success" && hasAccess && (
+      {checkoutReturn === "success" && hasAccess && !accessUnavailable && (
         <p role="status" className={styles.success}>
           Your subscription is active.
+        </p>
+      )}
+      {accessUnavailable && (
+        <p role="status" className={styles.note}>
+          We couldn’t check subscription access. You can still manage your
+          subscription and authorized devices.
         </p>
       )}
       <div className={styles.plans}>
@@ -515,7 +532,7 @@ export function AccountBilling({
           )}
         </div>
       )}
-      {error && (
+      {(error || accessUnavailable) && (
         <Button
           className={styles.button}
           variant="outline"

@@ -11,6 +11,7 @@ import {
   type Env,
 } from "../../../lib/cloudflare.ts"
 import { getAccountEntitlement } from "../../../lib/account-entitlement.ts"
+import { resolveAccountAccess } from "../../../lib/account-access.ts"
 import {
   AccountDeviceConflictError,
   listAccountDevices,
@@ -77,11 +78,20 @@ export async function handleAccountSubscription(request: Request, env: Env) {
       }
     }
 
-    const entitlement = await getAccountEntitlement(env, auth.userId)
+    let access = resolveAccountAccess(null)
+    let accessUnavailable = false
+    try {
+      access = (await getAccountEntitlement(env, auth.userId)).access
+    } catch {
+      // Account management does not require paid access. Failed authorization
+      // checks must not hide the customer's devices or billing controls.
+      accessUnavailable = true
+    }
     return respond(
       json({
         user: { email: auth.email },
-        access: entitlement.access,
+        access,
+        accessUnavailable,
         devices: await listAccountDevices(env.DB, auth.userId),
       })
     )

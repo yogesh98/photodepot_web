@@ -95,6 +95,7 @@ before(async () => {
         return respond(response, 200, {
           user: { email: "customer@example.test" },
           access: state.access,
+          accessUnavailable: state.accessUnavailable ?? false,
           devices: state.devices,
         })
       if (url.pathname === "/api/account/dashboard-access")
@@ -626,6 +627,60 @@ test("checkout returns confirm paid access automatically before claiming activat
     "Activating your subscription…"
   )
   await expect(upgrade("Monthly")).toHaveCount(0)
+})
+
+test("unavailable access checks leave cancellation available and retry can confirm access", async () => {
+  setSubscription({}, false)
+  state.accessUnavailable = true
+  state.billing.accessUnavailable = true
+  await page.goto(`${origin}/account?billing=success`)
+  await expect(subscription()).toContainText(
+    "We couldn’t check subscription access."
+  )
+  await expect(subscription()).not.toContainText(
+    "Activating your subscription…"
+  )
+  await expect(subscription()).not.toContainText("Your subscription is active.")
+  await expect(cancel("Monthly")).toBeEnabled()
+  await expect(upgrade("Yearly")).toBeEnabled()
+  state.accessUnavailable = false
+  state.billing.accessUnavailable = false
+  setSubscription()
+  await page.getByRole("button", { name: "Try again", exact: true }).click()
+  await expect(subscription()).toContainText("Your subscription is active.")
+  await expect(subscription()).not.toContainText(
+    "We couldn’t check subscription access."
+  )
+  state.redirect = "https://billing.stripe.com/p/session/cancel_available"
+  await cancel("Monthly").click()
+  await page.waitForURL(state.redirect)
+  assert.deepEqual(state.posts, [{ action: "cancel" }])
+})
+
+test("unavailable access checks leave authorized devices manageable", async () => {
+  state.accessUnavailable = true
+  state.devices = [
+    {
+      id: "device_studio",
+      sessionId: "00000000-0000-4000-8000-000000000001",
+      revision: 1,
+      deviceName: "Studio Mac",
+      activatedAt: Date.now(),
+      lastUsedAt: Date.now(),
+    },
+  ]
+  await page.goto(`${origin}/account#devices`)
+  await expect(page.getByRole("status")).toContainText(
+    "We couldn’t check subscription access."
+  )
+  await page
+    .getByRole("button", { name: "Remove Studio Mac", exact: true })
+    .click()
+  await expect(page.getByRole("dialog")).toBeVisible()
+  await expect(
+    page.getByRole("button", { name: "Remove Mac", exact: true })
+  ).toBeEnabled()
+  assert.equal(state.reads, 0)
 })
 
 test("a disconnected paid account can confirm its identity without exposing connection diagnostics", async () => {

@@ -68,17 +68,20 @@ export async function listAdminUsers(
     throw new TypeError("Invalid user filter, search or page.")
   const users: WorkOSUserSummary[] = []
   const seenCursors = new Set<string>()
-  // Bound provider work per request. A continuation is always returned when more
-  // source rows exist, even if none in these pages match. No client-only filtering.
+  // Each account can refresh independent WorkOS credentials and run receipt CAS
+  // queries. Bound hydrated accounts as well as provider pages so filtered scans
+  // stay within the Free plan's subrequest budget.
+  let remainingUsers = 20
   for (let scannedPages = 0; scannedPages < 10; scannedPages++) {
     const page = await listWorkOSUsers(env, cursor)
-    const userIds = page.users.map((user) => user.id)
+    const selectedUsers = page.users.slice(0, remainingUsers)
+    remainingUsers -= selectedUsers.length
+    const userIds = selectedUsers.map((user) => user.id)
     const [entitlements, deviceLists] = await Promise.all([
       listAccountEntitlements(env, userIds, now),
       listAccountDevicesForUsers(env.DB, userIds),
     ])
-    for (let index = 0; index < page.users.length; index++) {
-      const user = page.users[index]
+    for (const user of selectedUsers) {
       const summary = {
         id: user.id,
         email: user.email,
@@ -93,20 +96,21 @@ export async function listAdminUsers(
         devices: deviceLists.get(user.id) ?? [],
       }
       if (matches(summary, filter, search, now)) users.push(summary)
-      if (users.length === 100)
-        return {
-          users,
-          nextCursor:
-            index < page.users.length - 1 || page.nextCursor ? user.id : null,
-        }
     }
-    if (!page.nextCursor) return { users, nextCursor: null }
-    if (seenCursors.has(page.nextCursor) || page.nextCursor === cursor)
+    // WorkOS may have returned additional users even on its final page. Resume
+    // after the last account we actually processed, including empty match pages.
+    const nextCursor =
+      selectedUsers.length < page.users.length
+        ? selectedUsers.at(-1)!.id
+        : page.nextCursor
+    if (!nextCursor) return { users, nextCursor: null }
+    if (seenCursors.has(nextCursor) || nextCursor === cursor)
       throw new Error("User directory pagination did not advance")
-    seenCursors.add(page.nextCursor)
-    cursor = page.nextCursor
+    seenCursors.add(nextCursor)
+    cursor = nextCursor
     // Preserve ordinary directory pagination; scans are only needed for searches.
-    if (filter === "all" && !search) return { users, nextCursor: cursor }
+    if (remainingUsers === 0 || (filter === "all" && !search))
+      return { users, nextCursor: cursor }
   }
   return { users, nextCursor: cursor ?? null }
 }

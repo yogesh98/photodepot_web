@@ -320,6 +320,7 @@ export function CustomerAccountPage() {
                 </h1>
                 <AccountBilling
                   hasAccess={active}
+                  accessUnavailable={account.accessUnavailable}
                   refreshVersion={0}
                   disabled={busy || sessionExpired}
                   onAccessRefresh={refreshAccess}
@@ -335,6 +336,12 @@ export function CustomerAccountPage() {
                 <h1 id="devices-title" className={styles.sectionTitle}>
                   Authorized devices
                 </h1>
+                {account.accessUnavailable && (
+                  <p role="status">
+                    We couldn’t check subscription access. You can still manage
+                    your authorized devices.
+                  </p>
+                )}
                 <div className={styles.deviceList}>
                   {devices.length ? (
                     <ol className={styles.devices}>

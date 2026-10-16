@@ -191,15 +191,24 @@ export async function billingSummary(
     portalEnabled: false,
     trialDays: null,
     accessConnected: false,
+    accessUnavailable: false,
     managedBy: "workos" as const,
   }
   if (!config) return disabled
   const customer = await getBillingCustomer(env.DB, userId)
   let connected = await hasWorkOSBillingSession(env.DB, userId)
-  if (connected)
-    await getWorkOSEntitlement(env, userId, {
-      forceRefresh: options.forceRefresh,
-    })
+  let accessUnavailable = false
+  if (connected) {
+    try {
+      await getWorkOSEntitlement(env, userId, {
+        forceRefresh: options.forceRefresh,
+      })
+    } catch {
+      // Stripe's display and management flows remain available when an
+      // independent access check fails. This never authorizes paid features.
+      accessUnavailable = true
+    }
+  }
   connected = await hasWorkOSBillingSession(env.DB, userId)
   const stripe = options.stripe ?? createBillingStripe(config)
   const intervals =
@@ -287,6 +296,7 @@ export async function billingSummary(
         ? null
         : config.trialDays,
     accessConnected: connected,
+    accessUnavailable,
     managedBy: "workos" as const,
   }
 }

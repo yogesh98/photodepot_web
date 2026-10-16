@@ -203,7 +203,13 @@ test("customer GET shows only the authenticated account and no administrator dat
   const account = await response.json()
   assert.equal(account.user.email, "user_dashboard_customer@example.test")
   assert.equal(account.access.canHost, false)
-  assert.deepEqual(Object.keys(account).sort(), ["access", "devices", "user"])
+  assert.deepEqual(Object.keys(account).sort(), [
+    "access",
+    "accessUnavailable",
+    "devices",
+    "user",
+  ])
+  assert.equal(account.accessUnavailable, false)
   assert.deepEqual(
     account.devices.map((device) => device.id),
     [deviceId]

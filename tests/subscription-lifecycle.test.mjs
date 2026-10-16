@@ -392,7 +392,13 @@ test("browser login, subscription access and independent computer removal share 
   let view = await account(accountCookie)
   assert.equal(view.access.canHost, false)
   assert.equal(view.devices[0].sessionId, firstSession.sessionId)
-  assert.deepEqual(Object.keys(view).sort(), ["access", "devices", "user"])
+  assert.deepEqual(Object.keys(view).sort(), [
+    "access",
+    "accessUnavailable",
+    "devices",
+    "user",
+  ])
+  assert.equal(view.accessUnavailable, false)
   const retired = await handleAccountSubscription(
     request(
       "/api/account/subscription",

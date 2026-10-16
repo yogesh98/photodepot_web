@@ -41,6 +41,7 @@ export interface AccountRequestAudit {
 export interface CustomerAccount {
   user: { email: string }
   access: AccountAccess
+  accessUnavailable?: boolean
   devices: AccountDevice[]
 }
 export interface AdminRequestQueue {

@@ -13,8 +13,12 @@ import { handleWorkOSBillingAuthorize } from "../lib/workos-billing-auth.ts"
 import { billingSummary } from "../lib/stripe-billing.ts"
 import {
   handleAdminCallback,
+  authenticateWorkOSAccount,
   verifyWorkOSAccessToken,
 } from "../lib/license-admin-auth.ts"
+import { handleAccountSubscription } from "../functions/api/account/subscription.ts"
+import { handleAccountBilling } from "../functions/api/account/billing.ts"
+import { getAccountEntitlement } from "../lib/account-entitlement.ts"
 
 const origin = "https://photodepot.app"
 const clientId = "client_workos_entitlements_tests"
@@ -732,6 +736,147 @@ test("transient refresh failures preserve credentials and never extend the old p
     before
   )
   assert.equal((await storedTokens()).refreshToken, "refresh_backend_initial")
+})
+
+test("a backend refresh outage preserves billing and device management without authorizing access", async () => {
+  enableCheckout()
+  env.STRIPE_PORTAL_CONFIGURATION_ID = "bpc_fixture"
+  await store()
+  const tokens = await storedTokens()
+  const encrypted = await sealData(
+    {
+      ...tokens,
+      accessToken: jwt({
+        iat: Math.floor(epoch / 1000) - 600,
+        exp: Math.floor(epoch / 1000) - 300,
+      }),
+    },
+    { password, ttl: 0 }
+  )
+  sqlite
+    .prepare("UPDATE workos_billing_sessions SET encrypted_tokens = ?")
+    .run(encrypted)
+  sqlite
+    .prepare("UPDATE workos_entitlements SET issued_at = ?, expires_at = ?")
+    .run(epoch - 600_000, epoch - 300_000)
+  const priorProof = sqlite.prepare("SELECT * FROM workos_entitlements").get()
+  const deviceSessionId = "00000000-0000-4000-8000-000000000001"
+  sqlite
+    .prepare(
+      `INSERT INTO desktop_sessions (id,device_id,user_id,email,public_key,created_at,updated_at,device_name)
+      VALUES (?, 'device_fixture', ?, 'billing@example.test', 'fixture', ?, ?, 'Studio Mac')`
+    )
+    .run(deviceSessionId, userId, epoch, epoch)
+  subscriptionResponse.data = [
+    {
+      id: "sub_fixture",
+      customer: "cus_billing",
+      livemode: false,
+      status: "active",
+      items: {
+        data: [
+          {
+            id: "si_fixture",
+            quantity: 1,
+            current_period_end: Math.floor(epoch / 1000) + 86400,
+            price: {
+              id: "price_monthly",
+              unit_amount: 2000,
+              currency: "usd",
+              recurring: { interval: "month", interval_count: 1 },
+            },
+          },
+        ],
+        has_more: false,
+      },
+    },
+  ]
+  const providerFetch = globalThis.fetch
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input))
+    if (url.pathname === "/v1/billing_portal/configurations/bpc_fixture")
+      return Response.json({
+        id: "bpc_fixture",
+        active: true,
+        livemode: false,
+        features: {
+          subscription_cancel: { enabled: true, mode: "at_period_end" },
+        },
+      })
+    if (url.pathname === "/v1/billing_portal/sessions")
+      return Response.json({
+        customer: "cus_billing",
+        livemode: false,
+        configuration: "bpc_fixture",
+        url: "https://billing.stripe.com/p/session/cancel_fixture",
+      })
+    return providerFetch(input, init)
+  }
+  const cookie = await browserCookie()
+  const accountRequest = () => request("/api/account/subscription", cookie)
+  assert.equal(
+    (await authenticateWorkOSAccount(accountRequest(), env)).userId,
+    userId
+  )
+  authenticationFailure = new Error("temporary network failure")
+  const account = await handleAccountSubscription(accountRequest(), env)
+  assert.equal(account.status, 200)
+  const accountBody = await account.json()
+  assert.equal(accountBody.accessUnavailable, true)
+  assert.equal(accountBody.access.canUseLocal, false)
+  assert.equal(accountBody.access.canHost, false)
+  assert.equal(accountBody.devices[0].sessionId, deviceSessionId)
+  const billing = await handleAccountBilling(
+    request("/api/account/billing?refresh=true", cookie),
+    env
+  )
+  assert.equal(billing.status, 200)
+  const billingBody = await billing.json()
+  assert.equal(billingBody.accessUnavailable, true)
+  assert.equal(billingBody.accessConnected, true)
+  assert.equal(billingBody.subscription.status, "active")
+  assert.equal(billingBody.portalEnabled, true)
+  assert.deepEqual(billingBody.prices.monthly, {
+    amount: 2000,
+    currency: "usd",
+  })
+  const post = (path, body) =>
+    new Request(`${origin}${path}`, {
+      method: "POST",
+      headers: { cookie, origin, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    })
+  const cancellation = await handleAccountBilling(
+    post("/api/account/billing", { action: "cancel" }),
+    env
+  )
+  assert.equal(cancellation.status, 200)
+  assert.equal(
+    (await cancellation.json()).url,
+    "https://billing.stripe.com/p/session/cancel_fixture"
+  )
+  const removal = await handleAccountSubscription(
+    post("/api/account/subscription", {
+      action: "remove-device",
+      sessionId: deviceSessionId,
+      expectedSessionRevision: 1,
+    }),
+    env
+  )
+  assert.equal(removal.status, 200)
+  assert.deepEqual((await removal.json()).devices, [])
+  // The account-management fallback never changes the receipt authorizer.
+  await assert.rejects(getAccountEntitlement(env, userId), /temporary network/)
+  assert.deepEqual(
+    sqlite.prepare("SELECT * FROM workos_entitlements").get(),
+    priorProof
+  )
+  assert.equal((await storedTokens()).refreshToken, "refresh_backend_initial")
+  authenticationFailure = null
+  const recovered = await handleAccountSubscription(accountRequest(), env)
+  const recoveredBody = await recovered.json()
+  assert.equal(recoveredBody.accessUnavailable, false)
+  assert.equal(recoveredBody.access.canUseLocal, true)
 })
 
 test("a per-account lease serializes force refreshes", async () => {
