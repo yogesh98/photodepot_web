@@ -8,7 +8,6 @@ import type {
   AccountRequestAudit,
   AdminRequestQueue,
 } from "@/lib/account-requests"
-import type { WorkOSUserSummary } from "@/lib/subscription-types"
 import styles from "./subscription-dashboard.module.css"
 
 type QueueItem = AdminRequestQueue["requests"][number]
@@ -65,11 +64,13 @@ function date(value: number) {
 export function AdminSubscriptionRequests({
   disabled,
   onReview,
+  onApprove,
   refreshVersion = 0,
 }: {
   disabled: boolean
   refreshVersion?: number
-  onReview: (user: WorkOSUserSummary) => void
+  onReview: (userId: string) => void
+  onApprove: (request: QueueItem) => void
 }) {
   const [queue, setQueue] = useState<AdminRequestQueue | null>(null)
   const [includeClosed, setIncludeClosed] = useState(false)
@@ -150,7 +151,7 @@ export function AdminSubscriptionRequests({
     selectedId.current = item.id
     setSelected(item)
     setNote(item.adminNote)
-    setAction(item.status === "pending" ? "acknowledge" : "resolve")
+    setAction(item.status === "pending" ? "acknowledge" : "reject")
     setAudit([])
     setError("")
     setNotice("")
@@ -195,9 +196,7 @@ export function AdminSubscriptionRequests({
         expectedRevision: selected.revision,
         note,
       })
-      setNotice(
-        "Request review saved. Subscription access changes are managed separately."
-      )
+      setNotice("Request review saved.")
       await load()
     } catch (cause) {
       setError(
@@ -213,10 +212,7 @@ export function AdminSubscriptionRequests({
   }
   function openAccount(item: QueueItem) {
     if (!item.user) return
-    onReview({
-      ...item.user,
-      subscription: item.subscription,
-    })
+    onReview(item.userId)
   }
   return (
     <section
@@ -280,8 +276,10 @@ export function AdminSubscriptionRequests({
               <div className={styles.queueItemHeading}>
                 <div>
                   <strong>
-                    {item.action === "renewal" ? "Renewal" : "Mac removal"} ·{" "}
-                    {item.email}
+                    {item.action === "renewal"
+                      ? "Access request"
+                      : "Mac removal"}{" "}
+                    · {item.email}
                   </strong>
                   <small>
                     {item.userId} · Submitted {date(item.createdAt)}
@@ -301,7 +299,7 @@ export function AdminSubscriptionRequests({
               </div>
               <p className={styles.queueContext}>
                 {item.subscription
-                  ? `${item.subscription.type === "trial" ? "Trial" : "Standard"} · ${item.subscription.status} · expires ${date(item.subscription.endsAt)} · ${item.subscription.devices.length}/${item.subscription.deviceLimit} Macs`
+                  ? `${item.subscription.type === "trial" ? "Trial" : "Standard"} · ${item.subscription.status} · expires ${date(item.subscription.endsAt)}`
                   : "No subscription assigned"}
               </p>
               {!item.user && (
@@ -330,6 +328,22 @@ export function AdminSubscriptionRequests({
                 >
                   Open account
                 </Button>
+                {item.action === "renewal" &&
+                  ["pending", "acknowledged"].includes(item.status) && (
+                    <Button
+                      type="button"
+                      onClick={() => onApprove(item)}
+                      disabled={
+                        disabled ||
+                        busy ||
+                        sessionExpired ||
+                        reloadRequired ||
+                        !item.user
+                      }
+                    >
+                      Approve and extend
+                    </Button>
+                  )}
                 <Button
                   variant="outline"
                   type="button"
@@ -347,7 +361,7 @@ export function AdminSubscriptionRequests({
                 <form className={styles.queueReview} onSubmit={save}>
                   <h3>
                     Review{" "}
-                    {item.action === "renewal" ? "renewal" : "Mac removal"}{" "}
+                    {item.action === "renewal" ? "access" : "Mac removal"}{" "}
                     request
                   </h3>
                   {["pending", "acknowledged"].includes(item.status) && (
@@ -365,9 +379,11 @@ export function AdminSubscriptionRequests({
                               Acknowledge — under review
                             </option>
                           )}
-                          <option value="resolve">
-                            Complete — work finished
-                          </option>
+                          {item.action === "reset-device" && (
+                            <option value="resolve">
+                              Complete — work finished
+                            </option>
+                          )}
                           <option value="reject">Decline</option>
                         </select>
                       </label>
@@ -385,8 +401,9 @@ export function AdminSubscriptionRequests({
                         />
                       </label>
                       <p>
-                        Saving this review updates only the request’s status. It
-                        does not grant access or remove a Mac.
+                        Use Approve and extend to grant access and complete this
+                        request together. Declining or acknowledging keeps
+                        access unchanged.
                       </p>
                     </>
                   )}

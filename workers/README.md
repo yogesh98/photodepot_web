@@ -22,7 +22,7 @@ no user login authority and can only trigger bounded reminder batches. It must
 never appear in browser assets or desktop settings. Its endpoint denies unsigned
 and incorrect-token requests.
 
-After deploying the website with migrations through `0010`, compile the scheduler
+After deploying the website with all current migrations, compile the scheduler
 with `pnpm reminders:build`, deploy it with `pnpm reminders:deploy`, and add the token:
 
 ```sh
@@ -43,8 +43,12 @@ Resend's
 [idempotency window](https://resend.com/docs/dashboard/emails/idempotency-keys) lasts
 24 hours. Unknown outcomes outside that window stop as **uncertain** for admin review
 instead of risking another message. Provider rejection is recorded as **failed**.
-Changed/revoked/expired terms and deleted accounts cancel pending messages. Email
+Changed/revoked/expired terms, reminder opt-outs, and deleted accounts cancel pending messages. Email
 verification is required; a changed recipient cancels retries to the previous address.
 Provider responses, credentials and message recipients are not logged.
 
 No payment provider, automatic charges, or renewal billing is connected.
+
+Reminder preferences are independent of access. The account-access migration maps
+old canceled-renewal preferences to reminders disabled, preserving dates and audits.
+Paid renewal messages will belong to the future billing provider.

@@ -10,7 +10,6 @@ import type {
 const millisecondsPerDay = 24 * 60 * 60 * 1000
 const maximumTimestamp = 8_640_000_000_000_000
 export const SUBSCRIPTION_EXPIRING_DAYS = 7
-export const SUBSCRIPTION_DEVICE_LIMIT = 2
 
 export interface SubscriptionRow {
   id: string
@@ -22,9 +21,7 @@ export interface SubscriptionRow {
   updated_at: number
   revision: number
   notes: string
-  binding_revision: number
-  canceled_at?: number | null
-  current_devices_json?: string
+  reminder_opt_out_at?: number | null
 }
 
 export class SubscriptionConflictError extends Error {
@@ -101,29 +98,12 @@ export function subscriptionSummary(
     updatedAt: row.updated_at,
     revision: row.revision,
     notes: row.notes,
-    bindingRevision: row.binding_revision,
-    devices: JSON.parse(row.current_devices_json ?? "[]"),
-    deviceLimit: SUBSCRIPTION_DEVICE_LIMIT,
-    cancelAtPeriodEnd: row.canceled_at != null,
-    canceledAt: row.canceled_at ?? null,
+    remindersEnabled: row.reminder_opt_out_at == null,
   }
 }
 
-export const subscriptionSelectFields = `s.*, (
-  SELECT COALESCE(json_group_array(json_object('id', mac.device_id,
-    'bindingRevision', mac.binding_revision, 'assignmentRevision', mac.assignment_revision,
-    'activatedAt', mac.activated_at)), '[]')
-  FROM (SELECT device_id, binding_revision, assignment_revision, activated_at FROM account_devices
-    WHERE user_id = s.user_id AND active = 1 AND binding_revision = s.binding_revision
-      AND NOT EXISTS (SELECT 1 FROM desktop_sessions foreign_session WHERE foreign_session.device_id = account_devices.device_id
-        AND foreign_session.user_id != s.user_id AND foreign_session.active = 1)
-    UNION ALL SELECT ds.device_id, s.binding_revision, ds.revision, ds.created_at
-    FROM desktop_sessions ds WHERE ds.user_id = s.user_id AND ds.active = 1
-      AND NOT EXISTS (SELECT 1 FROM account_devices old WHERE old.device_id = ds.device_id
-        AND old.user_id = s.user_id AND old.active = 1 AND old.binding_revision = s.binding_revision)
-    ORDER BY activated_at, device_id) mac
-  ) AS current_devices_json`
-
+export const subscriptionSelectFields =
+  "s.id,s.user_id,s.type,s.status,s.started_at,s.end_at,s.updated_at,s.revision,s.notes,s.reminder_opt_out_at"
 export const subscriptionQuery = `SELECT ${subscriptionSelectFields} FROM subscriptions s`
 
 export async function listSubscriptions(
@@ -183,13 +163,10 @@ export async function getSubscriptionOverview(
        COALESCE(SUM(status = 'active' AND end_at <= ?), 0) AS expired,
        COALESCE(SUM(status = 'revoked'), 0) AS revoked,
        COALESCE(SUM(status = 'active' AND end_at > ? AND end_at <= ?), 0) AS expiringSoon,
-       COALESCE(SUM(status = 'active' AND end_at > ? AND canceled_at IS NOT NULL), 0) AS canceling,
        (SELECT COUNT(*) FROM waitlist) AS waitlistTotal,
        (SELECT COUNT(*) FROM waitlist WHERE julianday(created_at) >= julianday(?) AND julianday(created_at) <= julianday(?)) AS waitlistLast30Days,
        (SELECT COUNT(*) FROM subscription_requests WHERE status IN ('pending', 'acknowledged')) AS openRequests,
-       (SELECT COUNT(*) FROM (SELECT d.device_id FROM account_devices d JOIN subscriptions owner ON owner.user_id = d.user_id
-         WHERE d.active = 1 AND d.binding_revision = owner.binding_revision
-         UNION SELECT device_id FROM desktop_sessions WHERE active = 1)) AS assignedMacs
+       (SELECT COUNT(*) FROM desktop_sessions WHERE active = 1) AS assignedMacs
        FROM subscriptions`
     )
     .bind(
@@ -199,7 +176,6 @@ export async function getSubscriptionOverview(
       now,
       now,
       expiringAt,
-      now,
       new Date(Math.max(0, now - 30 * millisecondsPerDay)).toISOString(),
       new Date(now).toISOString()
     )
@@ -214,13 +190,7 @@ async function mutateWithAudit(
   userId: string,
   expectedRevision: number,
   action:
-    | "set"
-    | "revoke"
-    | "restore"
-    | "extend"
-    | "update-notes"
-    | "cancel-renewal"
-    | "resume-renewal",
+    "set" | "revoke" | "restore" | "extend" | "update-notes" | "set-reminders",
   actor: string,
   detail: string,
   reason: string,
@@ -429,53 +399,34 @@ export async function updateSubscriptionNotes(
   )
 }
 
-/** Records manual renewal intent without changing access, Mac assignments or billing. */
-export async function changeSubscriptionRenewal(
+/** Reminder preferences affect email only, and remain editable after access ends. */
+export async function changeSubscriptionReminders(
   database: D1Database,
   userId: string,
-  action: "cancel-renewal" | "resume-renewal",
+  enabled: boolean,
   expectedRevision: number,
   actor: string,
   now = Date.now(),
   reason?: string
 ): Promise<SubscriptionSummary> {
   validateMutation(userId, expectedRevision, actor, now)
-  if (
-    !["cancel-renewal", "resume-renewal"].includes(action) ||
-    expectedRevision < 1
-  )
-    throw new TypeError("Invalid renewal preference.")
-  const existing = await getSubscription(database, userId, now)
-  if (!existing || existing.revision !== expectedRevision)
-    throw new SubscriptionConflictError()
-  if (existing.status !== "active")
-    throw new TypeError(
-      "Renewal preferences can only be changed while access is active."
-    )
-  if (existing.cancelAtPeriodEnd === (action === "cancel-renewal"))
-    throw new TypeError(
-      action === "cancel-renewal"
-        ? "Renewal is already canceled."
-        : "Renewal is already available."
-    )
-  const cancel = action === "cancel-renewal"
-  const mutation = database
-    .prepare(
-      `UPDATE subscriptions SET canceled_at = ?, updated_at = ?, revision = revision + 1
-     WHERE user_id = ? AND revision = ? AND status = 'active' AND end_at > ?
-     AND ${cancel ? "canceled_at IS NULL" : "canceled_at IS NOT NULL"} RETURNING *`
-    )
-    .bind(cancel ? now : null, now, userId, expectedRevision, now)
+  if (typeof enabled !== "boolean" || expectedRevision < 1)
+    throw new TypeError("Invalid reminder preference.")
   return mutateWithAudit(
     database,
-    mutation,
+    database
+      .prepare(
+        `UPDATE subscriptions SET reminder_opt_out_at = ?, updated_at = ?, revision = revision + 1
+      WHERE user_id = ? AND revision = ? RETURNING *`
+      )
+      .bind(enabled ? null : now, now, userId, expectedRevision),
     userId,
     expectedRevision,
-    action,
+    "set-reminders",
     actor,
-    cancel
-      ? "Canceled renewal; access remains available until the current expiration."
-      : "Resumed eligibility for manual renewal; no automatic charge or extension.",
+    enabled
+      ? "Enabled trial ending reminders"
+      : "Disabled trial ending reminders",
     subscriptionReason(reason),
     now
   )

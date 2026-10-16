@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { readFile } from "node:fs/promises"
+import { readFile, readdir } from "node:fs/promises"
 import { after, before, beforeEach, test } from "node:test"
 import { getPlatformProxy, unstable_splitSqlQuery } from "wrangler"
 import {
@@ -11,7 +11,14 @@ import {
   listAdminRequests,
   listRequestAudit,
   reviewAccountRequest,
+  approveAccountRequest,
 } from "../lib/account-requests.ts"
+import {
+  getSubscription,
+  setSubscription,
+  changeSubscription,
+  listSubscriptionAudit,
+} from "../lib/subscription-store.ts"
 
 const now = 1_800_000_000_000
 const owner = "owner@example.test"
@@ -30,19 +37,29 @@ before(async () => {
     envFiles: [],
   })
   database = platform.env.DB
-  const sql = await readFile(
-    new URL("../migrations/0008_account_requests.sql", import.meta.url),
-    "utf8"
+  for (const filename of (
+    await readdir(new URL("../migrations/", import.meta.url))
   )
-  await database.batch(
-    unstable_splitSqlQuery(sql).map((statement) => database.prepare(statement))
-  )
+    .filter((name) => name.endsWith(".sql"))
+    .sort()) {
+    const sql = await readFile(
+      new URL(`../migrations/${filename}`, import.meta.url),
+      "utf8"
+    )
+    await database.batch(
+      unstable_splitSqlQuery(sql).map((statement) =>
+        database.prepare(statement)
+      )
+    )
+  }
 })
 beforeEach(async () => {
   await database.batch(
     [
       "DELETE FROM subscription_request_audit",
       "DELETE FROM subscription_requests",
+      "DELETE FROM subscription_audit",
+      "DELETE FROM subscriptions",
     ].map((sql) => database.prepare(sql))
   )
 })
@@ -242,4 +259,140 @@ test("validation rejects malformed targets, oversized text, and invalid review r
     )
   assert.equal((await getAccountRequest(database, request.id)).revision, 1)
   assert.equal((await listRequestAudit(database, request.id)).length, 1)
+})
+
+function approval(request, changes = {}) {
+  return {
+    id: request.id,
+    expectedRevision: 1,
+    expectedSubscriptionRevision: 0,
+    type: "trial",
+    endsAt: now + 86400000,
+    note: "Owner approval",
+    ...changes,
+  }
+}
+test("approving an access request creates the chosen grant and both audits atomically", async () => {
+  const { request } = await createAccountRequest(database, input, now)
+  const result = await approveAccountRequest(
+    database,
+    approval(request),
+    owner,
+    now + 1
+  )
+  assert.equal(result.request.status, "resolved")
+  assert.equal(result.request.revision, 2)
+  assert.equal(result.subscription.type, "trial")
+  assert.equal(result.subscription.endsAt, now + 86400000)
+  assert.equal(result.subscription.revision, 1)
+  assert.deepEqual(
+    (await listRequestAudit(database, request.id)).map((row) => row.action),
+    ["approve", "created"]
+  )
+  assert.equal((await listSubscriptionAudit(database, input.userId)).length, 1)
+})
+test("approval reactivates an existing revoked grant with explicit dates and preserves notes", async () => {
+  const grant = await setSubscription(
+    database,
+    {
+      userId: input.userId,
+      type: "trial",
+      endsAt: now + 1000,
+      expectedRevision: 0,
+      notes: "Preserve account notes",
+    },
+    owner,
+    now
+  )
+  await changeSubscription(
+    database,
+    input.userId,
+    "revoke",
+    1,
+    owner,
+    undefined,
+    now
+  )
+  const { request } = await createAccountRequest(database, input, now)
+  const result = await approveAccountRequest(
+    database,
+    approval(request, { expectedSubscriptionRevision: 2, type: "regular" }),
+    owner,
+    now + 1
+  )
+  assert.equal(result.subscription.id, grant.id)
+  assert.equal(result.subscription.status, "active")
+  assert.equal(result.subscription.type, "regular")
+  assert.equal(result.subscription.startsAt, now + 1)
+  assert.equal(result.subscription.notes, grant.notes)
+  assert.equal(result.subscription.revision, 3)
+})
+test("concurrent approvals allow one winner while stale request or grant revisions write neither half", async () => {
+  const { request } = await createAccountRequest(database, input, now)
+  await assert.rejects(
+    approveAccountRequest(
+      database,
+      approval(request, { expectedRevision: 2 }),
+      owner,
+      now
+    ),
+    AccountRequestConflictError
+  )
+  assert.equal(await getSubscription(database, input.userId, now), null)
+  assert.equal((await listRequestAudit(database, request.id)).length, 1)
+  const outcomes = await Promise.allSettled(
+    Array.from({ length: 4 }, () =>
+      approveAccountRequest(database, approval(request), owner, now + 1)
+    )
+  )
+  assert.equal(
+    outcomes.filter((result) => result.status === "fulfilled").length,
+    1
+  )
+  assert.equal((await listSubscriptionAudit(database, input.userId)).length, 1)
+  assert.equal((await listRequestAudit(database, request.id)).length, 2)
+  const next = await createAccountRequest(database, input, now + 2)
+  await assert.rejects(
+    approveAccountRequest(
+      database,
+      approval(next.request, { expectedSubscriptionRevision: 0 }),
+      owner,
+      now + 3
+    ),
+    AccountRequestConflictError
+  )
+  assert.equal(
+    (await getAccountRequest(database, next.request.id)).status,
+    "pending"
+  )
+  assert.equal((await getSubscription(database, input.userId, now)).revision, 1)
+})
+test("either audit failure rolls back the chosen grant and request resolution", async () => {
+  const { request } = await createAccountRequest(database, input, now)
+  for (const table of ["subscription_audit", "subscription_request_audit"]) {
+    await database
+      .prepare(
+        `CREATE TRIGGER reject_approval_audit BEFORE INSERT ON ${table} WHEN NEW.actor='blocked@example.test' BEGIN SELECT RAISE(ABORT,'approval audit unavailable'); END`
+      )
+      .run()
+    try {
+      await assert.rejects(
+        approveAccountRequest(
+          database,
+          approval(request),
+          "blocked@example.test",
+          now + 1
+        ),
+        /approval audit unavailable/
+      )
+      assert.equal(await getSubscription(database, input.userId, now), null)
+      assert.equal(
+        (await getAccountRequest(database, request.id)).status,
+        "pending"
+      )
+      assert.equal((await listRequestAudit(database, request.id)).length, 1)
+    } finally {
+      await database.prepare("DROP TRIGGER reject_approval_audit").run()
+    }
+  }
 })

@@ -1,4 +1,6 @@
 import type { Env } from "./cloudflare.ts"
+import { resolveAccountAccess } from "./account-access.ts"
+import { listAccountDevicesForUsers } from "./account-sessions.ts"
 import { listSubscriptions } from "./subscription-store.ts"
 import type { WorkOSUserSummary } from "./subscription-types.ts"
 import { listWorkOSUsers, WORKOS_USER_ID } from "./workos-users.ts"
@@ -12,7 +14,6 @@ export const ADMIN_USER_FILTERS = [
   "expired",
   "revoked",
   "unassigned",
-  "canceling",
 ] as const
 export type AdminUserFilter = (typeof ADMIN_USER_FILTERS)[number]
 
@@ -34,8 +35,7 @@ function matches(
       subscription.endsAt <= now + 7 * 86_400_000) ||
     (filter === "expired" && subscription?.status === "expired") ||
     (filter === "revoked" && subscription?.status === "revoked") ||
-    (filter === "unassigned" && !subscription) ||
-    (filter === "canceling" && active && subscription.cancelAtPeriodEnd)
+    (filter === "unassigned" && !subscription)
   return (
     filtered &&
     (!search ||
@@ -71,11 +71,11 @@ export async function listAdminUsers(
   // source rows exist, even if none in these pages match. No client-only filtering.
   for (let scannedPages = 0; scannedPages < 10; scannedPages++) {
     const page = await listWorkOSUsers(env, cursor)
-    const subscriptions = await listSubscriptions(
-      env.DB,
-      page.users.map((user) => user.id),
-      now
-    )
+    const userIds = page.users.map((user) => user.id)
+    const [subscriptions, deviceLists] = await Promise.all([
+      listSubscriptions(env.DB, userIds, now),
+      listAccountDevicesForUsers(env.DB, userIds),
+    ])
     for (let index = 0; index < page.users.length; index++) {
       const user = page.users[index]
       const summary = {
@@ -86,6 +86,8 @@ export async function listAdminUsers(
         emailVerified: user.emailVerified,
         createdAt: Date.parse(user.createdAt),
         subscription: subscriptions.get(user.id) ?? null,
+        access: resolveAccountAccess(subscriptions.get(user.id) ?? null, now),
+        devices: deviceLists.get(user.id) ?? [],
       }
       if (matches(summary, filter, search, now)) users.push(summary)
       if (users.length === 100)

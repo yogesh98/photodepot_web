@@ -18,12 +18,10 @@ import {
   parseDevicePublicKey,
   validDeviceProof,
   signingKey,
-  signedReceipt,
 } from "./license-crypto.ts"
+import { updateRequired } from "./license-api.ts"
 import { validDeviceName } from "./account-device-metadata.ts"
 import { allowLicenseAttempt } from "./license-rate-limit.ts"
-import { bindSubscriptionDevice } from "./subscription-devices.ts"
-import { getSubscription } from "./subscription-store.ts"
 import { getWorkOSUser } from "./workos-users.ts"
 import {
   approveDesktopSession,
@@ -52,8 +50,6 @@ interface Pairing {
   challenge: string
   status: "pending" | "approved" | "cancelled"
   user_id: string | null
-  approved_binding_revision: number | null
-  approved_device_revision: number | null
   account_version: number
   session_id: string | null
   intent: string
@@ -91,6 +87,8 @@ export async function handleAccountPairing(
   env: Env,
   action: "start" | "poll" | "cancel"
 ) {
+  if (request.headers.get("Photodepot-Account-Version") !== "1")
+    return updateRequired()
   if (request.method !== "POST") return method("POST")
   if (!request.headers.get("content-type")?.startsWith("application/json"))
     return json({ error: "Submit JSON." }, 415)
@@ -101,7 +99,7 @@ export async function handleAccountPairing(
         { error: "Account sign-in is unavailable on this hostname." },
         403
       )
-    const signer = signingKey(env.PHOTODEPOT_LICENSE_SIGNING_PRIVATE_KEY)
+    signingKey(env.PHOTODEPOT_LICENSE_SIGNING_PRIVATE_KEY)
     const body = await readJson(request)
     if (!body || typeof body !== "object" || Array.isArray(body))
       return json({ error: "Invalid request." }, 400)
@@ -185,7 +183,7 @@ export async function handleAccountPairing(
           supplied.challenge,
           now,
           now + lifetime,
-          request.headers.get("Photodepot-Account-Version") === "1" ? 1 : 0,
+          1,
           request.headers.get("Photodepot-Account-Intent") === "signup"
             ? "signup"
             : "login",
@@ -225,6 +223,7 @@ export async function handleAccountPairing(
         },
         410
       )
+    if (row.account_version !== 1) return updateRequired()
     const device = parseDevicePublicKey(row.public_key)
     if (
       row.device_id !== supplied.deviceId ||
@@ -253,72 +252,17 @@ export async function handleAccountPairing(
         { error: "This sign-in request expired. Start again on your Mac." },
         410
       )
-    const subscription = await getSubscription(env.DB, user.id, deliveryNow)
-    if (row.account_version === 1) {
-      if (request.headers.get("Photodepot-Account-Version") !== "1")
-        return json({ error: "Update Photodepot to finish signing in." }, 409)
-      const session = row.session_id
-        ? await getDesktopSession(env.DB, row.session_id)
-        : null
-      if (!session || session.active !== 1 || session.user_id !== user.id)
-        return json(
-          { error: "This Mac was logged out. Start sign-in again." },
-          409
-        )
-      return json({
-        status: "approved",
-        ...(await desktopSessionResponse(env, session, row.challenge)),
-      })
-    }
-    if (subscription?.status !== "active")
+    const session = row.session_id
+      ? await getDesktopSession(env.DB, row.session_id)
+      : null
+    if (!session || session.active !== 1 || session.user_id !== user.id)
       return json(
-        {
-          error:
-            "Your account has no active subscription. Contact Photodepot for access.",
-        },
-        403
-      )
-    const binding = await bindSubscriptionDevice(
-      env.DB,
-      {
-        userId: user.id,
-        deviceId: row.device_id,
-        publicKey: row.public_key,
-        expectedBindingRevision: row.approved_binding_revision!,
-        pairing: { tokenHash: row.token_hash, challenge: row.challenge },
-      },
-      Date.now()
-    )
-    if (!binding)
-      return json(
-        {
-          error:
-            "This sign-in request is no longer available, or both Mac slots are in use. Start again or remove a Mac from your account page.",
-        },
+        { error: "This computer was logged out. Start sign-in again." },
         409
       )
-    // Delivery is retryable to this exact device and challenge until expiry.
-    // The account approval is immutable, and every delivery checks current access.
     return json({
       status: "approved",
-      receipt: signedReceipt(
-        signer,
-        {
-          licenseId: binding.subscription.id,
-          deviceId: row.device_id,
-          type: binding.subscription.type,
-          status: "active",
-          challenge: row.challenge,
-          revision: binding.subscription.revision,
-          ...(["2", "3"].includes(
-            request.headers.get("Photodepot-Receipt-Version") ?? ""
-          )
-            ? { subscriptionEndsAt: binding.subscription.endsAt }
-            : {}),
-        },
-        Date.now(),
-        binding.subscription.endsAt
-      ),
+      ...(await desktopSessionResponse(env, session, row.challenge)),
     })
   } catch (error) {
     if (error instanceof BodyError)
@@ -442,6 +386,12 @@ export async function handleAccountApproval(request: Request, env: Env) {
         "<p>Start sign-in again in Photodepot on your Mac.</p>",
         410
       )
+    if (row.account_version !== 1)
+      return page(
+        "Update Photodepot",
+        "<p>Update Photodepot and start sign-in again on your computer.</p>",
+        410
+      )
     const auth = await authenticateWorkOSAccount(request, env)
     if (auth instanceof Response) {
       if (auth.status === 401 && request.method === "GET")
@@ -475,8 +425,7 @@ export async function handleAccountApproval(request: Request, env: Env) {
               409
             )
       )
-    const subscription = await getSubscription(env.DB, user.id)
-    if (row.account_version === 1) {
+    {
       const origin = new URL(request.url).origin
       const target = `/account/activate?code=${code}`
       const devices = await listAccountDevices(env.DB, user.id)
@@ -538,8 +487,7 @@ export async function handleAccountApproval(request: Request, env: Env) {
             )
           )
         let replacement:
-          | { deviceId: string; sessionId: string | null; revision: number }
-          | undefined
+          { deviceId: string; sessionId: string; revision: number } | undefined
         if (fields.has("replacement")) {
           let selected: unknown
           try {
@@ -569,9 +517,8 @@ export async function handleAccountApproval(request: Request, env: Env) {
           if (
             typeof value.deviceId !== "string" ||
             !devicePattern.test(value.deviceId) ||
-            (value.sessionId !== null &&
-              (typeof value.sessionId !== "string" ||
-                !/^[a-f0-9-]{36}$/.test(value.sessionId))) ||
+            typeof value.sessionId !== "string" ||
+            !/^[a-f0-9-]{36}$/.test(value.sessionId) ||
             !Number.isSafeInteger(value.revision) ||
             (value.revision as number) < 1 ||
             Object.keys(value).some(
@@ -613,56 +560,6 @@ export async function handleAccountApproval(request: Request, env: Env) {
         )
       )
     }
-    if (subscription?.status !== "active")
-      return respond(
-        page(
-          "Subscription required",
-          `<p>Signed in as <strong>${escape(user.email)}</strong>.</p><p>Your account ${subscription?.status === "expired" ? "subscription has expired" : subscription?.status === "revoked" ? "subscription has been revoked" : "does not have a subscription yet"}. Ask the Photodepot Owner to assign or renew your access, then refresh this page.</p><p><a href="/account">Open your account page</a> to review your subscription or request access.</p>${signOutForm}`,
-          403
-        )
-      )
-    if (
-      subscription.devices.length >= subscription.deviceLimit &&
-      !subscription.devices.some((device) => device.id === row.device_id)
-    )
-      return respond(
-        page(
-          "Mac limit reached",
-          `<p>Signed in as <strong>${escape(user.email)}</strong>.</p><p>Your account already has ${subscription.deviceLimit} connected Macs.</p><p><a href="/account">Open your account page</a> to remove a Mac before connecting another Mac.</p>${signOutForm}`,
-          409
-        )
-      )
-    if (request.method === "POST") {
-      const result = await env.DB.prepare(
-        "UPDATE account_pairings SET status = 'approved', user_id = ?, approved_binding_revision = (SELECT binding_revision FROM subscriptions WHERE user_id = ?), approved_device_revision = COALESCE((SELECT assignment_revision FROM account_devices WHERE device_id = ?), 1) WHERE code_hash = ? AND status = 'pending' AND expires_at > ? AND EXISTS (SELECT 1 FROM subscriptions WHERE user_id = ? AND status = 'active' AND started_at <= ? AND end_at > ?) RETURNING token_hash"
-      )
-        .bind(
-          user.id,
-          user.id,
-          row.device_id,
-          hash(code),
-          Date.now(),
-          user.id,
-          Date.now(),
-          Date.now()
-        )
-        .first()
-      if (!result)
-        return respond(
-          page(
-            "Request already used or expired",
-            "<p>Start sign-in again on your Mac.</p>",
-            409
-          )
-        )
-      return respond(signedInPage())
-    }
-    return respond(
-      page(
-        "Sign in on your Mac",
-        `<p>Signed in as <strong>${escape(user.email)}</strong>.</p><p>${subscription.type === "trial" ? "Trial" : "Standard"} subscription active until ${escape(new Date(subscription.endsAt).toISOString().slice(0, 10))}.</p><small>Only approve if you just clicked Sign in in Photodepot on your own Mac. This connects this Mac to your account (${subscription.devices.length} of ${subscription.deviceLimit} slots currently used).<br>Mac fingerprint: ${escape(row.device_id.slice(0, 12))}</small><form method="post" action="/account/activate?code=${code}"><button type="submit">Approve Mac sign-in</button></form>${signOutForm}`
-      )
-    )
   } catch {
     console.error("Account approval service unavailable")
     return page(

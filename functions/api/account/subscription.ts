@@ -11,61 +11,35 @@ import {
   type Env,
 } from "../../../lib/cloudflare.ts"
 import {
-  changeSubscriptionRenewal,
+  changeSubscriptionReminders,
   getSubscription,
   SubscriptionConflictError,
 } from "../../../lib/subscription-store.ts"
-import type { SubscriptionSummary } from "../../../lib/subscription-types.ts"
-import { resetSubscriptionDevice } from "../../../lib/subscription-devices.ts"
+import { resolveAccountAccess } from "../../../lib/account-access.ts"
 import {
-  getDesktopSession,
+  AccountDeviceConflictError,
   listAccountDevices,
-  revokeDesktopSession,
+  removeAccountDevice,
 } from "../../../lib/account-sessions.ts"
 import {
   AccountRequestLimitError,
   createAccountRequest,
   listAccountRequests,
-  type CustomerSubscription,
 } from "../../../lib/account-requests.ts"
-
-function customerSubscription(
-  subscription: SubscriptionSummary | null
-): CustomerSubscription | null {
-  return subscription
-    ? {
-        type: subscription.type,
-        status: subscription.status,
-        startsAt: subscription.startsAt,
-        endsAt: subscription.endsAt,
-        revision: subscription.revision,
-        cancelAtPeriodEnd: subscription.cancelAtPeriodEnd,
-        canceledAt: subscription.canceledAt,
-        deviceLimit: subscription.deviceLimit,
-        devices: subscription.devices.map((device) => ({
-          id: device.id,
-          activatedAt: device.activatedAt,
-        })),
-      }
-    : null
-}
 
 export async function handleAccountSubscription(request: Request, env: Env) {
   const auth = await authenticateWorkOSAccount(request, env)
   if (auth instanceof Response) return auth
+  const respond = (response: Response) => withAdminSession(response, auth)
   try {
     if (!["GET", "POST"].includes(request.method)) {
       const response = json({ error: "Method not allowed." }, 405)
       response.headers.set("Allow", "GET, POST")
-      return withAdminSession(response, auth)
+      return respond(response)
     }
-    const subscription = await getSubscription(env.DB, auth.userId)
     if (request.method === "POST") {
       if (!sameOrigin(request))
-        return withAdminSession(
-          json({ error: "Invalid request origin." }, 403),
-          auth
-        )
+        return respond(json({ error: "Invalid request origin." }, 403))
       if (
         request.headers
           .get("content-type")
@@ -73,146 +47,61 @@ export async function handleAccountSubscription(request: Request, env: Env) {
           .trim()
           .toLowerCase() !== "application/json"
       )
-        return withAdminSession(json({ error: "Submit JSON." }, 415), auth)
+        return respond(json({ error: "Submit JSON." }, 415))
       const supplied = await readJson(request)
       if (!supplied || typeof supplied !== "object" || Array.isArray(supplied))
-        return withAdminSession(json({ error: "Invalid request." }, 400), auth)
+        return respond(json({ error: "Invalid request." }, 400))
       const body = supplied as Record<string, unknown>
       if (
         body.userId !== undefined ||
-        ![
-          "request-renewal",
-          "remove-device",
-          "cancel-renewal",
-          "resume-renewal",
-        ].includes(body.action as string) ||
-        (body.message !== undefined &&
-          (typeof body.message !== "string" || body.message.length > 1000))
-      )
-        return withAdminSession(
-          json({ error: "Invalid account request." }, 400),
-          auth
+        !["request-renewal", "remove-device", "set-reminders"].includes(
+          body.action as string
         )
-      if (
-        body.action === "cancel-renewal" ||
-        body.action === "resume-renewal"
-      ) {
-        if (body.deviceId !== undefined || body.message !== undefined)
-          return withAdminSession(
-            json(
-              {
-                error:
-                  "A renewal preference does not select a Mac or create a support request.",
-              },
-              400
-            ),
-            auth
-          )
-        const updated = await changeSubscriptionRenewal(
+      )
+        return respond(json({ error: "Invalid account request." }, 400))
+      if (body.action === "set-reminders") {
+        if (
+          body.deviceId !== undefined ||
+          body.sessionId !== undefined ||
+          body.message !== undefined
+        )
+          return respond(json({ error: "Choose a reminder preference." }, 400))
+        const grant = await changeSubscriptionReminders(
           env.DB,
           auth.userId,
-          body.action,
+          body.enabled as boolean,
           body.expectedRevision as number,
           auth.email,
           Date.now(),
-          "Customer self-service"
+          "Customer reminder preference"
         )
-        return withAdminSession(
-          json({ subscription: customerSubscription(updated) }),
-          auth
+        return respond(
+          json({
+            access: resolveAccountAccess(grant),
+            reminders: {
+              enabled: grant.remindersEnabled,
+              revision: grant.revision,
+            },
+          })
         )
       }
       if (body.action === "remove-device") {
-        if (body.sessionId !== undefined) {
-          if (
-            typeof body.sessionId !== "string" ||
-            typeof body.deviceId !== "string" ||
-            body.message !== undefined ||
-            !Number.isSafeInteger(body.expectedSessionRevision) ||
-            (body.expectedSessionRevision as number) < 1
-          )
-            return withAdminSession(
-              json({ error: "Choose one of your current Macs." }, 400),
-              auth
-            )
-          const session = await getDesktopSession(env.DB, body.sessionId)
-          if (
-            !session ||
-            session.user_id !== auth.userId ||
-            session.device_id !== body.deviceId
-          )
-            return withAdminSession(
-              json({ error: "Choose one of your current Macs." }, 400),
-              auth
-            )
-          const removed = await revokeDesktopSession(
-            env.DB,
-            session.id,
-            auth.userId,
-            body.expectedSessionRevision as number
-          )
-          if (!removed)
-            return withAdminSession(
-              json(
-                { error: "This Mac session changed. Refresh and try again." },
-                409
-              ),
-              auth
-            )
-          return withAdminSession(
-            json({
-              subscription: customerSubscription(
-                await getSubscription(env.DB, auth.userId)
-              ),
-              devices: await listAccountDevices(env.DB, auth.userId),
-            }),
-            auth
-          )
-        }
-        if (
-          typeof body.deviceId !== "string" ||
-          !subscription?.devices.some(
-            (device) => device.id === body.deviceId
-          ) ||
-          body.message !== undefined
-        )
-          return withAdminSession(
-            json({ error: "Choose one of your current Mac assignments." }, 400),
-            auth
-          )
-        const updated = await resetSubscriptionDevice(
+        if (body.message !== undefined)
+          return respond(json({ error: "Choose a current computer." }, 400))
+        const devices = await removeAccountDevice(
           env.DB,
           auth.userId,
-          body.expectedRevision as number,
+          body.sessionId as string,
+          body.expectedSessionRevision as number,
           auth.email,
           Date.now(),
-          "Customer self-service Mac removal",
-          body.deviceId
+          "Customer self-service computer removal"
         )
-        return withAdminSession(
-          json({
-            subscription: customerSubscription(updated),
-            devices: await listAccountDevices(env.DB, auth.userId),
-          }),
-          auth
-        )
+        return respond(json({ devices }))
       }
-      if (body.action === "request-renewal" && body.deviceId !== undefined)
-        return withAdminSession(
-          json({ error: "A renewal request does not select a Mac." }, 400),
-          auth
-        )
-      if (
-        body.action === "request-renewal" &&
-        subscription?.cancelAtPeriodEnd &&
-        subscription.status === "active"
-      )
-        return withAdminSession(
-          json(
-            { error: "Resume renewal before submitting a renewal request." },
-            400
-          ),
-          auth
+      if (body.deviceId !== undefined || body.sessionId !== undefined)
+        return respond(
+          json({ error: "An access request does not select a computer." }, 400)
         )
       const result = await createAccountRequest(env.DB, {
         userId: auth.userId,
@@ -220,16 +109,20 @@ export async function handleAccountSubscription(request: Request, env: Env) {
         action: "renewal",
         message: body.message as string | undefined,
       })
-      return withAdminSession(json(result, result.created ? 201 : 200), auth)
+      return respond(json(result, result.created ? 201 : 200))
     }
-    return withAdminSession(
+    const grant = await getSubscription(env.DB, auth.userId)
+    return respond(
       json({
         user: { email: auth.email },
-        subscription: customerSubscription(subscription),
+        access: resolveAccountAccess(grant),
+        reminders: {
+          enabled: grant?.remindersEnabled ?? true,
+          revision: grant?.revision ?? 0,
+        },
         devices: await listAccountDevices(env.DB, auth.userId),
         requests: await listAccountRequests(env.DB, auth.userId),
-      }),
-      auth
+      })
     )
   } catch (error) {
     const status =
@@ -237,12 +130,13 @@ export async function handleAccountSubscription(request: Request, env: Env) {
         ? error.status
         : error instanceof AccountRequestLimitError
           ? 429
-          : error instanceof SubscriptionConflictError
+          : error instanceof SubscriptionConflictError ||
+              error instanceof AccountDeviceConflictError
             ? 409
             : error instanceof TypeError
               ? 400
               : 503
-    return withAdminSession(
+    return respond(
       json(
         {
           error:
@@ -253,8 +147,7 @@ export async function handleAccountSubscription(request: Request, env: Env) {
                 : "Invalid request.",
         },
         status
-      ),
-      auth
+      )
     )
   }
 }

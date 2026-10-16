@@ -1,24 +1,37 @@
-# Photodepot account subscriptions
+# Photodepot accounts and manual access
 
-The Owner dashboard lives at `https://photodepot.app/admin`. The table reads all users from the Photodepot WorkOS environment and joins their subscriptions by immutable WorkOS user ID. Creating an account or signing in allows joining collaboration; it does not grant local project or hosting access. An Owner must manually assign Trial or Standard access to each approved account. Email edits do not transfer access between accounts.
+The Accounts directory lives at `/admin`; `/admin/users`, `/admin/subscriptions`,
+and `/admin/licenses` remain aliases. WorkOS owns identity, `desktop_sessions`
+owns approved computers, and one server access resolver determines local-project
+and hosting access. Signing in permits free joining of collaboration. Owners
+assign Trial or Standard access; signups never grant access or Owner membership.
+The existing `subscriptions` table stores manual grants, preserving dates, notes,
+revisions, and audit history. It is not a billing ledger.
 
-Owners can set Trial or Standard access for 1–3,650 days or an exact end date, extend it, revoke or restore it, reset the Mac assignment, save internal notes, record action reasons, inspect current/historical Mac assignments, and read audit history. Set starts an explicit active grant now; extend adds days from the later of now or expiry and preserves revoked status. Restore preserves the expiry date, so restoring expired access does not renew it. Optimistic revisions reject stale edits with 409. Both types expire at their exact end timestamp. Dashboard totals cover the database; user search and filters clearly cover loaded WorkOS pages. This is manual access management: no customer is charged and no billing product is enabled.
+Owners can grant, extend, revoke/restore, save notes, and remove named Macs.
+Extension adds days from the later of now and expiry and preserves revoked status.
+Restore keeps expiry. Revision conflicts return 409. Device removal works for free
+accounts and uses session revisions independently of grants.
 
-`POST /api/account/webhook` remains available to acknowledge already configured WorkOS notifications. It verifies WorkOS's signature over the raw bounded body using `WORKOS_WEBHOOK_SECRET`, but does not read or change subscriptions. Configuring this webhook is optional and does not grant access. The verified account callback also leaves subscriptions unchanged. Accounts need verified email to approve a Mac session. An active Owner-assigned subscription is required only for local projects and hosting.
+Customer account responses separate `access`, `devices`, `requests`, and reminder
+preferences. Customers never receive administrator notes, review notes, device
+keys, or administrator audits. **Request access/extension** is deduplicated and
+limited to five new requests in 24 hours. **Approve and extend** opens the grant
+editor; a guarded transaction saves the chosen grant, resolves the request, and
+records both audits. A stale request or grant leaves both unchanged. Declining
+only reviews the request. Existing request and audit history stays readable.
 
-One account connects up to two Macs, with or without a subscription. Database guards enforce capacity even for simultaneous approvals. Reset one selected Mac to keep the other connected, or reset all assignments. Global binding epochs and individual assignment revisions invalidate stale approvals; a reset Mac must complete a fresh sign-in and browser approval. Device key history is retained for signed revoked receipts. Customers can remove their own selected current Mac with `POST /api/account/subscription` (`action: "remove-device"`, `deviceId`, `sessionId`, `expectedSessionRevision`; legacy assignments use `expectedRevision`) without creating an approval request. The operation is scoped to the account cookie, rejects stale revisions, and preserves the other Mac. The new desktop sign-in ships with the desktop app update; deploying the website alone cannot change installed binaries.
-
-Customers visit `/account` to see their own subscription, exact expiry, and connected Macs, remove their own selected Mac, and submit renewal requests. They never receive administrator notes, private device keys, or admin audit data. Requests are deduplicated and limited to five new requests per account in 24 hours. Owners review requests in the dashboard; acknowledgements/resolutions do not themselves grant access or reset devices.
-
-Customer sign-in starts at `/api/account/auth/login`; Owner sign-in starts at `/api/auth/login`. Both share `/api/auth/callback`, which selects the audience from the verified login transaction. An AuthKit restart preserves an unexpired Mac approval destination from the sealed customer transaction while generating new state and PKCE values. Missing or expired callback transactions offer customer sign-in recovery; a Mac whose pairing has expired must start again from the app.
-
-The daily dashboard queue includes active terms ending in seven days and pending customer requests. Trial-ending emails are eligible during the final 48 hours and use a persistent deduplicated outbox. Email delivery is disabled until a provider and sender are configured. See [scheduled reminders and delivery setup](../workers/README.md) for the hourly Worker, mail settings, retries, and uncertain delivery handling. Apply migrations through `0012` before starting these features.
+Reminders are explicit preferences rather than billing cancellation. Trial mail
+is eligible in the final 48 hours through the existing deduplicated outbox; see
+[reminder delivery](../workers/README.md). No payment provider is connected.
+The optional signed WorkOS webhook acknowledges notifications without granting
+access or changing billing.
 
 ## Configure before deployment
 
-These settings apply to both subscription sign-in and compatible legacy licensing.
+These settings apply to account sign-in and signed access receipts.
 
-1. Apply D1 migrations to the existing DB binding, first locally with `pnpm db:migrate:local` and then in production with `pnpm db:migrate`. Record the existing recovery bookmark with `pnpm exec wrangler d1 time-travel info DB --json` before migration, or keep an authorized private D1 backup. `0003_subscriptions.sql`, `0004_account_devices.sql`, and `0005_account_pairings.sql` add subscription/device/pairing records and preserve legacy license, waitlist, and download data. Migration `0007` retains the legacy assignment column and bridges in-flight old-backend bindings during the publication handoff; new code uses the two-slot assignment table.
+1. Apply D1 migrations to the existing DB binding, first locally with `pnpm db:migrate:local` and then in production with `pnpm db:migrate`. Record the existing recovery bookmark with `pnpm exec wrangler d1 time-travel info DB --json` before migration, or keep an authorized private D1 backup. `0003_subscriptions.sql`, `0004_account_devices.sql`, and `0005_account_pairings.sql` add subscription/device/pairing records and preserve legacy license, waitlist, and download data. Apply all current migrations, including the account-access migration. Historical license/device records remain stored but no longer authorize use. Legacy bridging triggers are removed, and canceled manual renewal preferences become reminder opt-outs without changing grant dates or audit history.
 2. Generate the Ed25519 signing pair outside either repository:
 
    ```sh
@@ -26,12 +39,13 @@ These settings apply to both subscription sign-in and compatible legacy licensin
    ```
 
    The file contains the **base64 DER PKCS8 private key** and is created with mode 0600 without overwriting existing files. The command prints only `PHOTODEPOT_LICENSE_PUBLIC_KEY`, the public key in base64url DER SPKI format. Save the private key in a secure backup. Set the printed public key as `PHOTODEPOT_LICENSE_PUBLIC_KEY` when building the desktop app, and use `PHOTODEPOT_LICENSE_API_URL=https://photodepot.app` (the default) for that build. The desktop API origin must match this deployment.
+
 3. Set `PHOTODEPOT_LICENSE_SIGNING_PRIVATE_KEY` as a Cloudflare Pages encrypted secret for `photodepot-web`. For example, run `pnpm exec wrangler pages secret put PHOTODEPOT_LICENSE_SIGNING_PRIVATE_KEY --project-name photodepot-web` and provide the file contents privately. Do not put it in `wrangler.jsonc`, `NEXT_PUBLIC_*`, a git-tracked file, a shell command argument, or logs.
 4. Configure WorkOS AuthKit in the intended environment with the standard hosted authentication domain. Set the application's **Initiate login URI** to `https://photodepot.app/api/account/auth/login`. AuthKit uses this URL when hosted sign-in needs to start again; pointing it at `/api/auth/login` incorrectly sends customers into the Owner organization flow. Register the exact redirect URI `https://photodepot.app/api/auth/callback` and the post-sign-out return URL `https://photodepot.app/`. Use standard email/password or Magic Auth; do not enable paid custom domains, Enterprise SSO, Directory Sync, Radar, or other add-ons. [AuthKit pricing](https://workos.com/pricing) currently includes RBAC and up to 1 million monthly active users free. This migration does not enable subscription charging.
 5. Create or select a dedicated Photodepot administration organization. Create the environment-level **Owner** role with the exact slug **`owner`**, leave **Member** (`member`) as the default role, and manually assign Owner to the administrator's membership in that organization. Copy that organization's ID into the application configuration. An Owner in a different organization is not authorized. Do not automatically enroll new signups into the admin organization, enable email-domain auto-enrollment, or make Owner the default. [WorkOS roles documentation](https://workos.com/docs/authkit/roles-and-permissions) explains membership role assignment.
 6. Set Pages environment variables `WORKOS_CLIENT_ID`, `WORKOS_ADMIN_ORGANIZATION_ID`, and `WORKOS_REDIRECT_URI=https://photodepot.app/api/auth/callback`. The administration organization setting is required only for Owner routes; customers do not need organization membership or that setting to sign in. Store `WORKOS_API_KEY` from the same WorkOS Production environment as an encrypted Pages secret. Generate a random `WORKOS_COOKIE_PASSWORD` of at least 32 characters and store it as another encrypted secret. Login uses public PKCE; the API key is used only by server user-management APIs. Keep secrets out of `wrangler.jsonc`, `NEXT_PUBLIC_*`, Git, command arguments, logs, and desktop builds. Missing or invalid settings fail closed.
 7. Leave previews unavailable for sign-in/administration unless separate staging configuration is deliberate. Every admin API and page enforces Owner membership in the dedicated organization. Account login uses separate encrypted cookies and grants no administration access. All sign-in, subscription, pairing, approval, and verification responses are `private, no-store`; keep `/account/*` in Pages Function routing. A desktop built with a test public key cannot trust production receipts.
-8. Run `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm test:auth-browser`, `pnpm build`, and `pnpm functions:build`, then deploy the backend. The authentication browser regression uses local fixtures and Chromium to verify that sign-out reaches the hosted session while the approval page still blocks external form submissions. Set `PHOTODEPOT_TEST_BROWSER_CHANNEL=chrome` to use installed Chrome instead of bundled Chromium. Production uses WorkOS as the administration login gate; the former Cloudflare Access application and settings were removed after verification. Check Owner access, Member/anonymous denial, alternate-host denial, subscription expiry/revocation, and account pairing. Desktop proof endpoints remain public and require cryptographic device signatures.
+8. Run `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm test:auth-browser`, `pnpm test:dashboard`, `pnpm build`, and `pnpm functions:build`, then deploy the backend. The authentication browser regression uses local fixtures and Chromium to verify that sign-out reaches the hosted session while the approval page still blocks external form submissions. Set `PHOTODEPOT_TEST_BROWSER_CHANNEL=chrome` to use installed Chrome instead of bundled Chromium. Production uses WorkOS as the administration login gate; the former Cloudflare Access application and settings were removed after verification. Check Owner access, Member/anonymous denial, alternate-host denial, subscription expiry/revocation, and account pairing. Desktop proof endpoints remain public and require cryptographic device signatures.
 9. Test account sign-in and Trial/Standard subscriptions on a desktop build containing the matching vendor public key. Then release that desktop build through the established signing/notarization process.
 
 For local testing, follow the website README's standard `pnpm preview` workflow and configure the license signing and WorkOS settings in `.dev.vars`. Register the matching local callback URI in WorkOS. The admin API requires an authenticated WorkOS session with the `owner` role in the configured admin organization. Automated integration tests use isolated authentication fixtures and never make real WorkOS calls. All builds use the same manual access policy.
@@ -44,36 +58,81 @@ The application validates WorkOS access tokens on every protected request and re
 
 The dashboard's **Sign in** link opens a new tab if its session expires; return and select **Refresh**. Visible user pages refresh every 30 seconds while dialogs and writes are closed. WorkOS outages preserve the existing list and show an error; an outage is never presented as an empty account list.
 
-## Desktop account sign-in
+## Desktop account sign-in and access
 
-The desktop keeps its Ed25519 device identity and opens hosted WorkOS authentication in the external browser. WorkOS tokens stay in a browser session. The desktop receives a signed account session and, when subscribed, a separate signed entitlement receipt. Local storage remains encrypted and may use macOS Keychain. Every app use requires an account session; joining collaboration does not require a subscription.
+WorkOS authentication stays in the external browser. The desktop keeps its protected
+Ed25519 device identity and receives signed `{session, receipt?}` envelopes, never
+WorkOS tokens. All supported clients use `Photodepot-Account-Version: 1` for pairing.
+Pairing lasts ten minutes. Approval explicitly names the computer and requires a
+fresh account/session/pairing-bound CSRF token and same-origin POST. GET and browser
+navigation metadata never grant consent. Pending sign-in can be canceled.
 
-`POST /api/account/pairing/start` accepts `{deviceId,devicePublicKey,challenge,deviceSignature,deviceName?}`, signed over UTF-8 `JSON.stringify(['photodepot-account-pairing-v1','start',deviceId,devicePublicKey,challenge])`. When present, `deviceName` is a trimmed computer name of 1–120 characters without Unicode control characters; append it as the final signed proof field. Updated clients send `Photodepot-Account-Version: 1`. For explicit signup, send `Photodepot-Account-Intent: signup`, which opens WorkOS with the sign-up screen hint. The response is `{pairingId,approvalUrl,expiresAt,expiresInMs,pollIntervalMs}`; the lifetime is ten minutes. Approval URLs contain a separate random code, never the polling identifier or WorkOS tokens. Both identifiers are hashed in storage.
+One account has two Mac slots, regardless of access. With both occupied, the user
+selects a named computer to remove and sign in. Replacement, capacity checks, and
+new-session creation share one guarded transaction. Polling only delivers an
+already-created session. Cancellation also revokes a concurrently approved session
+atomically. Customer removal, Owner removal, and desktop logout use the same
+session revocation transaction. Revoked sessions remain stored; reapproval creates
+a new session ID, so stale logout/removal proofs cannot revoke its replacement.
 
-`GET /account/activate?code=…` uses verified-user WorkOS login through `/api/account/auth/login`. Every free-slot approval requires an explicit Approve computer sign-in action naming the computer, including direct browser launches and returns from hosted authentication. Navigation metadata such as `Sec-Fetch-Site: none` cannot identify the originating application and never grants consent. Approval uses a fresh, browser-session/account/pairing-bound CSRF token and a same-origin POST. GET never admits a device. With both slots full, the page lists the actual names and last-used timestamps and offers Remove and sign in. The selected owned session/revision, pending request, slot release, and new session creation are validated in one transaction. Stale, cancelled, foreign, and replayed selections cannot remove another computer. Approval does not grant, renew, or replace a subscription. Poll and cancel use `JSON.stringify(['photodepot-account-pairing-v1','poll'|'cancel',pairingId,deviceId,challenge])`. Updated polls return `{status:'pending'}` or `{status:'approved',session:{payload,signature},receipt?:{payload,signature,collaborationReceipt}}`. Poll delivery checks the live account and immutable approved session; an old pairing cannot recreate a removed session. Cancellation and revocation of the pairing's current session share one transaction, including when browser approval races cancellation.
+`POST /api/account/pairing/start` accepts
+`{deviceId,devicePublicKey,challenge,deviceSignature,deviceName?}`, signed over
+`JSON.stringify(['photodepot-account-pairing-v1','start',deviceId,devicePublicKey,challenge])`.
+Append the optional computer name to the array. Names are trimmed, bounded to 120
+characters, and reject control characters. Poll/cancel proofs use
+`['photodepot-account-pairing-v1','poll'|'cancel',pairingId,deviceId,challenge]`.
+Approval and polling identifiers are independently hashed in storage.
 
-Account session claims are `{version:1,sessionId,deviceId,userId,email,status:'active'|'revoked',revision,challenge,issuedAt,expiresAt}`. `sessionId` is a new UUID for each browser approval. The envelope uses the same Ed25519 vendor signing key and base64url encoding as license receipts. Active account receipts expire after 48 hours independently of subscription expiry. No WorkOS access or refresh token is issued to the app.
+Account claims remain
+`{version:1,sessionId,deviceId,userId,email,status,revision,challenge,issuedAt,expiresAt}`.
+`POST /api/account/session/verify` and `/logout` accept
+`{sessionId,deviceId,challenge,deviceSignature,deviceName?}`. Proofs use
+`['photodepot-account-session-v1','verify'|'logout',sessionId,deviceId,challenge]`,
+with the optional name appended. Active verification updates name/last use without
+changing the authentication revision, and rechecks removal across asynchronous
+provider reads. Missing entitlement clears cached local access; deleted/unverified
+accounts revoke login. Provider outages return 503 without extending offline time.
 
-`POST /api/account/session/verify` and `/api/account/session/logout` accept `{sessionId,deviceId,challenge,deviceSignature,deviceName?}`. Append the optional name as the final signed proof field when present; active verification refreshes the name and `last_used_at` without changing the authentication revision. The proof is UTF-8 `JSON.stringify(['photodepot-account-session-v1','verify'|'logout',sessionId,deviceId,challenge])`. Verification returns `{session,receipt?}`. Omitted `receipt` means no local project or hosting entitlement and the desktop must discard cached entitlement. Logout returns a signed revoked session with a newer revision. Deleted/unverified WorkOS accounts revoke the session; provider outages return 503 without extending offline allowance. Verification rechecks session status after provider and subscription reads so concurrent removal wins.
+Account receipts last up to 48 hours. Entitlement receipts expire at the earlier
+of 48 hours and grant expiry. Keep receipt v3 metadata and its separately signed
+collaboration-compatible receipt unchanged. Both envelopes use vendor Ed25519
+signatures and base64url encoding. Desktop validation binds signatures, device,
+challenge, revision, and bounded timestamps; host proofs also bind a fresh challenge
+and TLS/device identity. The server signing key must match the compiled public key.
 
-Desktop logout and customer Remove Mac use the same revocation transaction. Console removal sends `{action:'remove-device',deviceId,sessionId,expectedSessionRevision}` to `/api/account/subscription`; it requires the owning account cookie, same origin, and the current revision. GET includes `devices:[{id,activatedAt,sessionId,revision,deviceName,lastUsedAt}]` independently of `subscription`. Revoked session records remain so replayed proofs receive signed revocation. Reapproval creates a new session ID, and logging out an old session cannot remove the newer one. Owner resets also revoke the affected sessions. Subscription expiry/revocation alone preserves account login and the ability to join collaboration.
+The supported desktop stores one atomic encrypted authorization record containing
+the session, optional entitlement, and shared launch/clock ledger. Migration accepts
+validated matching old records, preserves stricter launch/clock limits and rollback
+flags, and retains originals until durable save. Standalone legacy licenses never
+admit an account. Ten offline launches, signed deadlines, rollback detection, and
+a separate durable logout marker remain enforced. New grants require durable
+storage; confirmed withdrawals close admission before storage writes. Routine
+refresh failures cannot extend a previously saved lease.
 
-Clients without `Photodepot-Account-Version: 1` retain their existing subscription-bound pairing behavior for compatibility. Update both backend and desktop to enable the independent session flow; applying the website alone cannot change installed binaries.
+Grant loss closes local work safely and stops hosting while preserving account
+login and free joining. Device removal/logout also closes guest connections and
+returns to login. Offline devices learn removal on reconnect or lease expiry.
+Verification runs at startup, focus/resume, and every 15 seconds through one
+coalesced pipeline. Cleanup retries do not depend on a UI state-change event.
 
-## Compatible license protocol and enforcement
+Legacy license activation/verification and subscription-bound pairing return
+update-required responses. Key users update, sign in, and receive Owner-assigned
+account access; there is no automatic key conversion. Publish the supported desktop
+before retiring old clients. Already-running historical binaries cannot be remotely
+rewritten; retirement follows their existing verification and launch behavior.
 
-`POST /api/licenses/activate` accepts JSON `{key, devicePublicKey, challenge, signature}`. Keys normalize with trim/uppercase. The device public key is base64url DER SPKI Ed25519. The challenge is 32 random bytes in base64url. The device signs the UTF-8 bytes of `JSON.stringify(['photodepot-license-v1','activate',normalizedKey,devicePublicKey,challenge])`.
+Auth/access responses are `private, no-store`. Public proof routes retain atomic
+HMAC-keyed rate limits without storing raw IPs or request bodies. Protect D1 and
+device-key backups. Keep the signing key stable: rotation requires distributing a
+desktop trusting the replacement public key first.
 
-`POST /api/licenses/verify` accepts `{deviceId, challenge, signature}`. The device ID is lowercase hex SHA-256 of the DER SPKI bytes. The device signs `JSON.stringify(['photodepot-license-v1','verify',deviceId,challenge])`. A client-provided device ID never suffices without a valid proof using the stored public key.
+## Billing later
 
-Successful legacy responses are `{payload, signature}`, both base64url. The vendor signature covers the decoded payload bytes. Payload: `{version:1,licenseId,deviceId,type:'trial'|'regular',status:'active'|'revoked',issuedAt,expiresAt,challenge,revision}`. Times are UTC epoch milliseconds. Legacy active receipts last48 hours; subscription receipts have a shorter expiry if the subscription ends sooner. Revoked envelopes last48 hours for verification, but never grant access. Receipt v3 adds `subscriptionEndsAt` and, for an inactive Mac assignment, `revocationReason: "device-removed"`. Both fields are omitted from the separately signed collaboration-compatible v1 envelope. Receipt v1/v2 clients retain their existing payloads. No customer details or raw key appears in a receipt. Database batches enforce device capacity and record audits atomically.
-
-Legacy account desktop builds send `Photodepot-Receipt-Version: 3`. Subscription responses then include the signed `subscriptionEndsAt` field, a `revocationReason: "device-removed"` when the Mac assignment is inactive, and a separate `collaborationReceipt` signed with the original payload shape. Both grants have identical identity, status, challenge, revision, issue time, and expiry. The desktop verifies both signatures and all matching fields, stores both envelopes, and shares the compatible grant in host proofs. Version 2 clients receive `subscriptionEndsAt` without the removal reason; older clients omit the header and receive the original strict payload and envelope, with the same subscription expiry cap.
-
-Legacy desktop builds accept only matching vendor signature, device, fresh challenge, version, revision, and bounded timestamps. Admission happens on launch or successful sign-in/verification of a blocked session. Active verification resets the allowance of up to48 hours and10 offline launches, capped at subscription expiry. Unsigned HTTP errors never refresh access or count as confirmed revocation. Ordinary signed subscription revocation is saved for the next launch while an admitted session continues until quit. A v3 signed `revocationReason: "device-removed"` instead ends the running local session as soon as it arrives, before waiting for receipt persistence. Local work is saved, sharing and playback stop, and re-entry requires a fresh account sign-in and browser approval. Receipt expiry and exhausted offline allowances also take effect on the next launch; closing a project/window does not end an admitted session.
-
-Collaboration uses the admitted host session and fresh host identity proofs so existing guests, reconnecting guests, and new guests can continue joining until the host quits. The desktop retains its last active receipt only in memory for those proofs; it stores the latest revoked receipt for the next launch. Keeping the app running can defer ordinary subscription expiry/revocation, but cannot defer a signed Mac removal. Updated account clients request `Photodepot-Receipt-Version: 3` and verify every 15 seconds, including retries after outages, plus app focus and sleep resume; legacy license clients keep five-minute checks. An offline Mac cannot learn of revocation until it reconnects; until then, a later launch can still use its remaining offline allowance. Once that allowance ends, launching local projects requires a successful online check. Offline tampering resistance cannot make a user-controlled Mac fully tamper-proof.
-
-Public API rate limits use atomic D1 counters keyed by an HMAC of the route and IP (12 activation attempts / 10 min, 120 verification attempts / min). Raw IPs and request bodies are not persisted or logged. Error responses use generic messages and `private, no-store`; there is no public license enumeration endpoint. The first activation requires internet. Server signing/DB outages return 503; a new app launch can use only the remaining offline allowance, while an admitted session continues until quit.
-
-The signing key has a deliberately explicit release lifecycle: changing it requires distributing a desktop build trusting the replacement public key first. Existing builds cannot verify a new key automatically. Avoid rotating it without planning that transition. D1 rows and device keys are security-sensitive; protect backups and Cloudflare account access.
+The access resolver is the integration boundary. Stripe will own paid terms,
+invoices, cancellation, coupons, promotion codes, and charge dates through hosted
+Checkout and billing management. WorkOS's Stripe add-on associates the customer
+with a private personal organization, separate from the administration organization.
+No team UI or seat sync is needed. Manual users enter billing only through explicit
+checkout. Extending paid time must postpone the next charge in Stripe and use its
+confirmed result for access; a local grant edit is not a billing extension. This
+foundation adds no provider tables, checkout endpoints, or coupon engine.

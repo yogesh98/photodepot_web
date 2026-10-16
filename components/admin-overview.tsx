@@ -1,7 +1,6 @@
 "use client"
 
 import {
-  ArrowDownRight,
   ArrowRight,
   CircleCheck,
   Clock3,
@@ -23,7 +22,7 @@ export function AdminOverview({
 }) {
   const metrics = [
     {
-      title: "Active subscriptions",
+      title: "Active access",
       value: overview?.active,
       text: `${overview?.activeTrials ?? 0} trial · ${overview?.activeStandard ?? 0} standard`,
       icon: CircleCheck,
@@ -31,11 +30,11 @@ export function AdminOverview({
       tone: "green",
     },
     {
-      title: "Renewal canceled",
-      value: overview?.canceling,
-      text: "Active until expiry",
-      icon: ArrowDownRight,
-      filter: "canceling",
+      title: "Connected Macs",
+      value: overview?.assignedMacs,
+      text: "Across all accounts",
+      icon: Users,
+      filter: "all",
       tone: "orange",
     },
     {
@@ -101,7 +100,7 @@ export function AdminOverview({
                   aria-label={`View ${title.toLowerCase()}`}
                   onClick={() =>
                     navigate(
-                      filter === "waitlist" ? "waitlist" : "subscriptions",
+                      filter === "waitlist" ? "waitlist" : "accounts",
                       filter === "waitlist" ? "all" : filter
                     )
                   }
@@ -118,13 +117,13 @@ export function AdminOverview({
           <CardContent>
             <div className={styles.panelHeading}>
               <div>
-                <h2>Subscription health</h2>
+                <h2>Access overview</h2>
               </div>
               <CreditCard size={18} />
             </div>
             <div className={styles.healthTotal}>
               <strong>{overview ? total : "—"}</strong>
-              <span>total subscriptions</span>
+              <span>total access grants</span>
             </div>
             <div
               className={styles.healthBar}
@@ -150,7 +149,7 @@ export function AdminOverview({
               {stages.map((stage) => (
                 <button
                   key={stage.label}
-                  onClick={() => navigate("subscriptions", stage.filter)}
+                  onClick={() => navigate("accounts", stage.filter)}
                 >
                   <span>
                     <i style={{ background: stage.color }} />
@@ -182,17 +181,7 @@ export function AdminOverview({
                 <b>{overview?.openRequests ?? "—"}</b>
                 <ArrowRight size={15} />
               </button>
-              <button onClick={() => navigate("subscriptions", "canceling")}>
-                <span className={styles.attentionIcon}>
-                  <ArrowDownRight size={17} />
-                </span>
-                <span>
-                  <strong>Renewal canceled</strong>
-                </span>
-                <b>{overview?.canceling ?? "—"}</b>
-                <ArrowRight size={15} />
-              </button>
-              <button onClick={() => navigate("subscriptions", "expiring")}>
+              <button onClick={() => navigate("accounts", "expiring")}>
                 <span className={styles.attentionIcon}>
                   <Clock3 size={17} />
                 </span>

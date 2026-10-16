@@ -140,7 +140,7 @@ function runtime(
   return worker
 }
 
-test("the built Pages Worker admits a signed administrator and grants licenses", async (t) => {
+test("the built Pages Worker admits a signed administrator and retires legacy key issuance", async (t) => {
   const certificateRequests = []
   const worker = runtime(t, (request) => {
     certificateRequests.push(request.url)
@@ -175,10 +175,9 @@ test("the built Pages Worker admits a signed administrator and grants licenses",
       notes: "",
     }),
   })
-  assert.equal(granted.status, 201)
+  assert.equal(granted.status, 410)
   const result = await granted.json()
-  assert.equal(result.license.customerName, "Runtime Tester")
-  assert.match(result.key, /^PD-(?:[A-F0-9]{8}-){5}[A-F0-9]{8}$/)
+  assert.equal(result.code, "update_required")
   assert.deepEqual(certificateRequests, [jwksUrl])
   const anonymous = await worker.dispatchFetch(`${origin}/admin/licenses`, {
     redirect: "manual",

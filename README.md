@@ -24,8 +24,8 @@ is its only call to action. The original download page lives at `/tester`, with
 its Apple Silicon and Intel download buttons for version 0.2.5. Updated desktop
 builds require login for all use, and an active account subscription to open or
 create local projects or host collaboration. Joining collaboration is available
-without a subscription. Older installed builds retain their compatible license
-flow until updated.
+without a subscription. Legacy license-key and subscription-bound sign-in clients
+must update and sign in; existing keys are not automatically converted to accounts.
 
 Screenshots show the actual Photodepot desktop app in light mode with demo
 media. Capture and media provenance are documented in
@@ -271,9 +271,9 @@ media kit with `pnpm brand:generate` before copying updated exports here.
 Photography credits are in `public/photography/pexels/README.md`; the Inter font license is in
 `app/fonts/OFL.txt`.
 
-## Account subscriptions
+## Accounts and manual access
 
-Subscription administration is available at `/admin`. The previous `/admin/subscriptions` and `/admin/licenses` URLs still open the subscription directory. Creating an account or signing in permits joining collaboration; it does not grant local project or hosting access. An Owner must manually assign Trial or Standard access to each approved account. Signups never receive administration membership. Only the `owner` role in `WORKOS_ADMIN_ORGANIZATION_ID` can manage access. See [subscription setup and protocol](deploy/LICENSES.md).
+The Accounts directory is available at `/admin`. The previous `/admin/users`, `/admin/subscriptions`, and `/admin/licenses` URLs remain aliases. Creating an account or signing in permits joining collaboration; it does not grant local project or hosting access. An Owner must manually assign Trial or Standard access to each approved account. Signups never receive administration membership. Only the `owner` role in `WORKOS_ADMIN_ORGANIZATION_ID` can manage access. See [account setup and protocol](deploy/LICENSES.md).
 
 Set `WORKOS_CLIENT_ID`, `WORKOS_ADMIN_ORGANIZATION_ID`,
 `WORKOS_REDIRECT_URI=https://photodepot.app/api/auth/callback`, and a random
@@ -281,31 +281,31 @@ Set `WORKOS_CLIENT_ID`, `WORKOS_ADMIN_ORGANIZATION_ID`,
 The server uses PKCE and encrypted HttpOnly session cookies. Add the server-only
 encrypted `WORKOS_API_KEY` secret for listing users and checking account status.
 Never include the key in browser assets or desktop builds. Apply D1
-migrations through `0010_subscription_renewal_preferences.sql` before starting the updated backend. Migration 0010 adds cancellation preferences and preserves existing access, device assignments, and audit history. The existing
+migrations, including the account-access migration, before starting the updated backend. Existing grant dates, notes, and audit history are preserved. Old canceled-renewal preferences become disabled reminders; they are not billing cancellations. The existing
 `https://photodepot.app/api/account/webhook` endpoint still acknowledges signed
 WorkOS notifications when `WORKOS_WEBHOOK_SECRET` is configured, but it does not
 read or change subscriptions. A webhook is not required for manual access grants.
 
-The admin workspace has Overview, Subscriptions, Users, Waitlist, and Operations
+The admin workspace has Overview, Accounts, Waitlist, and Operations
 views. Dashboard counts cover the complete database, including active trials,
-standard subscriptions, canceled renewals that still have access, upcoming
-expirations, waitlist signups, open requests, and Mac assignments. Search and
-subscription filters run on the server across the WorkOS directory. Filtered
+standard access, upcoming expirations, waitlist signups, open requests, and Mac
+sessions. Search and access filters run on the server across the WorkOS directory. Filtered
 requests scan at most ten provider pages; a continuation remains available when
 more accounts need to be searched, even if the current result is empty.
 
 Each user has a linkable management view at `/admin?view=users&user=USER_ID`,
-with identity information, subscription dates, renewal preference, notes, Macs,
+with identity information, access dates, reminder preference, notes, named Macs,
 requests, and activity history. Admins can grant Trial or Standard access by
-duration or exact date, extend, revoke, restore, reset an individual Mac or both
-Macs, and record reasons and internal notes. Waitlist search includes name,
+duration or exact date, extend, revoke, restore, remove Macs independently of access,
+and record reasons and internal notes. Waitlist search includes name,
 email, and referral source, with signup dates, source counts, and a CSV export
 of exactly the loaded results. CSV cells are escaped against formula execution.
 
-Operations contains customer requests and renewal reminders. Admins can
-acknowledge, complete, or decline a request with internal review notes. Review
-status changes never grant access or reset a device; apply those changes from
-user management, then complete the request. Visible directory pages refresh
+Operations contains access requests and reminders. **Approve and extend** opens
+the access editor and saves the chosen grant, resolves the request, and records
+both audits in one transaction. Stale grant or request revisions leave both
+unchanged. Declining records the review without changing access. Existing request
+and audit history remains available. Visible directory pages refresh
 every 30 seconds while no profile, dialog, or mutation is open. Revision checks
 reject stale writes. Expired sessions show a sign-in link and refresh recovery.
 No payment provider or charging flow is connected.
@@ -339,8 +339,9 @@ verify every 15 seconds and on app focus or sleep resume. Offline account receip
 last up to 48 hours; an offline Mac learns of removal when it reconnects or its
 receipt expires. Subscription expiry removes local entitlement while preserving
 login and joining collaboration. Device identity and receipts use encrypted local
-storage, which can access macOS Keychain. Existing binaries retain their legacy
-license protocol until updated.
+storage, which can access macOS Keychain. The supported desktop uses one atomic
+authorization record and one shared offline/clock ledger. Legacy clients receive
+an update-required response; license-key users sign in and obtain Owner approval.
 
 Every desktop approval requires an explicit Approve computer sign-in action naming
 the computer, including browser launches from the app and returns from hosted authentication.
@@ -352,29 +353,46 @@ session in one transaction. Success uses the Photodepot logo and wordmark.
 
 ### Customer account and requests
 
-Users can sign in at `/account` to view their trial or standard plan, expiry, and
+Users can sign in at `/account` to view their trial or standard access, expiry, and
 connected Macs. Account cookies are separate from admin cookies. Customers see
-only their own subscription and latest 50 requests; administrator notes, review
-notes, subscription audits, and device keys are excluded. Subscription revisions guard concurrent preference changes. Connected Macs are listed independently of the subscription, so free accounts can remove them too.
+only their own access, devices, and latest 50 requests; administrator notes, review
+notes, access audits, and device keys are excluded. Grant revisions guard concurrent
+preference changes. Connected Macs are independent of access, so both customers and
+Owners can remove free-account sessions too.
 
 Users remove a connected Mac directly with a same-origin `remove-device` action,
 its device ID, session ID, and expected session revision. The server accepts only
 the authenticated account's current session, revokes it, and frees its slot. The
 other Mac and subscription remain unchanged. Stale edits require refreshing the
-account. Legacy assignments use the subscription revision while older clients
-remain supported. Existing request history remains available.
+account. Device operations use session revisions; they do not update grant
+revisions. Historical assignments remain stored but no longer authorize use.
 
-Renewal requests still require administrator review. Retries return the existing
+**Request access/extension** requires administrator review. Retries return the existing
 open request, with up to five new requests per rolling 24 hours. Acknowledged
 requests stay open until completed or declined. Requests never extend access or
-collect payment. Admin reviews use revision checks and retain a separate audit.
+collect payment. Approval and the selected access grant are atomic; reviews use
+revision checks and retain a separate audit.
 
-Customers and Owners can cancel or resume renewal while a subscription is active.
-Canceling records an opt-out and suppresses trial renewal reminders; it does not
-revoke access, reset Macs, or change the end date. Resuming restores the renewal
-preference without extending access or collecting payment. Active canceled
-subscriptions must resume before submitting a renewal request; expired accounts
-can request a new term. These preferences and their actors appear in admin history.
+Customers and Owners can enable or disable access reminders. This preference
+does not revoke or extend access, reset Macs, or create/cancel a paid subscription.
+It does not prevent requesting an extension. Existing canceled manual terms are
+migrated to reminders disabled, preserving their original audit history.
+
+### Future billing boundary
+
+WorkOS owns identity, desktop sessions own device approval, and one server access
+resolver owns local-project/hosting entitlement. The existing `subscriptions` table
+stores manual grants rather than invoices or paid subscription state. The desktop
+receives the effective signed permission and deadline, without billing-provider data.
+
+Stripe checkout, billing management, invoices, paid cancellation, coupons, and
+promotion codes belong to the later billing integration. Use Stripe's hosted flows
+and native discounts rather than a second coupon engine. WorkOS's Stripe add-on
+requires a private personal organization for each paying customer's Stripe customer;
+keep those organizations separate from the administration organization, without
+team UI or seat sync. Existing manual accounts must explicitly opt into paid checkout.
+For a paying customer, **Extend** must postpone the next charge through Stripe and
+derive access from its confirmed result. A local expiry edit is never a billing extension.
 
 ### Daily renewal queue and trial reminders
 

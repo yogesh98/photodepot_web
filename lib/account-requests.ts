@@ -1,11 +1,15 @@
 import { randomUUID } from "node:crypto"
 import type { D1Database } from "@cloudflare/workers-types"
 import type {
-  SubscriptionStatus,
-  SubscriptionType,
+  AccountAccess,
+  AccountDevice,
   SubscriptionSummary,
   WorkOSUserSummary,
 } from "./subscription-types.ts"
+import {
+  subscriptionSummary,
+  type SubscriptionRow,
+} from "./subscription-store.ts"
 
 export type AccountRequestAction = "renewal" | "reset-device"
 export type AccountRequestStatus =
@@ -33,34 +37,17 @@ export interface AccountRequestAudit {
   createdAt: number
   note: string
 }
-export interface CustomerSubscription {
-  type: SubscriptionType
-  status: SubscriptionStatus
-  startsAt: number
-  endsAt: number
-  revision: number
-  cancelAtPeriodEnd: boolean
-  canceledAt: number | null
-  deviceLimit: number
-  devices: { id: string; activatedAt: number }[]
-}
 export interface CustomerAccount {
   user: { email: string }
-  subscription: CustomerSubscription | null
+  access: AccountAccess
   requests: CustomerRequest[]
-  devices?: {
-    id: string
-    activatedAt: number
-    sessionId: string | null
-    revision: number
-    deviceName: string | null
-    lastUsedAt: number | null
-  }[]
+  devices: AccountDevice[]
+  reminders: { enabled: boolean; revision: number }
 }
 export interface AdminRequestQueue {
   requests: (AccountRequest & {
     subscription: SubscriptionSummary | null
-    user: Omit<WorkOSUserSummary, "subscription"> | null
+    user: Omit<WorkOSUserSummary, "subscription" | "access" | "devices"> | null
   })[]
   openCount: number
   limit: number
@@ -337,4 +324,131 @@ export async function reviewAccountRequest(
   const row = results[0].results[0] as RequestRow | undefined
   if (!row) throw new AccountRequestConflictError()
   return summary(row)
+}
+
+/** Set the chosen grant and resolve its request in one revision-guarded transaction. */
+export async function approveAccountRequest(
+  database: D1Database,
+  input: {
+    id: string
+    expectedRevision: number
+    expectedSubscriptionRevision: number
+    type: "trial" | "regular"
+    endsAt: number
+    note?: string
+  },
+  actor: string,
+  now = Date.now()
+) {
+  if (
+    !ACCOUNT_REQUEST_ID.test(input.id) ||
+    !Number.isSafeInteger(input.expectedRevision) ||
+    input.expectedRevision < 1 ||
+    !Number.isSafeInteger(input.expectedSubscriptionRevision) ||
+    input.expectedSubscriptionRevision < 0 ||
+    input.expectedSubscriptionRevision >= Number.MAX_SAFE_INTEGER ||
+    input.expectedRevision >= Number.MAX_SAFE_INTEGER ||
+    !["trial", "regular"].includes(input.type) ||
+    !Number.isSafeInteger(now) ||
+    now < 0 ||
+    !Number.isSafeInteger(input.endsAt) ||
+    input.endsAt <= now ||
+    input.endsAt > 8_640_000_000_000_000
+  )
+    throw new TypeError("Choose an access type and a valid future expiration.")
+  const note = text(input.note ?? "", "an admin review note")
+  const administrator = text(actor, "an administrator", 320)
+  if (!administrator) throw new TypeError("Invalid administrator.")
+  const item = await getAccountRequest(database, input.id)
+  if (!item || item.action !== "renewal")
+    throw new TypeError("Choose an access request.")
+  const auditId = randomUUID()
+  const requestGuard = `EXISTS (SELECT 1 FROM subscription_requests WHERE id = ? AND user_id = ? AND action = 'renewal'
+    AND revision = ? AND status IN ('pending', 'acknowledged'))`
+  const mutation =
+    input.expectedSubscriptionRevision === 0
+      ? database
+          .prepare(
+            `INSERT INTO subscriptions (id,user_id,type,status,started_at,end_at,updated_at,revision,notes)
+      SELECT ?,?,?,'active',?,?,?,1,'' WHERE ${requestGuard} ON CONFLICT(user_id) DO NOTHING RETURNING *`
+          )
+          .bind(
+            randomUUID(),
+            item.userId,
+            input.type,
+            now,
+            input.endsAt,
+            now,
+            input.id,
+            item.userId,
+            input.expectedRevision
+          )
+      : database
+          .prepare(
+            `UPDATE subscriptions SET type = ?,status = 'active',started_at = ?,end_at = ?,updated_at = ?,revision = revision + 1
+      WHERE user_id = ? AND revision = ? AND ${requestGuard} RETURNING *`
+          )
+          .bind(
+            input.type,
+            now,
+            input.endsAt,
+            now,
+            item.userId,
+            input.expectedSubscriptionRevision,
+            input.id,
+            item.userId,
+            input.expectedRevision
+          )
+  const results = await database.batch([
+    mutation,
+    database
+      .prepare(
+        `INSERT INTO subscription_audit (id,subscription_id,action,actor,created_at,detail,reason)
+      SELECT ?,id,'set',?,?,?,? FROM subscriptions WHERE user_id = ? AND revision = ? AND changes() = 1`
+      )
+      .bind(
+        auditId,
+        administrator,
+        now,
+        `Set ${input.type} access until ${new Date(input.endsAt).toISOString()} / Approved request ${input.id}`,
+        note,
+        item.userId,
+        input.expectedSubscriptionRevision + 1
+      ),
+    database
+      .prepare(
+        `UPDATE subscription_requests SET status = 'resolved',revision = revision + 1,updated_at = ?,admin_note = ?,handled_by = ?
+      WHERE id = ? AND revision = ? AND status IN ('pending','acknowledged') AND EXISTS (SELECT 1 FROM subscription_audit WHERE id = ?) RETURNING *`
+      )
+      .bind(
+        now,
+        note,
+        administrator,
+        input.id,
+        input.expectedRevision,
+        auditId
+      ),
+    database
+      .prepare(
+        `INSERT INTO subscription_request_audit (id,request_id,action,actor,created_at,note)
+      SELECT ?,id,'approve',?,?,? FROM subscription_requests WHERE id = ? AND revision = ? AND changes() = 1`
+      )
+      .bind(
+        randomUUID(),
+        administrator,
+        now,
+        note,
+        input.id,
+        input.expectedRevision + 1
+      ),
+  ])
+  if (!results[0].results.length || !results[2].results.length)
+    throw new AccountRequestConflictError()
+  return {
+    request: summary(results[2].results[0] as unknown as RequestRow),
+    subscription: subscriptionSummary(
+      results[0].results[0] as unknown as SubscriptionRow,
+      now
+    ),
+  }
 }

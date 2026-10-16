@@ -41,7 +41,7 @@ test("migration triggers retain remote D1 parser compatibility", async () => {
       assertRemoteTriggerSyntax(statement)
     }
   }
-  assert.equal(triggerCount, 7)
+  assert.equal(triggerCount, 9)
 })
 
 test("remote parser regression rejects the locally valid bare CASE terminator", () => {
@@ -88,7 +88,7 @@ test("complete migration queries execute with the appended Wrangler migration jo
           "SELECT COUNT(*) AS count FROM sqlite_schema WHERE type='trigger'"
         )
         .get().count,
-      7
+      2
     )
     const deviceColumns = database
       .prepare("PRAGMA table_info(account_devices)")
@@ -152,6 +152,52 @@ test("device metadata migration retires foreign legacy shadows and preserves cur
     assert.equal(session.active, 1)
     assert.equal(session.device_name, null)
     assert.equal(session.last_used_at, null)
+  } finally {
+    database.close()
+  }
+})
+
+test("manual cleanup preserves grant and audit history, carries renewal opt-outs to reminder preferences and removes legacy authority bridges", async () => {
+  const database = new DatabaseSync(":memory:")
+  const directory = new URL("../migrations/", import.meta.url)
+  try {
+    for (const name of (await readdir(directory))
+      .filter((name) => name.endsWith(".sql"))
+      .sort()) {
+      if (name === "0013_manual_access_cleanup.sql") {
+        database.exec(`INSERT INTO subscriptions(id,user_id,type,status,started_at,end_at,updated_at,revision,notes,canceled_at) VALUES('grant','user_migrated','trial','active',10,1000,20,3,'Existing note',15);
+          INSERT INTO subscription_audit(id,subscription_id,action,actor,created_at,detail,reason) VALUES('audit','grant','cancel-renewal','owner',15,'Existing preference','Reason');
+          INSERT INTO account_pairings(token_hash,code_hash,device_id,public_key,challenge,created_at,expires_at) VALUES('token','code','device','key','challenge',1,1000);`)
+      }
+      database.exec(await readFile(new URL(name, directory), "utf8"))
+    }
+    const grant = database
+      .prepare("SELECT * FROM subscriptions WHERE id=?")
+      .get("grant")
+    assert.equal(grant.reminder_opt_out_at, 15)
+    assert.equal(grant.canceled_at, 15)
+    assert.equal(grant.revision, 3)
+    assert.equal(grant.started_at, 10)
+    assert.equal(grant.end_at, 1000)
+    assert.equal(grant.notes, "Existing note")
+    assert.equal(
+      database.prepare("SELECT action,reason FROM subscription_audit").get()
+        .action,
+      "cancel-renewal"
+    )
+    assert.equal(
+      database.prepare("SELECT status FROM account_pairings").get().status,
+      "cancelled"
+    )
+    assert.deepEqual(
+      database
+        .prepare(
+          "SELECT name FROM sqlite_schema WHERE type='trigger' ORDER BY name"
+        )
+        .all()
+        .map((row) => row.name),
+      ["desktop_sessions_two_slot_insert", "desktop_sessions_two_slot_update"]
+    )
   } finally {
     database.close()
   }

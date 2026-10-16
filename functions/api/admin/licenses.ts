@@ -2,37 +2,21 @@ import type { PagesFunction } from "@cloudflare/workers-types"
 import {
   authenticateLicenseAdmin,
   withAdminSession,
-  type AdminAuth,
 } from "../../../lib/license-admin-auth.ts"
-import {
-  BodyError,
-  json,
-  readJson,
-  sameOrigin,
-  type Env,
-} from "../../../lib/cloudflare.ts"
-import {
-  changeLicense,
-  grantLicense,
-  licenseSummary,
-  type LicenseRow,
-} from "../../../lib/license-store.ts"
-import { signingKey } from "../../../lib/license-crypto.ts"
+import { json, sameOrigin, type Env } from "../../../lib/cloudflare.ts"
+import { licenseSummary, type LicenseRow } from "../../../lib/license-store.ts"
+import { updateRequired } from "../../../lib/license-api.ts"
 
 const idPattern = /^[a-f0-9-]{36}$/
 export async function handleAdminLicenses(request: Request, env: Env) {
   const auth = await authenticateLicenseAdmin(request, env)
   if (auth instanceof Response) return auth
   return withAdminSession(
-    await handleAuthorizedAdminLicenses(request, env, auth),
+    await handleAuthorizedAdminLicenses(request, env),
     auth
   )
 }
-async function handleAuthorizedAdminLicenses(
-  request: Request,
-  env: Env,
-  auth: AdminAuth
-) {
+async function handleAuthorizedAdminLicenses(request: Request, env: Env) {
   try {
     if (request.method === "GET") {
       const query = new URL(request.url).searchParams
@@ -81,84 +65,9 @@ async function handleAuthorizedAdminLicenses(
             : null,
       })
     }
-    if (request.method !== "POST") {
-      const response = json({ error: "Method not allowed." }, 405)
-      response.headers.set("Allow", "GET, POST")
-      return response
-    }
     if (!sameOrigin(request))
       return json({ error: "Invalid request origin." }, 403)
-    if (!request.headers.get("content-type")?.startsWith("application/json"))
-      return json({ error: "Submit JSON." }, 415)
-    let supplied: unknown
-    try {
-      supplied = await readJson(request)
-    } catch (error) {
-      return json(
-        { error: "Invalid request." },
-        error instanceof BodyError ? error.status : 400
-      )
-    }
-    if (!supplied || typeof supplied !== "object" || Array.isArray(supplied))
-      return json({ error: "Invalid request." }, 400)
-    const body = supplied as Record<string, unknown>
-    if (body.action === "grant") {
-      if (body.type !== "trial" && body.type !== "regular")
-        return json({ error: "Choose trial or regular." }, 400)
-      if (
-        typeof body.customerName !== "string" ||
-        !body.customerName.trim() ||
-        body.customerName.trim().length > 160 ||
-        typeof body.email !== "string" ||
-        body.email.length > 254 ||
-        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email.trim()) ||
-        typeof body.notes !== "string" ||
-        body.notes.length > 2000
-      )
-        return json(
-          {
-            error:
-              "Enter a customer name, valid email and notes up to 2,000 characters.",
-          },
-          400
-        )
-      // Fail before generating keys customers cannot activate.
-      signingKey(env.PHOTODEPOT_LICENSE_SIGNING_PRIVATE_KEY)
-      return json(
-        await grantLicense(
-          env.DB,
-          {
-            type: body.type,
-            customerName: body.customerName.trim(),
-            email: body.email.trim().toLowerCase(),
-            notes: body.notes.trim(),
-          },
-          auth.email
-        ),
-        201
-      )
-    }
-    if (
-      !["revoke", "restore", "set-type", "reset-device"].includes(
-        body.action as string
-      ) ||
-      typeof body.id !== "string" ||
-      !idPattern.test(body.id) ||
-      (body.action === "set-type" &&
-        body.type !== "trial" &&
-        body.type !== "regular")
-    )
-      return json({ error: "Invalid license action." }, 400)
-    const license = await changeLicense(
-      env.DB,
-      body.id,
-      body.action as "revoke" | "restore" | "set-type" | "reset-device",
-      body.type as "trial" | "regular" | undefined,
-      auth.email
-    )
-    return license
-      ? json({ license })
-      : json({ error: "License not found." }, 404)
+    return updateRequired()
   } catch {
     console.error("License administration service unavailable")
     return json(
