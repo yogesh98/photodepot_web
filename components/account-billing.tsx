@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { ArrowRight, RefreshCw } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { formatStripePrice } from "@/lib/stripe-currency"
 import styles from "./account-billing.module.css"
 
 type BillingInterval = "monthly" | "annual"
@@ -157,15 +158,6 @@ function billingRedirect(value: unknown, provider: unknown) {
     throw new Error("Unable to open Stripe. Please try again.")
   return url.href
 }
-function money(price: BillingPrice) {
-  return new Intl.NumberFormat(undefined, {
-    style: "currency",
-    currency: price.currency,
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 2,
-  }).format(price.amount / 100)
-}
-
 export function AccountBilling({
   refreshVersion,
   disabled,
@@ -313,6 +305,11 @@ export function AccountBilling({
   const intervals = billing?.intervals ?? []
   const monthly = billing?.prices?.monthly
   const annual = billing?.prices?.annual
+  const freePrice = {
+    amount: 0,
+    currency:
+      subscription?.currency ?? monthly?.currency ?? annual?.currency ?? "usd",
+  }
   const twoMonthsFree =
     monthly &&
     annual &&
@@ -423,7 +420,11 @@ export function AccountBilling({
                 )}
               </div>
               <p className={styles.price}>
-                {free ? "$0" : price ? money(price) : "—"}
+                {free
+                  ? formatStripePrice(freePrice)
+                  : price
+                    ? formatStripePrice(price)
+                    : "—"}
                 {!free && (
                   <span> / {interval === "annual" ? "year" : "month"}</span>
                 )}
@@ -486,7 +487,7 @@ export function AccountBilling({
       </div>
       {billing?.enabled && !subscribed && (
         <p className={styles.terms}>
-          USD · Paid plans renew automatically. Tax calculated at checkout.
+          Paid plans renew automatically. Tax calculated at checkout.
         </p>
       )}
       {billing && !billing.enabled && !subscribed && (

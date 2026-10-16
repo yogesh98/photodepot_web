@@ -255,6 +255,27 @@ test("the default account tab contains only Subscription cards", async () => {
   await snapshot("02-free-mobile", true)
 })
 
+test("zero-decimal configured prices show the amount charged by Stripe", async () => {
+  state.billing.prices = {
+    monthly: { amount: 2000, currency: "jpy" },
+    annual: { amount: 20000, currency: "jpy" },
+  }
+  await page.goto(`${origin}/account`)
+  await expect(upgrade("Monthly")).toBeEnabled()
+  await expect(card("Free")).toContainText("¥0")
+  await expect(card("Monthly")).toContainText("¥2,000 / month")
+  await expect(card("Yearly")).toContainText("¥20,000 / year")
+  await expect(subscription()).not.toContainText("USD")
+})
+
+test("an existing zero-decimal subscription keeps its Stripe currency and amount", async () => {
+  setSubscription({ amount: 2000, currency: "jpy" })
+  await page.goto(`${origin}/account`)
+  await expect(cancel("Monthly")).toBeEnabled()
+  await expect(card("Monthly")).toContainText("¥2,000 / month")
+  await expect(card("Yearly")).toContainText("$200 / year")
+})
+
 for (const [name, interval] of [
   ["Monthly", "monthly"],
   ["Yearly", "annual"],
