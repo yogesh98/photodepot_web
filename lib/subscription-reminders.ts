@@ -385,8 +385,9 @@ export async function runSubscriptionReminders(
 }
 
 export async function subscriptionReminderQueue(env: Env, now = Date.now()) {
+  // The Owner tracks expirations even when a customer opts out of email.
   const ids = await env.DB.prepare(
-    `SELECT user_id FROM subscriptions WHERE status='active' AND reminder_opt_out_at IS NULL AND started_at<=? AND end_at>? AND end_at<=? ORDER BY end_at,user_id LIMIT 100`
+    `SELECT user_id FROM subscriptions WHERE status='active' AND started_at<=? AND end_at>? AND end_at<=? ORDER BY end_at,user_id LIMIT 100`
   )
     .bind(now, now, now + 7 * day)
     .all<{ user_id: string }>()

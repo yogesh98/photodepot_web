@@ -59,6 +59,7 @@ type DialogAction =
   | "restore"
   | "remove-device"
   | "update-notes"
+  | "set-reminders"
   | "details"
   | "approve"
 type PendingDialog = {
@@ -533,7 +534,7 @@ export function SubscriptionDashboard({
           : "/api/admin/subscriptions"
       )
       setNotice(
-        `${approval ? "Request approved and access extended" : dialog.action === "remove-device" ? "Mac removed" : dialog.action === "revoke" ? "Access revoked" : dialog.action === "restore" ? "Access restored; expiry unchanged" : dialog.action === "update-notes" ? "Account notes saved" : dialog.action === "extend" ? "Access extended" : "Access granted"} for ${dialog.user.email}.`
+        `${approval ? "Request approved and access extended" : dialog.action === "remove-device" ? "Mac removed" : dialog.action === "revoke" ? "Access revoked" : dialog.action === "restore" ? "Access restored; expiry unchanged" : dialog.action === "update-notes" ? "Account notes saved" : dialog.action === "set-reminders" ? `Expiry reminders ${dialog.user.subscription?.remindersEnabled ? "disabled" : "enabled"}` : dialog.action === "extend" ? "Access extended" : "Access granted"} for ${dialog.user.email}.`
       )
       setDialog(null)
       setRefreshVersion((value) => value + 1)
@@ -589,6 +590,9 @@ export function SubscriptionDashboard({
           }
         : { expectedRevision: dialog.user.subscription?.revision ?? 0 }),
       ...(dialog.action === "update-notes" ? { notes } : {}),
+      ...(dialog.action === "set-reminders"
+        ? { enabled: !dialog.user.subscription?.remindersEnabled }
+        : {}),
     })
   }
   const actionsDisabled = busy || sessionExpired || reloadRequired || !hasLoaded
@@ -655,6 +659,17 @@ export function SubscriptionDashboard({
                   onClick={() => openDialog(user, "update-notes")}
                 >
                   Edit notes
+                </Button>
+                <Button
+                  variant="outline"
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => openDialog(user, "set-reminders")}
+                  aria-label={`${user.subscription.remindersEnabled ? "Turn off" : "Turn on"} reminders for ${user.email}`}
+                >
+                  {user.subscription.remindersEnabled
+                    ? "Turn off reminders"
+                    : "Turn on reminders"}
                 </Button>
               </>
             )}
@@ -1085,7 +1100,9 @@ export function SubscriptionDashboard({
                       ? "Remove Mac?"
                       : dialog.action === "update-notes"
                         ? "Edit account notes"
-                        : `${dialog.action === "revoke" ? "Revoke" : "Restore"} access?`}
+                        : dialog.action === "set-reminders"
+                          ? `Turn ${dialog.user.subscription?.remindersEnabled ? "off" : "on"} expiry reminders?`
+                          : `${dialog.action === "revoke" ? "Revoke" : "Restore"} access?`}
             </DialogTitle>
             <p className={styles.dialogAccount}>
               <strong>{userName(dialog.user)}</strong>
@@ -1138,6 +1155,15 @@ export function SubscriptionDashboard({
                     unchanged.
                   </p>
                 )}
+                {dialog.action === "set-reminders" && (
+                  <p>
+                    {dialog.user.subscription?.remindersEnabled
+                      ? "Stop trial expiry emails for this account."
+                      : "Enable trial expiry emails for this account."}{" "}
+                    This preference does not change access dates, connected
+                    Macs, or extension requests.
+                  </p>
+                )}
                 <div className={styles.formFields}>
                   {dialog.action === "update-notes" && (
                     <label>
@@ -1181,7 +1207,9 @@ export function SubscriptionDashboard({
                           ? "Restore access"
                           : dialog.action === "remove-device"
                             ? "Remove Mac"
-                            : "Save notes"}
+                            : dialog.action === "set-reminders"
+                              ? `Turn ${dialog.user.subscription?.remindersEnabled ? "off" : "on"} reminders`
+                              : "Save notes"}
                   </Button>
                   <Button
                     type="button"

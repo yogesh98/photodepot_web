@@ -371,6 +371,8 @@ async function handleApi(request, response, url) {
     if (body.action === "restore")
       subscription.status = subscription.endsAt > now ? "active" : "expired"
     if (body.action === "update-notes") subscription.notes = body.notes
+    if (body.action === "set-reminders")
+      subscription.remindersEnabled = body.enabled
     subscription.revision++
     subscription.updatedAt = now
   }
@@ -1105,6 +1107,136 @@ test("old profile links display access, reminders, and account history", async (
   })
 })
 
+test("Owners can disable and enable account reminders without changing access or Macs", async () => {
+  await page.goto(`${origin}/admin?view=accounts&user=user_alice`)
+  await expect(
+    page.getByRole("button", {
+      name: "Turn off reminders for alice@example.test",
+      exact: true,
+    })
+  ).toBeEnabled()
+  const user = state.users[0]
+  const { startsAt, endsAt, status, type } = user.subscription
+  const devices = structuredClone(user.devices)
+  await openAction("Turn off reminders")
+  await page
+    .getByLabel(/Reason for this change/)
+    .fill("Customer requested no emails")
+  await save("Turn off reminders")
+  await expect(
+    page.getByText("Expiry reminders disabled for alice@example.test.", {
+      exact: true,
+    })
+  ).toBeVisible()
+  await expect(
+    page.getByRole("button", {
+      name: "Turn on reminders for alice@example.test",
+      exact: true,
+    })
+  ).toBeEnabled()
+  assert.equal(user.subscription.remindersEnabled, false)
+  assert.deepEqual(state.requests.at(-1), {
+    action: "set-reminders",
+    userId: user.id,
+    reason: "Customer requested no emails",
+    expectedRevision: 1,
+    enabled: false,
+  })
+  await openAction("Turn on reminders")
+  await save("Turn on reminders")
+  await expect(
+    page.getByRole("button", {
+      name: "Turn off reminders for alice@example.test",
+      exact: true,
+    })
+  ).toBeEnabled()
+  assert.equal(user.subscription.remindersEnabled, true)
+  assert.equal(state.requests.at(-1).expectedRevision, 2)
+  assert.equal(state.requests.at(-1).enabled, true)
+  assert.deepEqual(
+    {
+      startsAt: user.subscription.startsAt,
+      endsAt: user.subscription.endsAt,
+      status: user.subscription.status,
+      type: user.subscription.type,
+    },
+    { startsAt, endsAt, status, type }
+  )
+  assert.deepEqual(user.devices, devices)
+  assert.equal(state.accountRequests.length, 0)
+})
+
+test("Owner reminder conflicts require refresh and failures preserve the preference", async () => {
+  await page.goto(`${origin}/admin?view=accounts&user=user_alice`)
+  await expect(
+    page.getByRole("button", {
+      name: "Turn off reminders for alice@example.test",
+      exact: true,
+    })
+  ).toBeEnabled()
+  state.users[0].subscription.revision++
+  await openAction("Turn off reminders")
+  await page
+    .getByRole("dialog")
+    .getByRole("button", {
+      name: "Turn off reminders",
+      exact: true,
+    })
+    .click()
+  await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
+    "changed while you were editing"
+  )
+  await expect(
+    page.getByRole("dialog").getByRole("button", {
+      name: "Turn off reminders",
+      exact: true,
+    })
+  ).toBeDisabled()
+  assert.equal(state.requests.at(-1).expectedRevision, 1)
+  assert.equal(state.users[0].subscription.remindersEnabled, true)
+  await page
+    .getByRole("button", {
+      name: "Refresh account data",
+      exact: true,
+    })
+    .click()
+  await expect(page.getByRole("dialog")).toHaveCount(0)
+  await expect(
+    page.getByRole("button", {
+      name: "Turn off reminders for alice@example.test",
+      exact: true,
+    })
+  ).toBeEnabled()
+  state.failNext = 503
+  await openAction("Turn off reminders")
+  const submit = page.getByRole("dialog").getByRole("button", {
+    name: "Turn off reminders",
+    exact: true,
+  })
+  await submit.click()
+  await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
+    "Test action unavailable"
+  )
+  await expect(submit).toBeEnabled()
+  assert.equal(state.requests.at(-1).expectedRevision, 2)
+  assert.equal(state.users[0].subscription.remindersEnabled, true)
+  state.failNext = 401
+  await submit.click()
+  await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
+    "session expired"
+  )
+  await expect(submit).toBeDisabled()
+  await expect(
+    page.getByRole("dialog").getByRole("link", { name: "Sign in" })
+  ).toHaveAttribute("target", "_blank")
+  assert.equal(state.users[0].subscription.remindersEnabled, true)
+  await expect(
+    page.getByText("Expiry reminders disabled for alice@example.test.", {
+      exact: true,
+    })
+  ).toHaveCount(0)
+})
+
 test("an admin removes a named Mac from a free account without granting access", async () => {
   const user = state.users.find(({ id }) => id === "user_cara")
   user.devices = [
@@ -1122,6 +1254,7 @@ test("an admin removes a named Mac from a free account without granting access",
   await expect(
     page.getByText("Cara’s MacBook Air", { exact: true })
   ).toBeVisible()
+  await expect(page.getByRole("button", { name: /reminders/i })).toHaveCount(0)
   await page
     .getByRole("button", { name: "Remove Cara’s MacBook Air", exact: true })
     .click()

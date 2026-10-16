@@ -214,6 +214,46 @@ test("the renewal queue preserves actual account metadata and represents deleted
     null
   )
 })
+test("reminder opt-outs keep active Trial and Standard expirations in the Owner queue without sending email", async () => {
+  const trial = await grant("user_opted_out_trial", now + day)
+  const standard = await grant(
+    "user_opted_out_standard",
+    now + 2 * day,
+    "regular"
+  )
+  for (const subscription of [trial, standard]) {
+    await changeSubscriptionReminders(
+      env.DB,
+      subscription.userId,
+      false,
+      subscription.revision,
+      "customer@example.test",
+      now
+    )
+  }
+
+  const queue = await subscriptionReminderQueue(env, now)
+  assert.deepEqual(
+    queue.upcoming.map(({ subscription }) => ({
+      userId: subscription.userId,
+      status: subscription.status,
+      remindersEnabled: subscription.remindersEnabled,
+    })),
+    [trial, standard].map(({ userId }) => ({
+      userId,
+      status: "active",
+      remindersEnabled: false,
+    }))
+  )
+  const result = await runSubscriptionReminders(env, {
+    now,
+    fetch: () => {
+      throw new Error("Opted-out accounts must not receive reminder emails")
+    },
+  })
+  assert.equal(result.processed, 0)
+  assert.deepEqual(await rows(), [])
+})
 test("unknown provider outcomes retry the identical payload/key and stop outside the24h deduplication window", async () => {
   await grant("user_due", now + 2 * day)
   const calls = []
