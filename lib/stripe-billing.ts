@@ -186,14 +186,16 @@ export async function billingSummary(
       ? {
           status: subscription.status,
           endsAt:
-            (subscription.status === "trialing" && subscription.trial_end
-              ? subscription.trial_end
-              : Math.max(
-                  0,
-                  ...subscription.items.data.map(
-                    (item) => item.current_period_end
-                  )
-                )) * 1000,
+            (terminalStatuses.has(subscription.status)
+              ? (subscription.ended_at ?? subscription.canceled_at ?? 0)
+              : subscription.status === "trialing" && subscription.trial_end
+                ? subscription.trial_end
+                : Math.max(
+                    0,
+                    ...subscription.items.data.map(
+                      (item) => item.current_period_end
+                    )
+                  )) * 1000,
           cancelAtPeriodEnd: Boolean(
             subscription.cancel_at_period_end || subscription.cancel_at
           ),

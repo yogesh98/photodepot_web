@@ -311,7 +311,9 @@ export function AccountBilling({
             </p>
           ) : (
             <p className={styles.description}>
-              Subscription access is pending payment confirmation.
+              {terminalStatuses.has(subscription.status)
+                ? "This subscription has ended."
+                : "Subscription access is pending payment confirmation."}
             </p>
           )}
           {["past_due", "unpaid", "incomplete", "paused"].includes(

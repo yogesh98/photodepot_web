@@ -577,7 +577,7 @@ test("billing uses live Stripe state only for display, including flexible cancel
   customer()
   const { stripe } = checkoutDeps({ connected: false })
   stripe.subscriptions.list = async () => ({
-    data: [subscription({ cancel_at: monthEnd })],
+    data: [subscription({ cancel_at: monthEnd, canceled_at: now })],
     has_more: false,
   })
   const result = await billingSummary(env, identity.userId, { stripe })
@@ -589,6 +589,26 @@ test("billing uses live Stripe state only for display, including flexible cancel
     sqlite.prepare("SELECT COUNT(*) AS n FROM stripe_subscriptions").get().n,
     0
   )
+})
+
+test("terminal subscriptions display their actual end, never the original future billing period", async () => {
+  customer()
+  const { stripe } = checkoutDeps({ connected: false })
+  for (const status of ["canceled", "incomplete_expired"]) {
+    for (const [timestamps, expectedEnd] of [
+      [{ ended_at: now, canceled_at: now - 60 }, now],
+      [{ ended_at: null, canceled_at: now - 60 }, now - 60],
+      [{}, 0],
+    ]) {
+      stripe.subscriptions.list = async () => ({
+        data: [subscription({ status, ...timestamps })],
+        has_more: false,
+      })
+      const result = await billingSummary(env, identity.userId, { stripe })
+      assert.equal(result.subscription.status, status)
+      assert.equal(result.subscription.endsAt, expectedEnd * 1000)
+    }
+  }
 })
 
 test("reconnecting access validates the private membership without making a Checkout", async () => {
