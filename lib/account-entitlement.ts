@@ -59,25 +59,11 @@ export async function getAccountEntitlement(
   const database = env ? env.DB : (source as D1Database)
   let allowManaged = true
   if (env) {
-    try {
-      // A missing/revoked dedicated session cannot revive an old cached proof.
-      allowManaged = (await getWorkOSEntitlement(env, userId, { now })) !== null
-    } catch (error) {
-      // An independent valid manual grant survives an upstream outage.
-      const row = await database
-        .prepare(`${subscriptionQuery} WHERE s.user_id = ?`)
-        .bind(userId)
-        .first<SubscriptionRow>()
-      if (
-        !resolveAccountAccess(
-          row ? subscriptionSummary(row, decisionNow()) : null,
-          decisionNow()
-        ).canHost
-      )
-        throw error
-      allowManaged = false
-    }
+    // A missing/revoked session cannot revive old proof. Provider failures must
+    // propagate; a historical manual grant never authorizes a replacement receipt.
+    allowManaged = (await getWorkOSEntitlement(env, userId, { now })) !== null
   }
+
   for (let attempt = 0; attempt < 8; attempt++) {
     const snapshot = await database.batch([
       database.prepare(`${subscriptionQuery} WHERE s.user_id = ?`).bind(userId),

@@ -4,24 +4,10 @@ import { DashboardFrame } from "@/components/dashboard-frame"
 import { AccountBilling } from "@/components/account-billing"
 import { SidebarTrigger } from "@/components/ui/sidebar"
 import { Separator } from "@/components/ui/separator"
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
-import {
-  ArrowRight,
-  CalendarDays,
-  Check,
-  Clock3,
-  CreditCard,
-  GalleryVerticalEnd,
-  History,
-  LayoutDashboard,
-  Monitor,
-  RefreshCw,
-  ShieldCheck,
-} from "lucide-react"
-import type { CustomerAccount, CustomerRequest } from "@/lib/account-requests"
-import { Badge } from "@/components/ui/badge"
+import { useCallback, useEffect, useRef, useState } from "react"
+import { Check, CreditCard, Monitor, RefreshCw } from "lucide-react"
+import type { CustomerAccount } from "@/lib/account-requests"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import {
   Dialog,
   DialogContent,
@@ -30,12 +16,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
-import { Textarea } from "@/components/ui/textarea"
 import styles from "./customer-account.module.css"
 
-type RequestForm = { action: "request-renewal" }
 type SelectedMac = {
   id: string
   label: string
@@ -103,15 +86,6 @@ function DateTime({
     </time>
   )
 }
-function requestStatus(request: CustomerRequest) {
-  return request.status === "pending"
-    ? "Awaiting review"
-    : request.status === "acknowledged"
-      ? "Under review"
-      : request.status === "resolved"
-        ? "Completed"
-        : "Declined"
-}
 function SignInLink() {
   return (
     <a href="/api/account/auth/login" target="_blank" rel="noopener noreferrer">
@@ -119,132 +93,40 @@ function SignInLink() {
     </a>
   )
 }
-function RequestDialog({
-  title,
-  busy,
-  sessionExpired,
-  error,
-  message,
-  onMessage,
-  onClose,
-  onSubmit,
-}: {
-  title: string
-  busy: boolean
-  sessionExpired: boolean
-  error: string
-  message: string
-  onMessage: (value: string) => void
-  onClose: () => void
-  onSubmit: (event: FormEvent<HTMLFormElement>) => void
-}) {
-  const cancel = useRef<HTMLButtonElement>(null)
-  return (
-    <Dialog
-      open
-      onOpenChange={(open) => {
-        if (!open && !busy) onClose()
-      }}
-      disablePointerDismissal={busy}
-    >
-      <DialogContent
-        className={styles.modal}
-        showCloseButton={false}
-        initialFocus={cancel}
-      >
-        <form onSubmit={onSubmit}>
-          <DialogHeader className={styles.modalHeading}>
-            <div className={styles.modalIcon}>
-              <CreditCard />
-            </div>
-            <DialogTitle className={styles.modalTitle}>{title}</DialogTitle>
-            <DialogDescription className={styles.modalDescription}>
-              Requires administrator approval. No payment or access change
-              occurs when you submit.
-            </DialogDescription>
-          </DialogHeader>
-          {error && (
-            <p role="alert" className={styles.error}>
-              {error}
-              {sessionExpired && (
-                <>
-                  {" "}
-                  <SignInLink />
-                </>
-              )}
-            </p>
-          )}
-          <div className={styles.field}>
-            <Label htmlFor="request-message">
-              Message to the administrator
-            </Label>
-            <Textarea
-              id="request-message"
-              value={message}
-              onChange={(event) => onMessage(event.target.value)}
-              maxLength={1000}
-              rows={4}
-              disabled={busy}
-            />
-            <span className={styles.fieldHint}>
-              Optional · up to 1,000 characters
-            </span>
-          </div>
-          <DialogFooter className={styles.modalActions}>
-            <Button
-              ref={cancel}
-              type="button"
-              variant="outline"
-              className={styles.button}
-              onClick={onClose}
-              disabled={busy}
-            >
-              Cancel
-            </Button>
-            <Button
-              type="submit"
-              className={styles.button}
-              disabled={busy || sessionExpired}
-            >
-              {busy ? "Submitting…" : "Submit request"}
-              <ArrowRight />
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
 export function CustomerAccountPage() {
+  const [view, setView] = useState<"subscription" | "devices">("subscription")
   const [account, setAccount] = useState<CustomerAccount | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
   const [sessionExpired, setSessionExpired] = useState(false)
-  const [billingRefreshVersion, setBillingRefreshVersion] = useState(0)
   const [notice, setNotice] = useState("")
-  const [form, setForm] = useState<RequestForm | null>(null)
   const [selectedMac, setSelectedMac] = useState<SelectedMac | null>(null)
   const [removalConflict, setRemovalConflict] = useState(false)
-  const [message, setMessage] = useState("")
   const [formError, setFormError] = useState("")
   const removalCancel = useRef<HTMLButtonElement>(null)
   const request = useRef<AbortController | null>(null)
   const mounted = useRef(false)
+  useEffect(() => {
+    const syncView = () => {
+      setView(window.location.hash === "#devices" ? "devices" : "subscription")
+      setSelectedMac(null)
+      setNotice("")
+    }
+    queueMicrotask(syncView)
+    window.addEventListener("hashchange", syncView)
+    return () => window.removeEventListener("hashchange", syncView)
+  }, [])
+  useEffect(() => {
+    window.scrollTo({ top: 0 })
+  }, [view])
   const load = useCallback(async () => {
     if (request.current) return
     const controller = new AbortController()
     request.current = controller
     try {
       const data = await api<CustomerAccount>(undefined, controller.signal)
-      if (
-        !data?.user?.email ||
-        !Array.isArray(data.requests) ||
-        !Array.isArray(data.devices) ||
-        !data.access ||
-        !data.reminders
-      )
+      if (!data?.user?.email || !Array.isArray(data.devices) || !data.access)
         throw new Error("Unable to read your account. Please try again.")
       if (!mounted.current || controller.signal.aborted) return
       setAccount(data)
@@ -284,7 +166,7 @@ export function CustomerAccountPage() {
     }
   }, [load])
   useEffect(() => {
-    if (form || selectedMac || busy || sessionExpired) return
+    if (selectedMac || busy || sessionExpired) return
     const poll = () => {
       if (document.visibilityState === "visible") void load()
     }
@@ -294,7 +176,7 @@ export function CustomerAccountPage() {
       window.clearInterval(timer)
       document.removeEventListener("visibilitychange", poll)
     }
-  }, [load, form, selectedMac, busy, sessionExpired])
+  }, [load, selectedMac, busy, sessionExpired])
   function prepareDialog() {
     request.current?.abort()
     request.current = null
@@ -302,11 +184,6 @@ export function CustomerAccountPage() {
     setFormError("")
     setRemovalConflict(false)
     setNotice("")
-  }
-  function open(form: RequestForm) {
-    prepareDialog()
-    setForm(form)
-    setMessage("")
   }
   function mutationError(cause: unknown, fallback: string) {
     if (!mounted.current) return
@@ -316,31 +193,6 @@ export function CustomerAccountPage() {
       setError(
         "Sign in again, then refresh your account before making changes."
       )
-    }
-  }
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    if (!form || busy || sessionExpired) return
-    setBusy(true)
-    setFormError("")
-    try {
-      const result = await api<{ created: boolean; request: CustomerRequest }>({
-        ...form,
-        message: message.trim(),
-      })
-      if (!mounted.current) return
-      setNotice(
-        result.created
-          ? "Request submitted. An administrator will review it; your access is unchanged."
-          : "You already have an open request for this change. It is awaiting an administrator’s review."
-      )
-      setForm(null)
-      setLoading(true)
-      await load()
-    } catch (cause) {
-      mutationError(cause, "Unable to submit your request.")
-    } finally {
-      if (mounted.current) setBusy(false)
     }
   }
   async function removeMac() {
@@ -379,62 +231,9 @@ export function CustomerAccountPage() {
       if (mounted.current) setBusy(false)
     }
   }
-  async function updateReminders() {
-    if (!account || busy || sessionExpired) return
-    setBusy(true)
-    setError("")
-    try {
-      const result = await api<{ reminders: CustomerAccount["reminders"] }>({
-        action: "set-reminders",
-        enabled: !account.reminders.enabled,
-        expectedRevision: account.reminders.revision,
-      })
-      if (!mounted.current) return
-      if (
-        !result.reminders ||
-        typeof result.reminders.enabled !== "boolean" ||
-        !Number.isSafeInteger(result.reminders.revision)
-      )
-        throw new Error(
-          "Unable to confirm reminder settings. Refresh your account."
-        )
-      setAccount((current) =>
-        current ? { ...current, reminders: result.reminders } : current
-      )
-      setNotice(
-        result.reminders.enabled
-          ? "Expiry reminders enabled."
-          : "Expiry reminders disabled."
-      )
-    } catch (cause) {
-      if (cause instanceof AccountError && cause.status === 401)
-        setSessionExpired(true)
-      if (cause instanceof AccountError && cause.status === 409) await load()
-      setError(
-        cause instanceof Error ? cause.message : "Unable to update reminders."
-      )
-    } finally {
-      if (mounted.current) setBusy(false)
-    }
-  }
   const access = account?.access
   const devices = account?.devices ?? []
-  const openRequests =
-    account?.requests.filter((request) =>
-      ["pending", "acknowledged"].includes(request.status)
-    ) ?? []
-  const renewalPending = openRequests.some(
-    (request) => request.action === "renewal"
-  )
-  const active = access?.status === "active"
-  const status = active
-    ? "Active"
-    : access?.status === "revoked"
-      ? "Access revoked"
-      : access?.status === "expired"
-        ? "Expired"
-        : "Free account"
-  const requestLabel = access?.source ? "Request extension" : "Request access"
+  const active = access?.source === "workos" && access.status === "active"
   return (
     <DashboardFrame
       mode="individual"
@@ -443,18 +242,16 @@ export function CustomerAccountPage() {
       disabled={busy}
       items={[
         {
-          title: "Overview",
-          url: "#overview",
-          icon: <LayoutDashboard />,
-          isActive: true,
+          title: "Subscription",
+          url: "#subscription",
+          icon: <CreditCard />,
+          isActive: view === "subscription",
         },
-        { title: "Access", url: "#plan", icon: <CreditCard /> },
-        { title: "Connected Macs", url: "#devices", icon: <Monitor /> },
         {
-          title: "Request history",
-          url: "#requests",
-          icon: <History />,
-          badge: openRequests.length,
+          title: "Authorized devices",
+          url: "#devices",
+          icon: <Monitor />,
+          isActive: view === "devices",
         },
       ]}
     >
@@ -468,40 +265,32 @@ export function CustomerAccountPage() {
           <span className="text-xs">Individual dashboard</span>
         </div>
       </header>
-      <div className={styles.main} id="overview">
-        <div className={styles.heading}>
-          <div>
-            <h1>Access &amp; connected Macs</h1>
-            {account && (
-              <p className={styles.mobileEmail}>{account.user.email}</p>
-            )}
-          </div>
-          <Button
-            variant="outline"
-            className={styles.button}
-            disabled={loading || busy}
-            onClick={() => {
-              setLoading(true)
-              setBillingRefreshVersion((version) => version + 1)
-              void load()
-            }}
-          >
-            <RefreshCw className={loading ? styles.spinning : undefined} />
-            {loading ? "Refreshing…" : "Refresh"}
-          </Button>
-        </div>
+      <main className={styles.main}>
         {error && (
-          <p role="alert" className={styles.error}>
-            {error}
-            {sessionExpired && (
-              <>
-                {" "}
-                <SignInLink />
-              </>
-            )}
-          </p>
+          <div role="alert" className={styles.error}>
+            <p>
+              {error}
+              {sessionExpired && (
+                <>
+                  {" "}
+                  <SignInLink />
+                </>
+              )}
+            </p>
+            <Button
+              variant="outline"
+              className={styles.button}
+              disabled={loading || busy}
+              onClick={() => {
+                setLoading(true)
+                void load()
+              }}
+            >
+              Try again
+            </Button>
+          </div>
         )}
-        {notice && (
+        {notice && view === "devices" && (
           <p role="status" className={styles.notice}>
             <Check size={16} />
             {notice}
@@ -509,11 +298,7 @@ export function CustomerAccountPage() {
         )}
         {!account ? (
           <div role="status" className={styles.loading}>
-            <span>
-              {loading
-                ? "Loading your account…"
-                : "Select Refresh to try loading your account again."}
-            </span>
+            {loading ? "Loading your account…" : "Unable to load your account."}
             {loading && (
               <div className={styles.skeletonGrid}>
                 <Skeleton />
@@ -524,167 +309,33 @@ export function CustomerAccountPage() {
           </div>
         ) : (
           <>
-            <div className={styles.metrics}>
-              <div className={styles.metric}>
-                <span>
-                  <ShieldCheck />
-                  Access
-                </span>
-                <strong>{status}</strong>
-              </div>
-              <div className={styles.metric}>
-                <span>
-                  <Monitor />
-                  Connected devices
-                </span>
-                <strong>
-                  {devices.length}
-                  <em> / {2} Macs</em>
-                </strong>
-              </div>
-              <div className={styles.metric}>
-                <span>
-                  <Clock3 />
-                  Open requests
-                </span>
-                <strong>
-                  {openRequests.length.toString().padStart(2, "0")}
-                </strong>
-              </div>
-            </div>
-            <div className={styles.columns}>
-              <Card
-                className={styles.planCard}
-                id="plan"
-                aria-labelledby="plan-title"
+            {view === "subscription" && (
+              <section
+                id="subscription"
+                aria-labelledby="subscription-title"
+                className={styles.subscription}
               >
-                <CardHeader className={styles.cardHeader}>
-                  <CardTitle>
-                    <h2 id="plan-title">Your access</h2>
-                  </CardTitle>
-                  <Badge
-                    variant="secondary"
-                    className={active ? styles.active : styles.inactive}
-                  >
-                    {active && <span className={styles.statusDot} />}
-                    {status}
-                  </Badge>
-                </CardHeader>
-                <CardContent className={styles.planContent}>
-                  <div className={styles.planIdentity}>
-                    <span className={styles.planIcon}>
-                      <GalleryVerticalEnd />
-                    </span>
-                    <div>
-                      <p className={styles.plan}>
-                        {access?.source === "workos"
-                          ? access.tier === "trial"
-                            ? "Subscription trial"
-                            : "Subscription access"
-                          : access?.tier === "trial"
-                            ? "Trial access"
-                            : access?.tier === "standard"
-                              ? "Standard access"
-                              : "Free account"}
-                      </p>
-                    </div>
-                  </div>
-                  {access?.source ? (
-                    <dl className={styles.planDetails}>
-                      <div>
-                        <dt>
-                          {access.source === "workos"
-                            ? "Access checked"
-                            : "Access started"}
-                        </dt>
-                        <dd>
-                          <DateTime value={access.startsAt!} short />
-                        </dd>
-                      </div>
-                      <div>
-                        <dt>
-                          {access.source === "workos"
-                            ? "Offline access valid until"
-                            : access.status === "expired"
-                              ? "Access expired"
-                              : "Access until"}
-                        </dt>
-                        <dd>
-                          <DateTime
-                            value={access.endsAt!}
-                            short={access.source !== "workos"}
-                          />
-                        </dd>
-                      </div>
-                    </dl>
-                  ) : (
-                    <p className={styles.planHint}>
-                      You can log in to the Mac app and join collaboration. An
-                      active access period is required to open local projects or
-                      host collaboration.
-                    </p>
-                  )}
-                  <div className={styles.planActions}>
-                    <Button
-                      className={styles.button}
-                      onClick={() => open({ action: "request-renewal" })}
-                      disabled={busy || sessionExpired || renewalPending}
-                    >
-                      {renewalPending ? <Check /> : <ArrowRight />}
-                      {renewalPending
-                        ? "Request awaiting review"
-                        : requestLabel}
-                    </Button>
-                  </div>
-                  {account.reminders.revision > 0 && (
-                    <div className={styles.renewalInfo}>
-                      <CalendarDays size={17} />
-                      <div>
-                        <strong>Expiry reminders</strong>
-                        <p>
-                          Receive a reminder before trial access ends. This
-                          preference does not extend access.
-                        </p>
-                        <Button
-                          variant="outline"
-                          className={styles.button}
-                          disabled={busy || sessionExpired}
-                          onClick={() => void updateReminders()}
-                          aria-pressed={account.reminders.enabled}
-                        >
-                          {account.reminders.enabled
-                            ? "Turn off reminders"
-                            : "Turn on reminders"}
-                        </Button>
-                      </div>
-                    </div>
-                  )}
-                  <p className={styles.billingNote}>
-                    <ShieldCheck size={13} />
-                    Access requests require administrator approval. Manual
-                    access does not change Stripe billing.
-                  </p>
-                  <AccountBilling
-                    refreshVersion={billingRefreshVersion}
-                    disabled={busy || sessionExpired}
-                    onAccessRefresh={refreshAccess}
-                  />
-                </CardContent>
-              </Card>
-              <Card
-                className={styles.devicesCard}
+                <h1 id="subscription-title" className={styles.sectionTitle}>
+                  Subscription
+                </h1>
+                <AccountBilling
+                  hasAccess={active}
+                  refreshVersion={0}
+                  disabled={busy || sessionExpired}
+                  onAccessRefresh={refreshAccess}
+                />
+              </section>
+            )}
+            {view === "devices" && (
+              <section
                 id="devices"
-                aria-labelledby="macs-title"
+                aria-labelledby="devices-title"
+                className={styles.devicesSection}
               >
-                <CardHeader className={styles.cardHeader}>
-                  <CardTitle>
-                    <h2 id="macs-title">Connected Macs</h2>
-                  </CardTitle>
-                  <Badge variant="outline" className={styles.count}>
-                    {devices.length} / {2}
-                  </Badge>
-                </CardHeader>
-                <CardContent className={styles.deviceContent}>
+                <h1 id="devices-title" className={styles.sectionTitle}>
+                  Authorized devices
+                </h1>
+                <div className={styles.deviceList}>
                   {devices.length ? (
                     <ol className={styles.devices}>
                       {devices.map((device, index) => {
@@ -693,33 +344,32 @@ export function CustomerAccountPage() {
                         return (
                           <li key={device.id}>
                             <div className={styles.deviceHeading}>
-                              <span className={styles.deviceIcon}>
-                                <Monitor size={23} />
-                              </span>
+                              <Monitor size={20} />
                               <div className="min-w-0 [overflow-wrap:anywhere]">
                                 <strong>{label}</strong>
                                 <span>
-                                  Connected{" "}
-                                  <DateTime value={device.activatedAt} short />
-                                  {device.lastUsedAt != null && (
+                                  {device.lastUsedAt != null ? (
                                     <>
-                                      <br />
                                       Last used{" "}
                                       <DateTime value={device.lastUsedAt} />
+                                    </>
+                                  ) : (
+                                    <>
+                                      Authorized{" "}
+                                      <DateTime
+                                        value={device.activatedAt}
+                                        short
+                                      />
                                     </>
                                   )}
                                 </span>
                               </div>
                             </div>
-                            <details>
-                              <summary>Mac identifier</summary>
-                              <code className={styles.deviceId}>
-                                {device.id}
-                              </code>
-                            </details>
                             <Button
                               variant="outline"
                               className={styles.deviceButton}
+                              aria-label={`Remove ${label}`}
+                              disabled={busy || sessionExpired || loading}
                               onClick={() => {
                                 prepareDialog()
                                 setSelectedMac({
@@ -729,122 +379,22 @@ export function CustomerAccountPage() {
                                   sessionId: device.sessionId,
                                 })
                               }}
-                              disabled={busy || sessionExpired || loading}
-                              aria-label={`Remove ${label}`}
                             >
-                              Remove Mac
+                              Remove
                             </Button>
                           </li>
                         )
                       })}
                     </ol>
                   ) : (
-                    <div className={styles.empty}>
-                      <Monitor size={26} />
-                      <strong>No Macs connected</strong>
-                      <p>Sign in to Photodepot on your Mac to connect it.</p>
-                    </div>
+                    <p className={styles.empty}>No authorized devices.</p>
                   )}
-                </CardContent>
-              </Card>
-            </div>
-            <Card
-              className={styles.requests}
-              id="requests"
-              aria-labelledby="requests-title"
-            >
-              <CardHeader className={styles.cardHeader}>
-                <div>
-                  <CardTitle>
-                    <h2 id="requests-title">Your requests</h2>
-                  </CardTitle>
-                  <p className={styles.description}>Latest 50 requests</p>
                 </div>
-                <Badge variant="outline" className={styles.count}>
-                  {account.requests.length} total
-                </Badge>
-              </CardHeader>
-              <CardContent className={styles.requestContent}>
-                {account.requests.length ? (
-                  <ol className={styles.requestList}>
-                    {account.requests.map((request) => (
-                      <li key={request.id}>
-                        <div className={styles.requestIcon}>
-                          {request.action === "renewal" ? (
-                            <CreditCard size={17} />
-                          ) : (
-                            <Monitor size={17} />
-                          )}
-                        </div>
-                        <div className={styles.requestBody}>
-                          <div className={styles.requestHeading}>
-                            <strong>
-                              {request.action === "renewal"
-                                ? "Access extension"
-                                : "Mac removal"}
-                            </strong>
-                            <Badge
-                              variant="secondary"
-                              className={
-                                request.status === "resolved"
-                                  ? styles.active
-                                  : styles.requestStatus
-                              }
-                            >
-                              {requestStatus(request)}
-                            </Badge>
-                          </div>
-                          {request.deviceId && (
-                            <code className={styles.deviceId}>
-                              {request.deviceId}
-                            </code>
-                          )}
-                          {request.message && (
-                            <p className={styles.message}>{request.message}</p>
-                          )}
-                          <small>
-                            Submitted <DateTime value={request.createdAt} />
-                            {request.updatedAt !== request.createdAt && (
-                              <>
-                                {" "}
-                                · Updated <DateTime value={request.updatedAt} />
-                              </>
-                            )}
-                          </small>
-                        </div>
-                      </li>
-                    ))}
-                  </ol>
-                ) : (
-                  <div className={styles.emptyRequests}>
-                    <History size={22} />
-                    <div>
-                      <strong>No requests</strong>
-                    </div>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
+              </section>
+            )}
           </>
         )}
-        <footer className={styles.footer}>
-          <span>Dates use your browser’s time zone.</span>
-        </footer>
-      </div>
-      {form && (
-        <RequestDialog
-          title={requestLabel}
-          busy={busy}
-          sessionExpired={sessionExpired}
-          error={formError}
-          message={message}
-          onMessage={setMessage}
-          onClose={() => {
-            if (!busy) setForm(null)
-          }}
-          onSubmit={submit}
-        />
-      )}
+      </main>
       {selectedMac && (
         <Dialog
           open

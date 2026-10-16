@@ -202,7 +202,8 @@ test("customer GET shows only the authenticated account and no administrator dat
   assert.equal(response.headers.get("cache-control"), "private, no-store")
   const account = await response.json()
   assert.equal(account.user.email, "user_dashboard_customer@example.test")
-  assert.equal(account.access.canHost, true)
+  assert.equal(account.access.canHost, false)
+  assert.deepEqual(Object.keys(account).sort(), ["access", "devices", "user"])
   assert.deepEqual(
     account.devices.map((device) => device.id),
     [deviceId]
@@ -288,241 +289,80 @@ test("account and admin cookies remain separate, and member sessions cannot revi
         env
       )
     ).status,
-    200
+    410
   )
 })
 
-test("renewal requests are idempotent and never mutate access", async () => {
+test("retired customer actions cannot create requests, change manual grants or preferences", async () => {
   const auth = await cookie()
   const before = await getSubscription(env.DB, "user_dashboard_customer")
-  const body = {
-    action: "request-renewal",
-    message: "<script>window.injected=true</script>",
+  for (const action of [
+    "request-renewal",
+    "request-reset-device",
+    "reset-device",
+    "set-reminders",
+  ]) {
+    const result = await handleAccountSubscription(
+      request("/api/account/subscription", auth, {
+        action,
+        enabled: false,
+        expectedRevision: before.revision,
+        message: "Give access",
+      }),
+      env
+    )
+    assert.equal(result.status, 410, action)
+    assert.match((await result.json()).error, /retired/)
   }
-  const created = await handleAccountSubscription(
-    request("/api/account/subscription", auth, body),
-    env
-  )
-  assert.equal(created.status, 201)
-  const result = await created.json()
-  assert.equal(result.request.deviceId, null)
-  assert.equal(result.request.message, body.message)
-  const retry = await handleAccountSubscription(
-    request("/api/account/subscription", auth, body),
-    env
-  )
-  assert.equal(retry.status, 200)
-  assert.equal((await retry.json()).created, false)
   assert.deepEqual(
     await getSubscription(env.DB, "user_dashboard_customer"),
     before
   )
-  const other = await handleAccountSubscription(
-    request("/api/account/subscription", await cookie("user_dashboard_other")),
-    env
-  )
-  assert.equal((await other.json()).requests.length, 0)
-})
-
-test("Owner request review is revision-safe and hides review notes from customers", async () => {
-  const auth = await cookie()
-  const created = await (
-    await handleAccountSubscription(
-      request("/api/account/subscription", auth, { action: "request-renewal" }),
-      env
-    )
-  ).json()
-  const admin = await cookie("user_dashboard_owner", "admin", "owner")
-  const review = {
-    action: "acknowledge",
-    requestId: created.request.id,
-    expectedRevision: 1,
-    note: "Admin-only followup",
-  }
-  const response = await handleAdminSubscriptionRequests(
-    request("/api/admin/subscription-requests", admin, review),
-    env
-  )
-  assert.equal(response.status, 200)
-  assert.equal((await response.json()).request.revision, 2)
   assert.equal(
     (
-      await handleAdminSubscriptionRequests(
-        request("/api/admin/subscription-requests", admin, {
-          ...review,
-          action: "resolve",
-        }),
-        env
-      )
-    ).status,
-    409
+      await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM subscription_requests"
+      ).first()
+    ).n,
+    0
   )
-  assert.equal(
-    (
-      await handleAdminSubscriptionRequests(
-        request(
-          "/api/admin/subscription-requests",
-          admin,
-          { ...review, action: "resolve", expectedRevision: 2 },
-          { origin: "null" }
-        ),
-        env
-      )
-    ).status,
-    403
-  )
-  const history = await (
-    await handleAdminSubscriptionRequests(
-      request(
-        `/api/admin/subscription-requests?requestId=${created.request.id}`,
-        admin
-      ),
-      env
-    )
-  ).json()
-  assert.equal(history.audit.length, 2)
-  assert.equal(history.request.adminNote, "Admin-only followup")
-  const customer = await (
-    await handleAccountSubscription(
-      request("/api/account/subscription", auth),
-      env
-    )
-  ).json()
-  assert.equal(customer.requests[0].status, "acknowledged")
-  assert.equal(JSON.stringify(customer).includes("Admin-only"), false)
-  assert.equal("audit" in customer, false)
 })
 
-test("admin request queue uses live account metadata, deduplicates lookups and marks deleted accounts", async () => {
-  for (const values of [
-    { action: "renewal" },
-    { action: "reset-device", deviceId },
-    { userId: "user_dashboard_other", action: "renewal" },
-  ])
-    await createAccountRequest(env.DB, {
-      userId: "user_dashboard_customer",
-      email: "stored.old.email@example.test",
-      ...values,
-    })
-  const response = await handleAdminSubscriptionRequests(
-    request(
-      "/api/admin/subscription-requests",
-      await cookie("user_dashboard_owner", "admin", "owner")
-    ),
-    env
-  )
-  assert.equal(response.status, 200)
-  const queue = await response.json()
-  assert.equal(queue.requests.length, 3)
-  for (const item of queue.requests.filter(
-    (item) => item.userId === "user_dashboard_customer"
-  )) {
-    assert.deepEqual(item.user, {
-      id: "user_dashboard_customer",
-      email: "live.customer@example.test",
-      emailVerified: false,
-      firstName: "Actual",
-      lastName: "Customer",
-      createdAt: Date.parse("2026-01-02T03:04:05.000Z"),
-    })
-    assert.equal(item.email, "stored.old.email@example.test")
-  }
-  assert.equal(
-    queue.requests.find((item) => item.userId === "user_dashboard_other").user,
-    null
-  )
-  assert.deepEqual(accountLookups.sort(), [
-    "user_dashboard_customer",
-    "user_dashboard_other",
-  ])
-  liveUsers.set("user_dashboard_customer", "unavailable")
-  const unavailable = await handleAdminSubscriptionRequests(
-    request(
-      "/api/admin/subscription-requests",
-      await cookie("user_dashboard_owner", "admin", "owner")
-    ),
-    env
-  )
-  assert.equal(unavailable.status, 503)
-})
-
-test("former profile settings do not alter customer requests or Owner reviews", async () => {
-  const bindings = { ...env, PHOTODEPOT_ENVIRONMENT: "staging" }
-  const customer = await cookie()
-  const write = await handleAccountSubscription(
-    request("/api/account/subscription", customer, {
-      action: "request-renewal",
-    }),
-    bindings
-  )
-  assert.equal(write.status, 201)
-  const { request: created } = await write.json()
-  const review = await handleAdminSubscriptionRequests(
-    request(
-      "/api/admin/subscription-requests",
-      await cookie("user_dashboard_owner", "admin", "owner"),
-      {
-        requestId: created.id,
-        action: "resolve",
-        expectedRevision: 1,
-      }
-    ),
-    bindings
-  )
-  assert.equal(review.status, 200)
-  assert.deepEqual(await getAccountRequest(env.DB, created.id), {
-    ...created,
-    ...(await review.json()).request,
-    status: "resolved",
-    revision: 2,
+test("retired Owner request review leaves historical requests and audits unchanged", async () => {
+  const stored = await createAccountRequest(env.DB, {
+    userId: "user_dashboard_customer",
+    email: "customer@example.test",
+    action: "renewal",
   })
-})
-
-test("reminder preference responses preserve effective WorkOS access and independent manual revisions", async () => {
-  const userId = "user_dashboard_customer",
-    now = Date.now(),
-    day = 86_400_000
-  await env.DB.prepare("UPDATE subscriptions SET end_at=? WHERE user_id=?")
-    .bind(now + day, userId)
-    .run()
-  const manual = await getSubscription(env.DB, userId, now)
-  await env.DB.prepare(
-    "INSERT INTO stripe_customers (user_id,stripe_customer_id,workos_organization_id,customer_create_token) VALUES (?,?,?,?)"
-  )
-    .bind(userId, "cus_preference", "org_preference", "fixture")
-    .run()
-  await env.DB.prepare(
-    "INSERT INTO workos_billing_sessions (user_id,session_id,encrypted_tokens,updated_at) VALUES (?,?,?,?)"
-  )
-    .bind(userId, "session_preference", "unused-until-refresh", now)
-    .run()
-  await env.DB.prepare(
-    "INSERT INTO workos_entitlements (user_id,organization_id,enabled,issued_at,expires_at,revision,context) VALUES (?,?,1,?,?,1,?)"
-  )
-    .bind(
-      userId,
-      "org_preference",
-      now,
-      now + 300_000,
-      JSON.stringify([
-        env.WORKOS_CLIENT_ID,
-        env.PHOTODEPOT_WORKOS_ENTITLEMENT ?? "photodepot-standard",
-      ])
+  const auth = await cookie("user_dashboard_owner", "admin", "owner")
+  for (const body of [
+    undefined,
+    {
+      action: "approve",
+      id: stored.request.id,
+      expectedRevision: 1,
+      type: "regular",
+      durationDays: 30,
+    },
+    { action: "reject", id: stored.request.id, expectedRevision: 1 },
+  ]) {
+    const response = await handleAdminSubscriptionRequests(
+      request("/api/admin/subscription-requests", auth, body),
+      env
     )
-    .run()
-  const response = await handleAccountSubscription(
-    request("/api/account/subscription", await cookie(userId), {
-      action: "set-reminders",
-      enabled: false,
-      expectedRevision: manual.revision,
-    }),
-    env
+    assert.equal(response.status, 410)
+  }
+  assert.equal(
+    (await getAccountRequest(env.DB, stored.request.id)).status,
+    "pending"
   )
-  assert.equal(response.status, 200)
-  const result = await response.json()
-  assert.equal(result.access.source, "workos")
-  assert.equal(result.access.canHost, true)
-  assert.equal(result.reminders.enabled, false)
-  assert.equal(result.reminders.revision, manual.revision + 1)
-  assert.equal((await getSubscription(env.DB, userId)).endsAt, manual.endsAt)
+  assert.equal(accountLookups.length, 0)
+  assert.equal(
+    (
+      await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM subscription_request_audit"
+      ).first()
+    ).n,
+    1
+  )
 })

@@ -14,8 +14,17 @@ import {
   storeWorkOSBillingSession,
   WorkOSEntitlementUnavailableError,
 } from "./workos-entitlements.ts"
+import {
+  billingConfiguration,
+  createBillingCheckout,
+  type BillingInterval,
+} from "./stripe-billing.ts"
 
 const lifetime = 10 * 60
+interface CheckoutIntent {
+  action: "checkout"
+  interval: BillingInterval
+}
 interface BillingTransaction {
   version: 1
   purpose: "photodepot-billing-authorization"
@@ -27,6 +36,55 @@ interface BillingTransaction {
   organizationId: string
   customerId: string
   browserSessionId: string
+  intent?: CheckoutIntent
+}
+function validIntent(value: unknown): value is CheckoutIntent {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false
+  const intent = value as Record<string, unknown>
+  return (
+    Object.keys(intent).length === 2 &&
+    intent.action === "checkout" &&
+    (intent.interval === "monthly" || intent.interval === "annual")
+  )
+}
+function checkoutIntent(request: Request): CheckoutIntent | undefined {
+  const query = new URL(request.url).searchParams
+  if (!query.size) return undefined
+  const intent = {
+    action: query.get("action"),
+    interval: query.get("interval"),
+  }
+  if (
+    query.size !== 2 ||
+    [...query.keys()].some((key) => key !== "action" && key !== "interval") ||
+    !validIntent(intent)
+  )
+    throw json({ error: "Choose an available billing action." }, 400)
+  return intent
+}
+function checkoutConfiguration(
+  env: Env,
+  origin: string,
+  interval: BillingInterval
+) {
+  const billing = billingConfiguration(env)
+  if (!billing || billing.origin !== origin)
+    throw json({ error: "Billing is unavailable on this hostname." }, 503)
+  if (!billing.prices[interval])
+    throw json({ error: "Choose an available billing interval." }, 400)
+}
+function checkoutRedirect(value: { url: string; provider: string }) {
+  const url = new URL(value.url)
+  if (
+    value.provider !== "stripe" ||
+    url.protocol !== "https:" ||
+    url.hostname !== "checkout.stripe.com" ||
+    url.username ||
+    url.password ||
+    url.port
+  )
+    throw new WorkOSEntitlementUnavailableError("Checkout could not be opened.")
+  return redirect(url.href)
 }
 function configuration(request: Request, env: Env) {
   const error = accountConfigurationError(request, env)
@@ -127,6 +185,8 @@ export async function handleWorkOSBillingAuthorize(request: Request, env: Env) {
   if (auth instanceof Response) return auth
   try {
     const config = configuration(request, env)
+    const intent = checkoutIntent(request)
+    if (intent) checkoutConfiguration(env, config.origin, intent.interval)
     const organization = await personalOrganization(config, env, auth.userId)
     const authorization =
       await config.workos.userManagement.getAuthorizationUrlWithPKCE({
@@ -151,6 +211,7 @@ export async function handleWorkOSBillingAuthorize(request: Request, env: Env) {
       organizationId: organization.organizationId,
       customerId: organization.customerId,
       browserSessionId: auth.sessionId,
+      ...(intent ? { intent } : {}),
     }
     const response = redirect(authorizationUrl.href)
     response.headers.append(
@@ -202,6 +263,8 @@ export async function handleWorkOSBillingCallback(request: Request, env: Env) {
         transaction.browserSessionId !== auth.sessionId ||
         typeof transaction.codeVerifier !== "string" ||
         !transaction.codeVerifier ||
+        (transaction.intent !== undefined &&
+          !validIntent(transaction.intent)) ||
         query.has("error") ||
         !query.get("code") ||
         query.get("code")!.length > 2000
@@ -214,6 +277,8 @@ export async function handleWorkOSBillingCallback(request: Request, env: Env) {
           401
         )
       } else {
+        if (transaction.intent)
+          checkoutConfiguration(env, config.origin, transaction.intent.interval)
         const organization = await personalOrganization(
           config,
           env,
@@ -282,7 +347,15 @@ export async function handleWorkOSBillingCallback(request: Request, env: Env) {
           accessToken: result.accessToken,
           refreshToken: result.refreshToken,
         })
-        response = redirect(`${config.origin}/account?billing=connected`)
+        response = transaction.intent
+          ? checkoutRedirect(
+              await createBillingCheckout(
+                env,
+                auth,
+                transaction.intent.interval
+              )
+            )
+          : redirect(`${config.origin}/account?billing=connected`)
       }
       response = withAdminSession(response, auth)
     }

@@ -126,6 +126,53 @@ export function createBillingStripe(config: BillingConfig) {
   })
 }
 
+async function configuredPrice(
+  config: BillingConfig,
+  stripe: Stripe,
+  interval: BillingInterval
+) {
+  const priceId = config.prices[interval]
+  if (!priceId) throw new TypeError("Choose an available billing interval.")
+  const price = await stripe.prices.retrieve(priceId, { expand: ["product"] })
+  if (
+    price.id !== priceId ||
+    !price.active ||
+    price.livemode !== config.live ||
+    price.type !== "recurring" ||
+    price.recurring?.interval !== (interval === "monthly" ? "month" : "year") ||
+    price.recurring?.interval_count !== 1 ||
+    !Number.isSafeInteger(price.unit_amount) ||
+    price.unit_amount! < 0 ||
+    price.tax_behavior === "unspecified"
+  )
+    throw new BillingUnavailableError(
+      "The configured Stripe price needs review."
+    )
+  if (
+    typeof price.product !== "object" ||
+    price.product.deleted ||
+    !price.product.active ||
+    (config.automaticTax && !price.product.tax_code)
+  )
+    throw new BillingUnavailableError(
+      "The configured Stripe product needs a tax code and must be active."
+    )
+  return price
+}
+
+function priceInterval(
+  price: Stripe.Price | undefined
+): BillingInterval | null {
+  const recurring = price?.recurring
+  return recurring?.interval_count === 1
+    ? recurring.interval === "month"
+      ? "monthly"
+      : recurring.interval === "year"
+        ? "annual"
+        : null
+    : null
+}
+
 /** Stripe state is display-only. WorkOS entitlements alone authorize paid access. */
 export async function billingSummary(
   env: Env,
@@ -136,6 +183,9 @@ export async function billingSummary(
   const disabled = {
     enabled: false,
     intervals: [] as BillingInterval[],
+    prices: {} as Partial<
+      Record<BillingInterval, { amount: number; currency: string }>
+    >,
     subscription: null,
     hasCustomer: false,
     portalEnabled: false,
@@ -152,6 +202,21 @@ export async function billingSummary(
     })
   connected = await hasWorkOSBillingSession(env.DB, userId)
   const stripe = options.stripe ?? createBillingStripe(config)
+  const intervals =
+    env.PHOTODEPOT_STRIPE_ENABLED === "true"
+      ? (Object.keys(config.prices) as BillingInterval[])
+      : []
+  const prices = Object.fromEntries(
+    await Promise.all(
+      intervals.map(async (interval) => {
+        const price = await configuredPrice(config, stripe, interval)
+        return [
+          interval,
+          { amount: price.unit_amount!, currency: price.currency },
+        ]
+      })
+    )
+  ) as Partial<Record<BillingInterval, { amount: number; currency: string }>>
   const subscriptions = customer?.stripe_customer_id
     ? await stripe.subscriptions.list({
         customer: customer.stripe_customer_id,
@@ -174,17 +239,28 @@ export async function billingSummary(
   const manualTrial = config.trialDays
     ? await hasUsedManualTrial(env.DB, userId)
     : false
+  const item =
+    subscription?.items.data.length === 1 ? subscription.items.data[0] : null
+  const interval = priceInterval(item?.price)
+  const amount =
+    item?.price?.unit_amount != null && item.quantity != null
+      ? item.price.unit_amount * item.quantity
+      : null
   return {
     enabled:
       env.PHOTODEPOT_STRIPE_ENABLED === "true" ||
       Boolean(customer?.stripe_customer_id),
-    intervals:
-      env.PHOTODEPOT_STRIPE_ENABLED === "true"
-        ? (Object.keys(config.prices) as BillingInterval[])
-        : [],
+    intervals,
+    prices,
     subscription: subscription
       ? {
           status: subscription.status,
+          interval,
+          amount: Number.isSafeInteger(amount) && amount! >= 0 ? amount : null,
+          currency: item?.price?.currency ?? null,
+          discountsApplied: Boolean(
+            subscription.discounts?.length || item?.discounts?.length
+          ),
           endsAt:
             (terminalStatuses.has(subscription.status)
               ? (subscription.ended_at ?? subscription.canceled_at ?? 0)
@@ -230,7 +306,8 @@ function safeStripeUrl(value: string | null, kind: "checkout" | "portal") {
     url.hostname !==
       (kind === "checkout" ? "checkout.stripe.com" : "billing.stripe.com") ||
     url.username ||
-    url.password
+    url.password ||
+    url.port
   )
     throw new BillingUnavailableError("Stripe returned an invalid billing URL.")
   return value
@@ -377,7 +454,7 @@ export async function createBillingCheckout(
     )
     if (!(await hasWorkOSBillingSession(env.DB, identity.userId)))
       return {
-        url: "/api/account/billing/authorize",
+        url: `/api/account/billing/authorize?action=checkout&interval=${interval}`,
         provider: "workos" as const,
       }
     const subscriptions = await stripe.subscriptions.list({
@@ -399,28 +476,7 @@ export async function createBillingCheckout(
       await updateBillingCustomer(env.DB, identity.userId, token, {
         trial_used: 1,
       })
-    const price = await stripe.prices.retrieve(priceId, { expand: ["product"] })
-    if (
-      !price.active ||
-      price.livemode !== config.live ||
-      price.type !== "recurring" ||
-      price.recurring?.interval !==
-        (interval === "monthly" ? "month" : "year") ||
-      price.recurring?.interval_count !== 1 ||
-      price.tax_behavior === "unspecified"
-    )
-      throw new BillingUnavailableError(
-        "The configured Stripe price needs review."
-      )
-    if (
-      typeof price.product !== "object" ||
-      price.product.deleted ||
-      !price.product.active ||
-      (config.automaticTax && !price.product.tax_code)
-    )
-      throw new BillingUnavailableError(
-        "The configured Stripe product needs a tax code and must be active."
-      )
+    await configuredPrice(config, stripe, interval)
     if (row.checkout_session_id) {
       const session = await stripe.checkout.sessions.retrieve(
         row.checkout_session_id
@@ -443,13 +499,17 @@ export async function createBillingCheckout(
           )
       }
       if (session.status === "open") {
-        if (row.checkout_price_id === priceId)
+        if (
+          row.checkout_price_id === priceId &&
+          session.allow_promotion_codes === true &&
+          session.payment_method_collection === "if_required"
+        )
           return {
             url: safeStripeUrl(session.url, "checkout"),
             provider: "stripe" as const,
           }
-        // A cancel_url return leaves Checkout open. Close that session before
-        // replacing its price so only one session can complete a purchase.
+        // A cancel_url return leaves Checkout open. Close it before changing
+        // its price or discount policy so only one session can complete.
         const expired = await stripe.checkout.sessions.expire(session.id)
         if (
           expired.status !== "expired" ||
@@ -501,7 +561,7 @@ export async function createBillingCheckout(
         tax_id_collection: { enabled: true },
         customer_update: { address: "auto", name: "auto" },
         allow_promotion_codes: true,
-        payment_method_collection: "always",
+        payment_method_collection: "if_required",
         metadata: { photodepot_user_id: identity.userId },
         subscription_data: {
           billing_mode: { type: "flexible" },
@@ -562,6 +622,146 @@ export async function createBillingPortal(
       configuration: config.portalConfiguration,
       return_url: `${config.origin}/account?billing=return`,
     })
+    return {
+      url: safeStripeUrl(session.url, "portal"),
+      provider: "stripe" as const,
+    }
+  } finally {
+    await unlockBillingAccount(env.DB, identity.userId, token)
+  }
+}
+
+/** Open a hosted confirmation; no subscription change happens in this request. */
+export async function createBillingSubscriptionFlow(
+  env: Env,
+  identity: BillingIdentity,
+  action: "cancel" | "upgrade",
+  deps: BillingDependencies = {}
+) {
+  if (action !== "cancel" && action !== "upgrade")
+    throw new TypeError("Choose an available subscription action.")
+  const config =
+    action === "upgrade" ? requiredConfig(env) : billingConfiguration(env, true)
+  if (!config || !config.portalConfiguration)
+    throw new BillingUnavailableError("Billing settings are not configured.")
+  const { customer: row, token } = await lockBillingAccount(
+    env.DB,
+    identity.userId
+  )
+  try {
+    if (!row.stripe_customer_id)
+      throw new BillingConflictError("Start a subscription before changing it.")
+    const stripe = deps.stripe ?? createBillingStripe(config)
+    const subscriptions = await stripe.subscriptions.list({
+      customer: row.stripe_customer_id,
+      status: "all",
+      limit: 100,
+    })
+    const current = subscriptions.data.filter(
+      (subscription) => !terminalStatuses.has(subscription.status)
+    )
+    if (subscriptions.has_more || current.length !== 1)
+      throw new BillingConflictError(
+        "Your subscription needs review. Open billing settings to continue."
+      )
+    const subscription = current[0]
+    if (
+      subscription.livemode !== config.live ||
+      objectId(subscription.customer) !== row.stripe_customer_id ||
+      !/^sub_[A-Za-z0-9]+$/.test(subscription.id)
+    )
+      throw new BillingUnavailableError("Billing customer mismatch.")
+    const item =
+      !subscription.items.has_more && subscription.items.data.length === 1
+        ? subscription.items.data[0]
+        : null
+    const interval = priceInterval(item?.price)
+    if (
+      !item ||
+      !interval ||
+      !/^si_[A-Za-z0-9]+$/.test(item.id) ||
+      item.quantity !== 1 ||
+      (action === "upgrade" && item.price.id !== config.prices[interval])
+    )
+      throw new BillingConflictError(
+        "This subscription needs review in billing settings."
+      )
+    if (subscription.cancel_at_period_end || subscription.cancel_at)
+      throw new BillingConflictError(
+        "Cancellation is already scheduled. Review your subscription in billing settings."
+      )
+    const portal = await stripe.billingPortal.configurations.retrieve(
+      config.portalConfiguration
+    )
+    if (
+      !portal.active ||
+      portal.id !== config.portalConfiguration ||
+      portal.livemode !== config.live
+    )
+      throw new BillingUnavailableError("Billing settings need review.")
+    const returnUrl = `${config.origin}/account?billing=return`
+    const afterCompletion: Stripe.BillingPortal.SessionCreateParams.FlowData.AfterCompletion =
+      { type: "redirect", redirect: { return_url: returnUrl } }
+    let flow: Stripe.BillingPortal.SessionCreateParams.FlowData
+    if (action === "cancel") {
+      if (
+        !portal.features.subscription_cancel.enabled ||
+        portal.features.subscription_cancel.mode !== "at_period_end"
+      )
+        throw new BillingUnavailableError(
+          "Subscription cancellation settings need review."
+        )
+      flow = {
+        type: "subscription_cancel",
+        subscription_cancel: { subscription: subscription.id },
+        after_completion: afterCompletion,
+      }
+    } else {
+      if (
+        interval !== "monthly" ||
+        !["active", "trialing"].includes(subscription.status) ||
+        subscription.pending_update ||
+        subscription.schedule
+      )
+        throw new BillingConflictError(
+          "Only a current monthly subscription can switch to yearly."
+        )
+      const annual = await configuredPrice(config, stripe, "annual")
+      const productId = objectId(annual.product)
+      const updates = portal.features.subscription_update
+      if (
+        !productId ||
+        objectId(item.price.product) !== productId ||
+        annual.currency !== item.price.currency ||
+        !updates.enabled ||
+        !updates.default_allowed_updates.includes("price") ||
+        !updates.products?.some(
+          (product) =>
+            product.product === productId && product.prices.includes(annual.id)
+        )
+      )
+        throw new BillingUnavailableError("Yearly plan settings need review.")
+      flow = {
+        type: "subscription_update_confirm",
+        subscription_update_confirm: {
+          subscription: subscription.id,
+          items: [{ id: item.id, price: annual.id, quantity: 1 }],
+        },
+        after_completion: afterCompletion,
+      }
+    }
+    const session = await stripe.billingPortal.sessions.create({
+      customer: row.stripe_customer_id,
+      configuration: config.portalConfiguration,
+      return_url: returnUrl,
+      flow_data: flow,
+    })
+    if (
+      session.customer !== row.stripe_customer_id ||
+      session.livemode !== config.live ||
+      objectId(session.configuration) !== config.portalConfiguration
+    )
+      throw new BillingUnavailableError("Billing session mismatch.")
     return {
       url: safeStripeUrl(session.url, "portal"),
       provider: "stripe" as const,

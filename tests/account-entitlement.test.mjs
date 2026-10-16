@@ -106,22 +106,23 @@ after(async () => {
   await platform?.dispose()
 })
 
-test("manual to WorkOS and back preserves receipt identity, revisions and manual history", async () => {
+test("legacy manual history never authorizes; WorkOS activation and withdrawal preserve receipt identity", async () => {
   const initial = await getAccountEntitlement(db, seeded.userId, now)
-  assert.equal(initial.grant.id, seeded.id)
-  assert.ok(initial.grant.revision >= seeded.revision)
-  assert.equal(
-    (await getAccountEntitlement(db, seeded.userId, now + 1)).grant.revision,
-    initial.grant.revision
-  )
+  assert.equal(initial.grant, null)
+  assert.equal(initial.access.canHost, false)
+  const identity = await db
+    .prepare("SELECT * FROM account_entitlements WHERE user_id=?")
+    .bind(seeded.userId)
+    .first()
+  assert.equal(identity.id, seeded.id)
   await paid(seeded.userId)
   const purchased = await getAccountEntitlement(db, seeded.userId, now + 2)
   assert.equal(purchased.access.source, "workos")
   assert.equal(purchased.access.tier, "standard")
   assert.equal(purchased.billing, null)
-  assert.equal(purchased.grant.id, initial.grant.id)
+  assert.equal(purchased.grant.id, seeded.id)
   assert.equal(purchased.grant.endsAt, now + LICENSE_GRACE_MS)
-  assert.ok(purchased.grant.revision > initial.grant.revision)
+  assert.ok(purchased.grant.revision > identity.revision)
   await db
     .prepare(
       "UPDATE workos_entitlements SET enabled=0,revision=revision+1 WHERE user_id=?"
@@ -129,9 +130,14 @@ test("manual to WorkOS and back preserves receipt identity, revisions and manual
     .bind(seeded.userId)
     .run()
   const fallback = await getAccountEntitlement(db, seeded.userId, now + 3)
-  assert.equal(fallback.access.source, "manual")
-  assert.equal(fallback.grant.id, initial.grant.id)
-  assert.ok(fallback.grant.revision > purchased.grant.revision)
+  assert.equal(fallback.access.source, null)
+  assert.equal(fallback.grant, null)
+  const withdrawn = await db
+    .prepare("SELECT * FROM account_entitlements WHERE user_id=?")
+    .bind(seeded.userId)
+    .first()
+  assert.equal(withdrawn.id, seeded.id)
+  assert.ok(withdrawn.revision > purchased.grant.revision)
   assert.equal(
     (await getSubscription(db, seeded.userId, now)).endsAt,
     seeded.endsAt
@@ -198,14 +204,15 @@ test("legacy Stripe ledger cannot grant access or inflate effective overview", a
   assert.equal(result.grant, null)
   const grant = await manual(userId)
   assert.equal(grant.status, "active")
+  assert.equal((await getAccountEntitlement(db, userId, now)).grant, null)
 })
 
-test("valid manual access stays independent and later deadlines win, with WorkOS winning ties", async () => {
+test("manual deadlines never extend the WorkOS offline authorization allowance", async () => {
   await manual("user_later_manual", now + 3 * day)
   await paid("user_later_manual")
   assert.equal(
     (await getAccountEntitlement(db, "user_later_manual", now)).access.source,
-    "manual"
+    "workos"
   )
   await manual("user_equal_deadlines", now + LICENSE_GRACE_MS)
   await paid("user_equal_deadlines")
@@ -299,7 +306,7 @@ test("production access ignores cached WorkOS proof without a usable dedicated s
   assert.equal(
     (await getAccountEntitlement({ ...platform.env }, userId, now)).access
       .source,
-    "manual"
+    null
   )
 })
 
@@ -345,7 +352,7 @@ test("snapshot races retry instead of signing a concurrently withdrawn WorkOS gr
   )
 })
 
-test("manual edits and request approvals remain available while WorkOS billing is active", async () => {
+test("stored manual and request history cannot override subscription authorization", async () => {
   const userId = "user_independent_manual"
   let grant = await manual(userId)
   await paid(userId)
@@ -420,7 +427,7 @@ test("manual edits and request approvals remain available while WorkOS billing i
   )
   assert.equal(
     (await getAccountEntitlement(db, userId, now)).access.source,
-    "manual"
+    "workos"
   )
 })
 
@@ -507,7 +514,7 @@ test("admin filters and overview include current WorkOS proof independently of m
     assert.equal(overview[field], effective.filter(filter).length, field)
 })
 
-test("a transient entitlement read failure preserves valid manual access but does not mint paid access", async () => {
+test("transient WorkOS failures fail closed even when a historical manual grant is valid", async () => {
   for (const suffix of ["manual", "paid_only"]) {
     const userId = `user_outage_${suffix}`
     await paid(userId, { expiresAt: now })
@@ -530,16 +537,10 @@ test("a transient entitlement read failure preserves valid manual access but doe
         batch: db.batch.bind(db),
       },
     }
-    if (suffix === "manual") {
-      const result = await getAccountEntitlement(env, userId, now)
-      assert.equal(result.access.source, "manual")
-      assert.equal(result.managed, null)
-      assert.equal(result.grant.endsAt, now + day)
-    } else
-      await assert.rejects(
-        getAccountEntitlement(env, userId, now),
-        /temporarily unavailable/
-      )
+    await assert.rejects(
+      getAccountEntitlement(env, userId, now),
+      /temporarily unavailable/
+    )
     assert.equal(
       (
         await db

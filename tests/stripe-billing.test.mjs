@@ -10,6 +10,7 @@ import {
   createBillingAccessConnection,
   createBillingCheckout,
   createBillingPortal,
+  createBillingSubscriptionFlow,
 } from "../lib/stripe-billing.ts"
 import { BillingConflictError } from "../lib/stripe-billing-store.ts"
 import { handleAccountBilling } from "../functions/api/account/billing.ts"
@@ -105,7 +106,22 @@ function subscription(changes = {}) {
     trial_end: null,
     cancel_at_period_end: false,
     cancel_at: null,
-    items: { data: [{ current_period_end: monthEnd }] },
+    items: {
+      data: [
+        {
+          id: "si_fixture",
+          current_period_end: monthEnd,
+          quantity: 1,
+          price: {
+            id: "price_monthly",
+            product: "prod_fixture",
+            unit_amount: 2000,
+            currency: "usd",
+            recurring: { interval: "month", interval_count: 1 },
+          },
+        },
+      ],
+    },
     ...changes,
   }
 }
@@ -150,12 +166,18 @@ function checkoutDeps({ connected = true } = {}) {
           active: true,
           livemode: false,
           type: "recurring",
+          unit_amount: id === "price_monthly" ? 2000 : 20000,
+          currency: "usd",
           recurring: {
             interval: id === "price_monthly" ? "month" : "year",
             interval_count: 1,
           },
           tax_behavior: "exclusive",
-          product: { active: true, tax_code: "txcd_fixture" },
+          product: {
+            id: "prod_fixture",
+            active: true,
+            tax_code: "txcd_fixture",
+          },
         }
       },
     },
@@ -168,6 +190,8 @@ function checkoutDeps({ connected = true } = {}) {
             customer: "cus_fixture",
             livemode: false,
             status: "open",
+            allow_promotion_codes: params.allow_promotion_codes,
+            payment_method_collection: params.payment_method_collection,
             url: "https://checkout.stripe.com/c/pay/fixture",
             expires_at: now + 3600,
           }
@@ -187,10 +211,20 @@ function checkoutDeps({ connected = true } = {}) {
       },
     },
     billingPortal: {
+      configurations: {
+        async retrieve() {
+          return portalConfiguration()
+        },
+      },
       sessions: {
         async create(params) {
           created.portals.push(params)
-          return { url: "https://billing.stripe.com/p/session/fixture" }
+          return {
+            customer: params.customer,
+            configuration: params.configuration,
+            livemode: false,
+            url: "https://billing.stripe.com/p/session/fixture",
+          }
         },
       },
     },
@@ -220,6 +254,28 @@ function checkoutDeps({ connected = true } = {}) {
     },
   }
   return { stripe, workos, created }
+}
+
+function portalConfiguration(changes = {}) {
+  return {
+    id: "bpc_fixture",
+    active: true,
+    livemode: false,
+    features: {
+      subscription_cancel: { enabled: true, mode: "at_period_end" },
+      subscription_update: {
+        enabled: true,
+        default_allowed_updates: ["price"],
+        products: [
+          {
+            product: "prod_fixture",
+            prices: ["price_monthly", "price_annual"],
+          },
+        ],
+      },
+    },
+    ...changes,
+  }
 }
 
 test("billing requires an explicit purchase flag and matching test/live credentials", () => {
@@ -269,11 +325,30 @@ test("checkout uses fixed configured prices, tax, flexible billing and reusable 
     "https://photodepot.app/account?billing=success"
   )
   assert.equal(params.allow_promotion_codes, true)
+  assert.equal(params.payment_method_collection, "if_required")
   assert.equal(
     sqlite.prepare("SELECT workos_organization_id FROM stripe_customers").get()
       .workos_organization_id,
     "org_personal"
   )
+})
+
+test("an old Checkout requiring a card is replaced before applying the coupon-friendly policy", async () => {
+  const deps = checkoutDeps()
+  await createBillingCheckout(env, identity, "monthly", deps)
+  const retrieve = deps.stripe.checkout.sessions.retrieve
+  deps.stripe.checkout.sessions.retrieve = async (id) => ({
+    ...(await retrieve(id)),
+    payment_method_collection: "always",
+  })
+  await createBillingCheckout(env, identity, "monthly", deps)
+  assert.equal(deps.created.expired.length, 1)
+  assert.equal(deps.created.sessions.length, 2)
+  assert.equal(
+    deps.created.sessions[1].params.payment_method_collection,
+    "if_required"
+  )
+  assert.equal(deps.created.sessions[1].params.allow_promotion_codes, true)
 })
 
 test("changing Checkout interval expires the abandoned session before creating its replacement", async () => {
@@ -409,6 +484,310 @@ test("existing subscriptions block a duplicate purchase; billing management surv
   assert.equal(deps.created.portals[0].customer, "cus_fixture")
 })
 
+test("cancel opens a hosted period-end confirmation for the server-mapped monthly or yearly subscription", async () => {
+  customer()
+  const deps = checkoutDeps({ connected: false })
+  for (const interval of ["monthly", "annual"]) {
+    const current = subscription()
+    current.items.data[0].price.id = `price_${interval}`
+    current.items.data[0].price.recurring.interval =
+      interval === "monthly" ? "month" : "year"
+    deps.stripe.subscriptions.list = async (params) => {
+      assert.deepEqual(params, {
+        customer: "cus_fixture",
+        status: "all",
+        limit: 100,
+      })
+      return { data: [current], has_more: false }
+    }
+    const result = await createBillingSubscriptionFlow(
+      env,
+      identity,
+      "cancel",
+      deps
+    )
+    assert.equal(result.url, "https://billing.stripe.com/p/session/fixture")
+    assert.equal(result.provider, "stripe")
+    assert.deepEqual(deps.created.portals.at(-1), {
+      customer: "cus_fixture",
+      configuration: "bpc_fixture",
+      return_url: "https://photodepot.app/account?billing=return",
+      flow_data: {
+        type: "subscription_cancel",
+        subscription_cancel: { subscription: "sub_fixture" },
+        after_completion: {
+          type: "redirect",
+          redirect: {
+            return_url: "https://photodepot.app/account?billing=return",
+          },
+        },
+      },
+    })
+    assert.equal(current.cancel_at_period_end, false)
+    assert.equal(current.status, "active")
+  }
+  assert.equal(deps.created.sessions.length, 0)
+  assert.equal(deps.created.customers.length, 0)
+  assert.equal(deps.created.memberships.length, 0)
+})
+
+test("yearly upgrade targets the existing monthly item and requires hosted Stripe confirmation", async () => {
+  customer()
+  const deps = checkoutDeps({ connected: false })
+  const current = subscription({ discounts: ["di_existing"] })
+  deps.stripe.subscriptions.list = async () => ({
+    data: [current],
+    has_more: false,
+  })
+  await createBillingSubscriptionFlow(env, identity, "upgrade", deps)
+  assert.deepEqual(deps.created.portals[0].flow_data, {
+    type: "subscription_update_confirm",
+    subscription_update_confirm: {
+      subscription: "sub_fixture",
+      items: [{ id: "si_fixture", price: "price_annual", quantity: 1 }],
+    },
+    after_completion: {
+      type: "redirect",
+      redirect: { return_url: "https://photodepot.app/account?billing=return" },
+    },
+  })
+  assert.equal(current.items.data[0].price.id, "price_monthly")
+  assert.deepEqual(current.discounts, ["di_existing"])
+  assert.equal(deps.created.sessions.length, 0)
+})
+
+test("a subscription on a retired price can still cancel while upgrades remain restricted", async () => {
+  customer()
+  const deps = checkoutDeps({ connected: false })
+  const current = subscription()
+  current.items.data[0].price.id = "price_retired"
+  deps.stripe.subscriptions.list = async () => ({
+    data: [current],
+    has_more: false,
+  })
+  await createBillingSubscriptionFlow(env, identity, "cancel", deps)
+  assert.equal(deps.created.portals.length, 1)
+  assert.deepEqual(deps.created.portals[0].flow_data.subscription_cancel, {
+    subscription: current.id,
+  })
+  await assert.rejects(
+    createBillingSubscriptionFlow(env, identity, "upgrade", deps),
+    /needs review in billing settings/
+  )
+  assert.equal(deps.created.portals.length, 1)
+  assert.equal(current.cancel_at_period_end, false)
+})
+
+test("targeted subscription flows reject ambiguous, foreign, terminal and unsupported subscriptions", async () => {
+  customer()
+  const deps = checkoutDeps({ connected: false })
+  const item = subscription().items.data[0]
+  for (const response of [
+    { data: [], has_more: false },
+    { data: [subscription({ status: "canceled" })], has_more: false },
+    { data: [subscription()], has_more: true },
+    {
+      data: [subscription(), subscription({ id: "sub_second" })],
+      has_more: false,
+    },
+    { data: [subscription({ customer: "cus_other" })], has_more: false },
+    { data: [subscription({ livemode: true })], has_more: false },
+    {
+      data: [
+        subscription({ items: { data: [item, { ...item, id: "si_second" }] } }),
+      ],
+      has_more: false,
+    },
+    {
+      data: [subscription({ items: { data: [item], has_more: true } })],
+      has_more: false,
+    },
+    {
+      data: [subscription({ items: { data: [{ ...item, quantity: 2 }] } })],
+      has_more: false,
+    },
+    { data: [subscription({ cancel_at_period_end: true })], has_more: false },
+  ]) {
+    deps.stripe.subscriptions.list = async () => response
+    for (const action of ["cancel", "upgrade"])
+      await assert.rejects(
+        createBillingSubscriptionFlow(env, identity, action, deps)
+      )
+    assert.equal(
+      sqlite.prepare("SELECT operation_token FROM stripe_customers").get()
+        .operation_token,
+      null
+    )
+  }
+  assert.equal(deps.created.portals.length, 0)
+})
+
+test("yearly confirmation rejects existing yearly, unsettled and scheduled changes", async () => {
+  customer()
+  const deps = checkoutDeps({ connected: false })
+  const item = subscription().items.data[0]
+  for (const current of [
+    subscription({
+      items: {
+        data: [
+          {
+            ...item,
+            price: {
+              ...item.price,
+              id: "price_annual",
+              recurring: { interval: "year", interval_count: 1 },
+            },
+          },
+        ],
+      },
+    }),
+    subscription({ status: "past_due" }),
+    subscription({ pending_update: { expires_at: now + 3600 } }),
+    subscription({ schedule: "sub_sched_fixture" }),
+  ]) {
+    deps.stripe.subscriptions.list = async () => ({
+      data: [current],
+      has_more: false,
+    })
+    await assert.rejects(
+      createBillingSubscriptionFlow(env, identity, "upgrade", deps),
+      /current monthly/
+    )
+  }
+  assert.equal(deps.created.portals.length, 0)
+})
+
+test("targeted flows require a matching Portal configuration and permitted same-product annual price", async () => {
+  customer()
+  const deps = checkoutDeps({ connected: false })
+  deps.stripe.subscriptions.list = async () => ({
+    data: [subscription()],
+    has_more: false,
+  })
+  for (const configuration of [
+    portalConfiguration({ active: false }),
+    portalConfiguration({ livemode: true }),
+    portalConfiguration({ id: "bpc_other" }),
+    portalConfiguration({
+      features: {
+        subscription_cancel: { enabled: false, mode: "at_period_end" },
+      },
+    }),
+    portalConfiguration({
+      features: { subscription_cancel: { enabled: true, mode: "immediately" } },
+    }),
+  ]) {
+    deps.stripe.billingPortal.configurations.retrieve = async () =>
+      configuration
+    await assert.rejects(
+      createBillingSubscriptionFlow(env, identity, "cancel", deps)
+    )
+  }
+  for (const updates of [
+    { enabled: false, default_allowed_updates: ["price"], products: [] },
+    { enabled: true, default_allowed_updates: ["quantity"], products: [] },
+    {
+      enabled: true,
+      default_allowed_updates: ["price"],
+      products: [{ product: "prod_fixture", prices: ["price_monthly"] }],
+    },
+  ]) {
+    const configuration = portalConfiguration()
+    configuration.features.subscription_update = updates
+    deps.stripe.billingPortal.configurations.retrieve = async () =>
+      configuration
+    await assert.rejects(
+      createBillingSubscriptionFlow(env, identity, "upgrade", deps),
+      /Yearly plan settings/
+    )
+  }
+  deps.stripe.billingPortal.configurations.retrieve = async () =>
+    portalConfiguration()
+  const retrieve = deps.stripe.prices.retrieve
+  for (const change of [
+    { product: { id: "prod_other", active: true, tax_code: "txcd_fixture" } },
+    { currency: "eur" },
+  ]) {
+    deps.stripe.prices.retrieve = async (id) => ({
+      ...(await retrieve(id)),
+      ...change,
+    })
+    await assert.rejects(
+      createBillingSubscriptionFlow(env, identity, "upgrade", deps),
+      /Yearly plan settings/
+    )
+  }
+  assert.equal(deps.created.portals.length, 0)
+})
+
+test("cancellation remains available with purchases disabled while upgrades are blocked", async () => {
+  customer()
+  const deps = checkoutDeps({ connected: false })
+  deps.stripe.subscriptions.list = async () => ({
+    data: [subscription()],
+    has_more: false,
+  })
+  env.PHOTODEPOT_STRIPE_ENABLED = "false"
+  await createBillingSubscriptionFlow(env, identity, "cancel", deps)
+  await assert.rejects(
+    createBillingSubscriptionFlow(env, identity, "upgrade", deps),
+    /not enabled/
+  )
+  assert.equal(deps.created.portals.length, 1)
+})
+
+test("a targeted flow holds the billing lease until its hosted session is created", async () => {
+  customer()
+  const deps = checkoutDeps({ connected: false })
+  let release, reached
+  const entered = new Promise((resolve) => {
+    reached = resolve
+  })
+  deps.stripe.subscriptions.list = async () => {
+    reached()
+    await new Promise((resolve) => {
+      release = resolve
+    })
+    return { data: [subscription()], has_more: false }
+  }
+  const first = createBillingSubscriptionFlow(env, identity, "cancel", deps)
+  await entered
+  await assert.rejects(
+    createBillingSubscriptionFlow(env, identity, "cancel", deps),
+    BillingConflictError
+  )
+  release()
+  await first
+  assert.equal(deps.created.portals.length, 1)
+})
+
+test("targeted flows reject mismatched session customers, modes, configurations and unsafe URLs", async () => {
+  customer()
+  const deps = checkoutDeps({ connected: false })
+  deps.stripe.subscriptions.list = async () => ({
+    data: [subscription()],
+    has_more: false,
+  })
+  for (const change of [
+    { customer: "cus_other" },
+    { livemode: true },
+    { configuration: "bpc_other" },
+    { url: "https://attacker.test/billing" },
+    { url: "https://billing.stripe.com:8443/portal" },
+  ]) {
+    deps.stripe.billingPortal.sessions.create = async () => ({
+      customer: "cus_fixture",
+      configuration: "bpc_fixture",
+      livemode: false,
+      url: "https://billing.stripe.com/p/session/fixture",
+      ...change,
+    })
+    await assert.rejects(
+      createBillingSubscriptionFlow(env, identity, "cancel", deps)
+    )
+  }
+})
+
 test("trials require explicit days, are reused on retry, and prior manual trial history prevents a second trial", async () => {
   env.PHOTODEPOT_STRIPE_TRIAL_DAYS = "7"
   const deps = checkoutDeps()
@@ -419,7 +798,7 @@ test("trials require explicit days, are reused on retry, and prior manual trial 
   )
   assert.equal(
     deps.created.sessions[0].params.payment_method_collection,
-    "always"
+    "if_required"
   )
   assert.equal(
     sqlite.prepare("SELECT trial_used FROM stripe_customers").get().trial_used,
@@ -485,9 +864,56 @@ test("account billing uses the authenticated identity and rejects foreign origin
   )
   const originalFetch = globalThis.fetch
   let unexpectedCalls = 0
-  globalThis.fetch = async (input) => {
+  const flowCalls = []
+  globalThis.fetch = async (input, init) => {
     if (String(input).includes("/sso/jwks/"))
       return Response.json({ keys: [jwk] })
+    const url = new URL(String(input))
+    if (
+      url.hostname === "api.stripe.com" &&
+      /^\/v1\/prices\/price_(monthly|annual)$/.test(url.pathname)
+    ) {
+      const id = url.pathname.split("/").at(-1)
+      return Response.json({
+        id,
+        active: true,
+        livemode: false,
+        type: "recurring",
+        unit_amount: id === "price_monthly" ? 2000 : 20000,
+        currency: "usd",
+        recurring: {
+          interval: id === "price_monthly" ? "month" : "year",
+          interval_count: 1,
+        },
+        tax_behavior: "exclusive",
+        product: { id: "prod_fixture", active: true, tax_code: "txcd_fixture" },
+      })
+    }
+    if (
+      url.hostname === "api.stripe.com" &&
+      url.pathname === "/v1/subscriptions"
+    ) {
+      assert.equal(url.searchParams.get("customer"), "cus_fixture")
+      return Response.json({ data: [subscription()], has_more: false })
+    }
+    if (
+      url.hostname === "api.stripe.com" &&
+      url.pathname === "/v1/billing_portal/configurations/bpc_fixture"
+    )
+      return Response.json(portalConfiguration())
+    if (
+      url.hostname === "api.stripe.com" &&
+      url.pathname === "/v1/billing_portal/sessions"
+    ) {
+      assert.equal(init.method, "POST")
+      flowCalls.push(new URLSearchParams(init.body))
+      return Response.json({
+        customer: "cus_fixture",
+        configuration: "bpc_fixture",
+        livemode: false,
+        url: "https://billing.stripe.com/p/session/fixture",
+      })
+    }
     unexpectedCalls++
     throw new Error("Unexpected external API call")
   }
@@ -554,6 +980,69 @@ test("account billing uses the authenticated identity and rejects foreign origin
       ).status,
       400
     )
+    for (const body of [
+      { action: "cancel", userId: "user_other" },
+      { action: "cancel", subscription: "sub_other" },
+      { action: "cancel", return_url: "https://evil.test" },
+      { action: "cancel", interval: "monthly" },
+      { action: "upgrade" },
+      { action: "upgrade", interval: "monthly" },
+      { action: "upgrade", interval: "annual", price: "price_evil" },
+      { action: "upgrade", interval: "annual", customer: "cus_other" },
+    ])
+      assert.equal((await handleAccountBilling(request(body), env)).status, 400)
+    for (const action of ["cancel", "upgrade"])
+      assert.equal(
+        (
+          await handleAccountBilling(
+            request(
+              {
+                action,
+                ...(action === "upgrade" ? { interval: "annual" } : {}),
+              },
+              { origin: "https://evil.test" }
+            ),
+            env
+          )
+        ).status,
+        403
+      )
+    assert.equal(unexpectedCalls, 0)
+    assert.equal(flowCalls.length, 0)
+    customer()
+    for (const body of [
+      { action: "cancel" },
+      { action: "upgrade", interval: "annual" },
+    ]) {
+      const response = await handleAccountBilling(request(body), env)
+      assert.equal(response.status, 200)
+      assert.deepEqual(await response.json(), {
+        provider: "stripe",
+        url: "https://billing.stripe.com/p/session/fixture",
+      })
+    }
+    assert.equal(flowCalls.length, 2)
+    assert.equal(flowCalls[0].get("flow_data[type]"), "subscription_cancel")
+    assert.equal(
+      flowCalls[0].get("flow_data[subscription_cancel][subscription]"),
+      "sub_fixture"
+    )
+    assert.equal(
+      flowCalls[1].get("flow_data[type]"),
+      "subscription_update_confirm"
+    )
+    assert.equal(
+      flowCalls[1].get(
+        "flow_data[subscription_update_confirm][items][0][price]"
+      ),
+      "price_annual"
+    )
+    assert.equal(
+      flowCalls[1].get(
+        "flow_data[subscription_update_confirm][items][0][quantity]"
+      ),
+      "1"
+    )
     assert.equal(unexpectedCalls, 0)
   } finally {
     globalThis.fetch = originalFetch
@@ -564,7 +1053,7 @@ test("Checkout prepares a private WorkOS membership then requires separate billi
   const deps = checkoutDeps({ connected: false })
   const result = await createBillingCheckout(env, identity, "monthly", deps)
   assert.deepEqual(result, {
-    url: "/api/account/billing/authorize",
+    url: "/api/account/billing/authorize?action=checkout&interval=monthly",
     provider: "workos",
   })
   assert.deepEqual(deps.created.memberships, [
@@ -585,10 +1074,72 @@ test("billing uses live Stripe state only for display, including flexible cancel
   assert.equal(result.accessConnected, false)
   assert.equal(result.subscription.cancelAtPeriodEnd, true)
   assert.equal(result.subscription.endsAt, monthEnd * 1000)
+  assert.deepEqual(result.prices, {
+    monthly: { amount: 2000, currency: "usd" },
+    annual: { amount: 20000, currency: "usd" },
+  })
+  assert.equal(result.subscription.interval, "monthly")
+  assert.equal(result.subscription.amount, 2000)
+  assert.equal(result.subscription.currency, "usd")
   assert.equal(
     sqlite.prepare("SELECT COUNT(*) AS n FROM stripe_subscriptions").get().n,
     0
   )
+})
+
+test("annual pricing and existing discounts come from Stripe rather than a client supplied price", async () => {
+  customer()
+  const { stripe } = checkoutDeps({ connected: false })
+  stripe.subscriptions.list = async () => ({
+    data: [
+      subscription({
+        discounts: ["di_free"],
+        items: {
+          data: [
+            {
+              current_period_end: monthEnd,
+              quantity: 1,
+              price: {
+                unit_amount: 20000,
+                currency: "usd",
+                recurring: { interval: "year", interval_count: 1 },
+              },
+            },
+          ],
+        },
+      }),
+    ],
+    has_more: false,
+  })
+  const summary = await billingSummary(env, identity.userId, { stripe })
+  assert.equal(summary.subscription.interval, "annual")
+  assert.equal(summary.subscription.amount, 20000)
+  assert.equal(summary.subscription.discountsApplied, true)
+  assert.equal(summary.prices.annual.amount, summary.prices.monthly.amount * 10)
+  delete env.STRIPE_PRICE_ANNUAL
+  const monthlyOnly = await billingSummary(env, identity.userId, { stripe })
+  assert.deepEqual(monthlyOnly.intervals, ["monthly"])
+  assert.equal(monthlyOnly.prices.annual, undefined)
+})
+
+test("invalid or mismatched configured prices cannot be advertised or purchased", async () => {
+  const deps = checkoutDeps({ connected: false })
+  const retrieve = deps.stripe.prices.retrieve
+  for (const invalid of [
+    { unit_amount: null },
+    { unit_amount: -1 },
+    { livemode: true },
+    { recurring: { interval: "week", interval_count: 1 } },
+  ]) {
+    deps.stripe.prices.retrieve = async (id) => ({
+      ...(await retrieve(id)),
+      ...invalid,
+    })
+    await assert.rejects(
+      billingSummary(env, identity.userId, { stripe: deps.stripe }),
+      /price needs review/
+    )
+  }
 })
 
 test("terminal subscriptions display their actual end, never the original future billing period", async () => {

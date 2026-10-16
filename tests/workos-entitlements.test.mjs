@@ -37,7 +37,10 @@ let sqlite,
   authenticationCalls,
   tokenResponse,
   authenticationFailure,
-  organizationResponse
+  organizationResponse,
+  checkoutCalls,
+  checkoutSession,
+  subscriptionResponse
 
 function d1(database) {
   return {
@@ -161,10 +164,10 @@ async function browserCookie() {
 function request(path, cookie) {
   return new Request(`${origin}${path}`, { headers: cookie ? { cookie } : {} })
 }
-async function authorize() {
+async function authorize(query = "") {
   const accountCookie = await browserCookie()
   const start = await handleWorkOSBillingAuthorize(
-    request("/api/account/billing/authorize", accountCookie),
+    request(`/api/account/billing/authorize${query}`, accountCookie),
     env
   )
   assert.equal(start.status, 303)
@@ -206,6 +209,18 @@ beforeEach(async () => {
     )
     .run(userId, "cus_billing", organizationId, "token_fixture")
   authenticationCalls = []
+  checkoutCalls = []
+  checkoutSession = {
+    id: "cs_billing_fixture",
+    customer: "cus_billing",
+    livemode: false,
+    status: "open",
+    allow_promotion_codes: true,
+    payment_method_collection: "if_required",
+    url: "https://checkout.stripe.com/c/pay/billing_fixture",
+    expires_at: Math.floor(epoch / 1000) + 3600,
+  }
+  subscriptionResponse = { object: "list", data: [], has_more: false }
   tokenResponse = authentication()
   authenticationFailure = null
   organizationResponse = {
@@ -222,10 +237,71 @@ beforeEach(async () => {
   originalFetch = globalThis.fetch
   globalThis.fetch = async (input, init) => {
     const url = String(input)
+    const parsed = new URL(url)
     if (url === `https://api.workos.com/sso/jwks/${clientId}`)
       return Response.json({ keys: [jwk] })
     if (url === `https://api.workos.com/organizations/${organizationId}`)
       return Response.json(organizationResponse)
+    if (
+      parsed.hostname === "api.workos.com" &&
+      decodeURIComponent(parsed.pathname) ===
+        `/organizations/external_id/photodepot-billing:${userId}`
+    )
+      return Response.json(organizationResponse)
+    if (parsed.pathname === "/user_management/organization_memberships")
+      return Response.json({
+        object: "list",
+        data: [
+          {
+            object: "organization_membership",
+            id: "om_fixture",
+            user_id: userId,
+            organization_id: organizationId,
+            status: "active",
+            role: { slug: "member" },
+            created_at: new Date(epoch).toISOString(),
+            updated_at: new Date(epoch).toISOString(),
+          },
+        ],
+        list_metadata: { before: null, after: null },
+      })
+    if (parsed.hostname === "api.stripe.com") {
+      assert.equal(await hasWorkOSBillingSession(env.DB, userId), true)
+      if (parsed.pathname === "/v1/subscriptions")
+        return Response.json(subscriptionResponse)
+      if (parsed.pathname.startsWith("/v1/prices/")) {
+        const id = parsed.pathname.split("/").at(-1)
+        return Response.json({
+          id,
+          active: true,
+          livemode: false,
+          type: "recurring",
+          unit_amount: 2000,
+          currency: "usd",
+          recurring: {
+            interval: id === "price_monthly" ? "month" : "year",
+            interval_count: 1,
+          },
+          tax_behavior: "exclusive",
+          product: {
+            id: "prod_billing",
+            active: true,
+            tax_code: "txcd_fixture",
+          },
+        })
+      }
+      if (parsed.pathname === "/v1/checkout/sessions") {
+        assert.equal(init.method, "POST")
+        checkoutCalls.push({
+          params: new URLSearchParams(init.body),
+          headers: new Headers(init.headers),
+        })
+        return Response.json(checkoutSession)
+      }
+      if (parsed.pathname === `/v1/checkout/sessions/${checkoutSession.id}`)
+        return Response.json(checkoutSession)
+      assert.fail(`Unexpected Stripe request: ${parsed.pathname}`)
+    }
     assert.equal(url, "https://api.workos.com/user_management/authenticate")
     authenticationCalls.push(JSON.parse(init.body))
     if (authenticationFailure instanceof Error) throw authenticationFailure
@@ -280,6 +356,197 @@ test("dedicated authorization binds account, personal organization and state wit
   const cached = await getWorkOSEntitlement(env, userId)
   assert.equal(cached.enabled, true)
   assert.equal(authenticationCalls.length, 1)
+  assert.equal(checkoutCalls.length, 0)
+})
+
+function enableCheckout() {
+  Object.assign(env, {
+    PHOTODEPOT_STRIPE_ENABLED: "true",
+    PHOTODEPOT_STRIPE_ORIGIN: origin,
+    STRIPE_SECRET_KEY: "sk_test_fixture",
+    STRIPE_PRICE_MONTHLY: "price_monthly",
+    STRIPE_PRICE_ANNUAL: "price_annual",
+  })
+}
+
+for (const interval of ["monthly", "annual"]) {
+  test(`fresh billing authorization resumes ${interval} Checkout without a dashboard return`, async () => {
+    enableCheckout()
+    const pending = await authorize(`?action=checkout&interval=${interval}`)
+    const transaction = await unsealData(
+      pending.transactionCookie.split("=").slice(1).join("="),
+      { password, ttl: 600 }
+    )
+    assert.deepEqual(transaction.intent, { action: "checkout", interval })
+    const response = await completeBillingAuthorization(pending)
+    assert.equal(response.status, 303)
+    assert.equal(response.headers.get("location"), checkoutSession.url)
+    assert.equal(checkoutCalls.length, 1)
+    assert.equal(
+      checkoutCalls[0].params.get("line_items[0][price]"),
+      `price_${interval}`
+    )
+    assert.equal(checkoutCalls[0].params.get("customer"), "cus_billing")
+    assert.equal(
+      checkoutCalls[0].params.get("success_url"),
+      `${origin}/account?billing=success`
+    )
+    assert.match(
+      checkoutCalls[0].headers.get("idempotency-key"),
+      /^photodepot-checkout-token_fixture-1$/
+    )
+    assert.equal((await storedTokens()).sessionId, backendSid)
+    assert.ok(
+      response.headers
+        .getSetCookie()
+        .some((value) => value.includes("photodepot-billing-auth=;"))
+    )
+    assert.equal(
+      sqlite.prepare("SELECT operation_token FROM stripe_customers").get()
+        .operation_token,
+      null
+    )
+  })
+}
+
+test("resumed authorization reuses the existing open Checkout under the billing lease", async () => {
+  enableCheckout()
+  sqlite
+    .prepare(
+      "UPDATE stripe_customers SET checkout_session_id=?, checkout_price_id=?, checkout_generation=1"
+    )
+    .run(checkoutSession.id, "price_monthly")
+  const pending = await authorize("?action=checkout&interval=monthly")
+  const response = await completeBillingAuthorization(pending)
+  assert.equal(response.status, 303)
+  assert.equal(response.headers.get("location"), checkoutSession.url)
+  assert.equal(checkoutCalls.length, 0)
+})
+
+test("authorization rejects malformed, duplicate, unsupported and redirect-bearing intents", async () => {
+  enableCheckout()
+  const accountCookie = await browserCookie()
+  for (const query of [
+    "?action=checkout",
+    "?interval=monthly",
+    "?action=portal&interval=monthly",
+    "?action=connect&interval=monthly",
+    "?action=checkout&interval=weekly",
+    "?action=checkout&interval=monthly&interval=annual",
+    "?action=checkout&action=checkout&interval=monthly",
+    "?action=checkout&interval=monthly&returnTo=https://attacker.test",
+    "?returnTo=https://attacker.test",
+  ]) {
+    const response = await handleWorkOSBillingAuthorize(
+      request(`/api/account/billing/authorize${query}`, accountCookie),
+      env
+    )
+    assert.equal(response.status, 400, query)
+    assert.equal(response.headers.has("location"), false)
+  }
+  delete env.STRIPE_PRICE_ANNUAL
+  assert.equal(
+    (
+      await handleWorkOSBillingAuthorize(
+        request(
+          "/api/account/billing/authorize?action=checkout&interval=annual",
+          accountCookie
+        ),
+        env
+      )
+    ).status,
+    400
+  )
+  assert.equal(authenticationCalls.length, 0)
+  assert.equal(checkoutCalls.length, 0)
+})
+
+test("resumed Checkout requires matching authentication and billing origins", async () => {
+  enableCheckout()
+  env.PHOTODEPOT_STRIPE_ORIGIN = "https://different.test"
+  const response = await handleWorkOSBillingAuthorize(
+    request(
+      "/api/account/billing/authorize?action=checkout&interval=monthly",
+      await browserCookie()
+    ),
+    env
+  )
+  assert.equal(response.status, 503)
+  assert.equal(response.headers.has("location"), false)
+  env.PHOTODEPOT_STRIPE_ORIGIN = origin
+  assert.equal(
+    (
+      await handleWorkOSBillingAuthorize(
+        new Request(
+          "https://different.test/api/account/billing/authorize?action=checkout&interval=monthly",
+          { headers: { cookie: await browserCookie() } }
+        ),
+        env
+      )
+    ).status,
+    403
+  )
+  assert.equal(checkoutCalls.length, 0)
+})
+
+test("callback ignores untrusted plan and redirect query parameters in favor of sealed intent", async () => {
+  enableCheckout()
+  const pending = await authorize("?action=checkout&interval=monthly")
+  const response = await handleAdminCallback(
+    request(
+      `/api/auth/callback?code=fresh_code&state=${pending.state}&interval=annual&returnTo=https://attacker.test`,
+      `${pending.accountCookie}; ${pending.transactionCookie}`
+    ),
+    env
+  )
+  assert.equal(response.status, 303)
+  assert.equal(response.headers.get("location"), checkoutSession.url)
+  assert.equal(
+    checkoutCalls[0].params.get("line_items[0][price]"),
+    "price_monthly"
+  )
+})
+
+test("an invalid sealed continuation never exchanges credentials or creates Checkout", async () => {
+  enableCheckout()
+  const pending = await authorize()
+  const transaction = await unsealData(
+    pending.transactionCookie.split("=").slice(1).join("="),
+    { password, ttl: 600 }
+  )
+  for (const intent of [
+    { action: "portal", interval: "monthly" },
+    { action: "checkout", interval: "weekly" },
+    {
+      action: "checkout",
+      interval: "monthly",
+      returnTo: "https://attacker.test",
+    },
+    null,
+  ]) {
+    const sealed = await sealData(
+      { ...transaction, intent },
+      { password, ttl: 600 }
+    )
+    const response = await completeBillingAuthorization({
+      ...pending,
+      transactionCookie: `__Host-photodepot-billing-auth=${sealed}`,
+    })
+    assert.equal(response.status, 401)
+  }
+  assert.equal(authenticationCalls.length, 0)
+  assert.equal(checkoutCalls.length, 0)
+})
+
+test("resumed Checkout never redirects to an untrusted provider URL", async () => {
+  enableCheckout()
+  const pending = await authorize("?action=checkout&interval=monthly")
+  checkoutSession.url = "https://attacker.test/checkout"
+  const response = await completeBillingAuthorization(pending)
+  assert.equal(response.status, 503)
+  assert.equal(response.headers.has("location"), false)
+  assert.equal(checkoutCalls.length, 1)
+  assert.equal(await hasWorkOSBillingSession(env.DB, userId), true)
 })
 
 test("authorization rejects missing accounts, administration scopes, and mismatched Stripe links", async () => {
@@ -405,18 +672,18 @@ test("an absent entitlement is a verified denial and configurable feature slugs 
   )
 })
 
-test("expired JWTs refresh in the mapped organization and persist rotated backend credentials", async () => {
-  await store(jwt({ exp: Math.floor(epoch / 1000) + 1 }))
+test("expired JWTs refresh in the mapped organization and persist rotated backend credentials", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: epoch })
+  await store(jwt({ exp: Math.floor(epoch / 1000) + 60 }))
   tokenResponse = authentication(
     jwt({
-      iat: Math.floor(epoch / 1000) + 2,
-      exp: Math.floor(epoch / 1000) + 302,
+      iat: Math.floor(epoch / 1000) + 61,
+      exp: Math.floor(epoch / 1000) + 361,
     }),
     "refresh_backend_second"
   )
-  const refreshed = await getWorkOSEntitlement(env, userId, {
-    now: epoch + 2000,
-  })
+  t.mock.timers.tick(61_000)
+  const refreshed = await getWorkOSEntitlement(env, userId)
   assert.equal(refreshed.enabled, true)
   assert.equal(refreshed.revision, 2)
   assert.equal(authenticationCalls.length, 1)
@@ -558,6 +825,25 @@ test("rotating the cookie encryption secret requests reconnection instead of tra
   const summary = await billingSummary(env, userId, {
     forceRefresh: true,
     stripe: {
+      prices: {
+        async retrieve() {
+          return {
+            id: "price_monthly",
+            active: true,
+            livemode: false,
+            type: "recurring",
+            unit_amount: 2000,
+            currency: "usd",
+            recurring: { interval: "month", interval_count: 1 },
+            tax_behavior: "exclusive",
+            product: {
+              id: "prod_fixture",
+              active: true,
+              tax_code: "txcd_fixture",
+            },
+          }
+        },
+      },
       subscriptions: {
         async list() {
           return { data: [], has_more: false }

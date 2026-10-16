@@ -5,7 +5,7 @@ import type {
   SubscriptionSummary,
 } from "./subscription-types.ts"
 
-/** The only grant-dependent access decision. Device and identity checks are separate. */
+/** Subscription entitlements alone grant access. Legacy manual rows are history only. */
 export function resolveAccountAccess(
   grant: SubscriptionSummary | null,
   now = Date.now(),
@@ -32,12 +32,13 @@ export function resolveAccountAccess(
   }
 }
 
-/** Manual grants remain independent; WorkOS proves paid feature access. */
+/** Preserve the legacy argument only for callers displaying stored grant history. */
 export function selectAccountGrant(
   manual: SubscriptionSummary | null,
   managed: WorkOSEntitlementSummary | null,
   now = Date.now()
 ): { grant: SubscriptionSummary | null; source: AccountAccess["source"] } {
+  void manual
   const paid: SubscriptionSummary | null = managed?.enabled
     ? {
         id: `workos:${managed.userId}`,
@@ -53,20 +54,5 @@ export function selectAccountGrant(
         remindersEnabled: false,
       }
     : null
-  const valid = (grant: SubscriptionSummary | null) =>
-    grant?.status === "active" && grant.startsAt <= now && grant.endsAt > now
-  if (valid(paid) && (!valid(manual) || paid!.endsAt >= manual!.endsAt))
-    return { grant: paid, source: "workos" }
-  if (manual) return { grant: manual, source: "manual" }
   return { grant: paid, source: paid ? "workos" : null }
-}
-
-export function trialReminderEligible(
-  grant: SubscriptionSummary | null,
-  now: number
-) {
-  return (
-    grant?.remindersEnabled === true &&
-    resolveAccountAccess(grant, now).tier === "trial"
-  )
 }

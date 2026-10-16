@@ -1,18 +1,24 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
-import { ArrowRight, CreditCard, RefreshCw } from "lucide-react"
+import { ArrowRight, RefreshCw } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import styles from "./account-billing.module.css"
 
 type BillingInterval = "monthly" | "annual"
+type BillingPrice = { amount: number; currency: string }
 type BillingState = {
   enabled: boolean
   intervals: BillingInterval[]
+  prices?: Partial<Record<BillingInterval, BillingPrice>>
   subscription: {
     status: string
     endsAt: number
     cancelAtPeriodEnd: boolean
+    interval?: BillingInterval | null
+    amount?: number | null
+    currency?: string | null
+    discountsApplied?: boolean
   } | null
   hasCustomer: boolean
   portalEnabled?: boolean
@@ -29,16 +35,17 @@ class BillingError extends Error {
   }
 }
 const terminalStatuses = new Set(["canceled", "incomplete_expired"])
-const statusLabels: Record<string, string> = {
-  active: "Active subscription",
-  trialing: "Subscription trial",
-  past_due: "Payment overdue",
-  unpaid: "Unpaid subscription",
-  incomplete: "Payment incomplete",
-  paused: "Paused subscription",
-  canceled: "Canceled subscription",
-  incomplete_expired: "Subscription setup expired",
-}
+const attentionStatuses = new Set([
+  "past_due",
+  "unpaid",
+  "incomplete",
+  "paused",
+])
+const authorizePaths = new Set([
+  "/api/account/billing/authorize",
+  "/api/account/billing/authorize?action=checkout&interval=monthly",
+  "/api/account/billing/authorize?action=checkout&interval=annual",
+])
 async function billingApi(
   body?: object,
   signal?: AbortSignal,
@@ -57,7 +64,7 @@ async function billingApi(
   )
   if (response.status === 401)
     throw new BillingError(
-      "Your session expired. Sign in again, then refresh billing.",
+      "Your session expired. Sign in again to continue.",
       401
     )
   let result
@@ -78,6 +85,16 @@ async function billingApi(
     )
   return result
 }
+function validPrice(price: unknown): price is BillingPrice {
+  const value = price as BillingPrice
+  return (
+    !!value &&
+    Number.isSafeInteger(value.amount) &&
+    value.amount >= 0 &&
+    typeof value.currency === "string" &&
+    /^[a-z]{3}$/i.test(value.currency)
+  )
+}
 function readBilling(value: unknown): BillingState {
   const state = value as BillingState
   if (
@@ -87,6 +104,10 @@ function readBilling(value: unknown): BillingState {
     state.intervals.some(
       (interval) => interval !== "monthly" && interval !== "annual"
     ) ||
+    (state.prices !== undefined &&
+      (!state.prices ||
+        typeof state.prices !== "object" ||
+        Object.values(state.prices).some((price) => !validPrice(price)))) ||
     typeof state.hasCustomer !== "boolean" ||
     typeof state.accessConnected !== "boolean" ||
     state.managedBy !== "workos" ||
@@ -99,12 +120,26 @@ function readBilling(value: unknown): BillingState {
         typeof state.subscription.status !== "string" ||
         !Number.isSafeInteger(state.subscription.endsAt) ||
         state.subscription.endsAt < 0 ||
-        typeof state.subscription.cancelAtPeriodEnd !== "boolean"))
+        typeof state.subscription.cancelAtPeriodEnd !== "boolean" ||
+        (state.subscription.interval != null &&
+          !["monthly", "annual"].includes(state.subscription.interval)) ||
+        (state.subscription.amount != null &&
+          (!Number.isSafeInteger(state.subscription.amount) ||
+            state.subscription.amount < 0)) ||
+        (state.subscription.currency != null &&
+          !/^[a-z]{3}$/i.test(state.subscription.currency))))
   )
     throw new Error("Unable to read billing. Please try again.")
   return state
 }
-function stripeRedirect(value: unknown) {
+function billingRedirect(value: unknown, provider: unknown) {
+  if (provider === "workos") {
+    if (typeof value !== "string" || !authorizePaths.has(value))
+      throw new Error("Unable to confirm your account. Please try again.")
+    return value
+  }
+  if (provider !== undefined && provider !== "stripe")
+    throw new Error("Unable to open billing. Please try again.")
   if (typeof value !== "string")
     throw new Error("Unable to open Stripe. Please try again.")
   const url = new URL(value)
@@ -113,29 +148,30 @@ function stripeRedirect(value: unknown) {
     url.username ||
     url.password ||
     url.port ||
-    (url.hostname !== "stripe.com" && !url.hostname.endsWith(".stripe.com"))
+    (url.hostname !== "checkout.stripe.com" &&
+      url.hostname !== "billing.stripe.com")
   )
     throw new Error("Unable to open Stripe. Please try again.")
   return url.href
 }
-function billingRedirect(value: unknown, provider: unknown) {
-  if (provider === "workos") {
-    if (value !== "/api/account/billing/authorize")
-      throw new Error("Unable to connect billing. Please try again.")
-    return value
-  }
-  if (provider !== undefined && provider !== "stripe")
-    throw new Error("Unable to open billing. Please try again.")
-  return stripeRedirect(value)
+function money(price: BillingPrice) {
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency: price.currency,
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  }).format(price.amount / 100)
 }
 
 export function AccountBilling({
   refreshVersion,
   disabled,
+  hasAccess,
   onAccessRefresh,
 }: {
   refreshVersion: number
   disabled: boolean
+  hasAccess: boolean
   onAccessRefresh: () => void
 }) {
   const [billing, setBilling] = useState<BillingState | null>(null)
@@ -181,24 +217,33 @@ export function AccountBilling({
   useEffect(() => {
     mounted.current = true
     queueMicrotask(() => {
-      if (mounted.current) {
-        const returned = new URLSearchParams(window.location.search).get(
-          "billing"
-        )
-        setCheckoutReturn(returned)
-        void load(
-          refreshVersion > 0 || returned === "success" || returned === "return"
-        )
-      }
+      if (!mounted.current) return
+      const returned = new URLSearchParams(window.location.search).get(
+        "billing"
+      )
+      setCheckoutReturn(returned)
+      void load(
+        refreshVersion > 0 || returned === "success" || returned === "return"
+      )
     })
     return () => {
       mounted.current = false
       request.current?.abort()
     }
   }, [load, refreshVersion])
+  const subscription = billing?.subscription
+  const subscribed =
+    !!subscription && !terminalStatuses.has(subscription.status)
+  const healthy =
+    subscribed && ["active", "trialing"].includes(subscription.status)
+  const confirming = healthy && !hasAccess && billing?.accessConnected !== false
   useEffect(() => {
     const refresh = () => {
-      if (document.visibilityState === "visible" && !mutation.current)
+      if (
+        document.visibilityState === "visible" &&
+        !mutation.current &&
+        !request.current
+      )
         void load()
     }
     const timer = window.setInterval(refresh, 30_000)
@@ -208,21 +253,36 @@ export function AccountBilling({
       document.removeEventListener("visibilitychange", refresh)
     }
   }, [load])
+  useEffect(() => {
+    if (!confirming || sessionExpired) return
+    let attempts = 0
+    const timer = window.setInterval(() => {
+      if (
+        request.current ||
+        mutation.current ||
+        document.visibilityState !== "visible"
+      )
+        return
+      if (++attempts >= 12) window.clearInterval(timer)
+      void load(true)
+    }, 5_000)
+    return () => window.clearInterval(timer)
+  }, [confirming, load, sessionExpired])
   async function openBilling(
-    action: "checkout" | "portal" | "connect",
+    action: "checkout" | "portal" | "connect" | "upgrade" | "cancel",
     interval?: BillingInterval
   ) {
     if (mutation.current || disabled || sessionExpired || loading) return
     mutation.current = true
-    setBusy(interval ?? action)
+    setBusy(interval ? `${action}-${interval}` : action)
     setError("")
     try {
       const result = await billingApi({
         action,
         ...(interval ? { interval } : {}),
       })
-      if (!mounted.current) return
-      window.location.assign(billingRedirect(result?.url, result?.provider))
+      if (mounted.current)
+        window.location.assign(billingRedirect(result?.url, result?.provider))
     } catch (cause) {
       if (!mounted.current) return
       setError(
@@ -234,156 +294,226 @@ export function AccountBilling({
       setBusy(null)
     }
   }
-  if (billing?.enabled === false && !error) return null
-  if (!billing && !error) return null
-  const subscription = billing?.subscription
-  const subscribed = subscription && !terminalStatuses.has(subscription.status)
+  const intervals = billing?.intervals ?? []
+  const monthly = billing?.prices?.monthly
+  const annual = billing?.prices?.annual
+  const twoMonthsFree =
+    monthly &&
+    annual &&
+    monthly.currency === annual.currency &&
+    annual.amount === monthly.amount * 10
+  const currentInterval = subscribed ? (subscription.interval ?? null) : null
   const controlsDisabled = disabled || loading || !!busy || sessionExpired
+  const canManage = billing?.hasCustomer && billing.portalEnabled !== false
+  const reconnect =
+    subscribed && !hasAccess && billing?.accessConnected === false
+  const attention = !!subscription && attentionStatuses.has(subscription.status)
+  const plans = [
+    { key: "free", name: "Free", description: "Join shared projects." },
+    {
+      key: "monthly",
+      name: "Monthly",
+      description: "Local projects, hosting, and 2 Macs.",
+    },
+    {
+      key: "annual",
+      name: "Yearly",
+      description: "Local projects, hosting, and 2 Macs.",
+    },
+  ] as const
+  function renewal() {
+    if (!subscription || subscription.endsAt <= 0) return null
+    return (
+      <p className={styles.note}>
+        {subscription.cancelAtPeriodEnd
+          ? "Ends"
+          : subscription.status === "trialing"
+            ? "Trial ends"
+            : "Renews"}{" "}
+        <time dateTime={new Date(subscription.endsAt).toISOString()}>
+          {new Intl.DateTimeFormat(undefined, { dateStyle: "long" }).format(
+            subscription.endsAt
+          )}
+        </time>
+      </p>
+    )
+  }
   return (
-    <section
-      className={styles.billing}
-      aria-labelledby="billing-title"
-      aria-busy={loading || !!busy}
-    >
-      <h3 id="billing-title">
-        <CreditCard size={15} />
-        Subscription billing
-      </h3>
-      {checkoutReturn === "success" && (
-        <p role="status" className={styles.description}>
-          Checking subscription access. Access updates after billing is
-          confirmed.
-        </p>
-      )}
-      {checkoutReturn === "connected" && (
-        <p role="status" className={styles.description}>
-          Billing connected. Choose a subscription to continue.
-        </p>
-      )}
-      {checkoutReturn === "return" && (
-        <p role="status" className={styles.description}>
-          Billing updated. Checking subscription access.
-        </p>
-      )}
-      {checkoutReturn === "canceled" && (
-        <p role="status" className={styles.description}>
-          Checkout closed. You can review a subscription whenever you are ready.
-        </p>
-      )}
+    <div className={styles.billing} aria-busy={loading || !!busy}>
       {error && (
         <p role="alert" className={styles.error}>
           {error}
           {sessionExpired && (
             <>
               {" "}
-              <a
-                href="/api/account/auth/login"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                Sign in
-              </a>
+              <a href="/api/account/auth/login">Sign in</a>
             </>
           )}
         </p>
       )}
-      {subscription && (
-        <>
-          <p className={styles.status}>
-            {statusLabels[subscription.status] ?? "Subscription status pending"}
-          </p>
-          {subscription.endsAt > 0 ? (
-            <p className={styles.description}>
-              {subscription.status === "trialing"
-                ? "Trial ends"
-                : terminalStatuses.has(subscription.status)
-                  ? "Subscription ended"
-                  : "Current billing period ends"}{" "}
-              <time dateTime={new Date(subscription.endsAt).toISOString()}>
-                {new Intl.DateTimeFormat(undefined, {
-                  dateStyle: "long",
-                }).format(subscription.endsAt)}
-              </time>
-              .
-              {subscribed &&
-                subscription.cancelAtPeriodEnd &&
-                " Cancellation is scheduled for the end of this period."}
-            </p>
-          ) : (
-            <p className={styles.description}>
-              {terminalStatuses.has(subscription.status)
-                ? "This subscription has ended."
-                : "Subscription access is pending payment confirmation."}
-            </p>
-          )}
-          {["past_due", "unpaid", "incomplete", "paused"].includes(
-            subscription.status
-          ) && (
-            <p className={styles.description}>
-              Your subscription needs attention. Open billing to review its
-              payment and access details.
-            </p>
-          )}
-        </>
+      {!billing && loading && (
+        <p role="status" className={styles.note}>
+          Loading your subscription…
+        </p>
       )}
-      {billing?.enabled && !subscribed && billing.intervals.length > 0 && (
-        <>
-          <p className={styles.description}>
-            Choose a subscription to review the exact price, applicable tax, and
-            renewal terms in Stripe Checkout before subscribing.
-            {billing.trialDays &&
-              ` A ${billing.trialDays}-day trial may be available; eligibility and terms are confirmed at checkout.`}
-          </p>
-          <div className={styles.actions}>
-            {billing.intervals.map((interval) => (
-              <Button
-                key={interval}
-                className={styles.button}
-                variant="outline"
-                disabled={controlsDisabled}
-                onClick={() => void openBilling("checkout", interval)}
-              >
-                {busy === interval
-                  ? "Opening Stripe…"
-                  : `Review ${interval} subscription`}
-                <ArrowRight />
-              </Button>
-            ))}
-          </div>
-        </>
+      {checkoutReturn === "canceled" && !subscribed && (
+        <p role="status" className={styles.note}>
+          Checkout closed. Your plan hasn’t changed.
+        </p>
       )}
-      {billing?.hasCustomer && billing.portalEnabled !== false && (
-        <div className={styles.actions}>
-          <Button
-            className={styles.button}
-            variant="outline"
-            disabled={controlsDisabled}
-            onClick={() => void openBilling("portal")}
-          >
-            {busy === "portal" ? "Opening Stripe…" : "Manage billing"}
-            <ArrowRight />
-          </Button>
+      {checkoutReturn === "success" && hasAccess && (
+        <p role="status" className={styles.success}>
+          Your subscription is active.
+        </p>
+      )}
+      <div className={styles.plans}>
+        {plans.map((plan) => {
+          const free = plan.key === "free"
+          const interval = free ? null : plan.key
+          const current =
+            !!billing && (free ? !subscribed : currentInterval === interval)
+          const configured = interval ? billing?.prices?.[interval] : undefined
+          const price =
+            current && subscription?.amount != null && subscription.currency
+              ? { amount: subscription.amount, currency: subscription.currency }
+              : configured
+          const available =
+            !!interval &&
+            !!billing?.enabled &&
+            intervals.includes(interval) &&
+            !!configured
+          const higher =
+            !free &&
+            (!subscribed ||
+              (currentInterval === "monthly" && interval === "annual"))
+          const purchaseAction = subscribed ? "upgrade" : "checkout"
+          const opening = !!interval && busy === `${purchaseAction}-${interval}`
+          return (
+            <article
+              key={plan.key}
+              className={`${styles.plan} ${current ? styles.current : ""}`}
+              aria-labelledby={`subscription-${plan.key}`}
+            >
+              <div className={styles.planHeading}>
+                <h3 id={`subscription-${plan.key}`}>{plan.name}</h3>
+                {current && (
+                  <span className={styles.currentLabel}>Current plan</span>
+                )}
+              </div>
+              <p className={styles.price}>
+                {free ? "$0" : price ? money(price) : "—"}
+                {!free && (
+                  <span> / {interval === "annual" ? "year" : "month"}</span>
+                )}
+              </p>
+              <p className={styles.description}>{plan.description}</p>
+              <div className={styles.planNotes}>
+                {interval === "annual" && twoMonthsFree && (
+                  <p className={styles.saving}>2 months free</p>
+                )}
+                {current && !free && subscription?.discountsApplied && (
+                  <p className={styles.note}>Price before your discount.</p>
+                )}
+                {current && !free && renewal()}
+                {current && confirming && (
+                  <p role="status" className={styles.note}>
+                    Activating your subscription…
+                  </p>
+                )}
+              </div>
+              <div className={styles.planAction}>
+                {current && !free ? (
+                  <Button
+                    className={styles.button}
+                    variant="outline"
+                    disabled={
+                      controlsDisabled ||
+                      !canManage ||
+                      subscription?.cancelAtPeriodEnd
+                    }
+                    onClick={() => void openBilling("cancel")}
+                  >
+                    {busy === "cancel"
+                      ? "Opening cancellation…"
+                      : subscription?.cancelAtPeriodEnd
+                        ? "Cancellation scheduled"
+                        : "Cancel"}
+                  </Button>
+                ) : higher ? (
+                  <Button
+                    className={styles.button}
+                    disabled={
+                      controlsDisabled ||
+                      !available ||
+                      (subscribed && !canManage)
+                    }
+                    onClick={() =>
+                      interval && void openBilling(purchaseAction, interval)
+                    }
+                  >
+                    {opening ? "Opening…" : "Upgrade"}
+                    <ArrowRight />
+                  </Button>
+                ) : null}
+              </div>
+            </article>
+          )
+        })}
+      </div>
+      {billing?.enabled && !subscribed && (
+        <p className={styles.terms}>
+          USD · Paid plans renew automatically. Tax calculated at checkout.
+        </p>
+      )}
+      {billing && !billing.enabled && !subscribed && (
+        <p className={styles.note}>
+          Subscriptions are temporarily unavailable.
+        </p>
+      )}
+      {attention && (
+        <div className={styles.recovery}>
+          <p className={styles.note}>Your payment needs attention.</p>
+          {canManage && (
+            <Button
+              className={styles.button}
+              variant="outline"
+              disabled={controlsDisabled}
+              onClick={() => void openBilling("portal")}
+            >
+              Update payment method
+            </Button>
+          )}
         </div>
       )}
-      {billing?.hasCustomer && !billing.accessConnected && (
-        <div className={styles.actions}>
+      {reconnect && (
+        <div className={styles.recovery}>
+          <p className={styles.note}>
+            Confirm your account to restore subscription access.
+          </p>
           <Button
             className={styles.button}
             variant="outline"
             disabled={controlsDisabled}
             onClick={() => void openBilling("connect")}
           >
-            {busy === "connect" ? "Connecting access…" : "Reconnect access"}
-            <ArrowRight />
+            Confirm your account
           </Button>
         </div>
       )}
-      {!!busy && (
-        <p role="status" className={styles.description}>
-          {busy === "connect"
-            ? "Connecting subscription access…"
-            : "Opening secure Stripe billing…"}
-        </p>
+      {subscribed && !currentInterval && (
+        <div className={styles.recovery}>
+          <p className={styles.note}>Your subscription details need review.</p>
+          {canManage && (
+            <Button
+              className={styles.button}
+              variant="outline"
+              disabled={controlsDisabled}
+              onClick={() => void openBilling("portal")}
+            >
+              Review billing
+            </Button>
+          )}
+        </div>
       )}
       {error && (
         <Button
@@ -393,9 +523,9 @@ export function AccountBilling({
           onClick={() => void load(true)}
         >
           <RefreshCw />
-          {loading ? "Refreshing billing…" : "Refresh billing"}
+          {loading ? "Trying again…" : "Try again"}
         </Button>
       )}
-    </section>
+    </div>
   )
 }

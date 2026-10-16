@@ -510,7 +510,7 @@ test("all customer portal shell URLs require a verified account session and keep
     assert.equal(response.headers.get("x-robots-tag"), "noindex, nofollow")
   }
 })
-test("reminder queues and manual checks require Owner cookies and same-origin mutations", async () => {
+test("retired reminder administration retains Owner authentication without sending mail", async () => {
   for (const cookie of [
     undefined,
     await sessionCookie(),
@@ -530,8 +530,8 @@ test("reminder queues and manual checks require Owner cookies and same-origin mu
     request("/api/admin/subscription-reminders", owner),
     env
   )
-  assert.equal(queue.status, 200)
-  assert.equal((await queue.json()).mode, "disabled")
+  assert.equal(queue.status, 410)
+  assert.match((await queue.json()).error, /retired/)
   const make = (originHeader) =>
     new Request(`${origin}/api/admin/subscription-reminders`, {
       method: "POST",
@@ -544,9 +544,9 @@ test("reminder queues and manual checks require Owner cookies and same-origin mu
     })
   assert.equal(
     (await handleAdminReminders(make("https://attacker.example"), env)).status,
-    403
+    410
   )
-  assert.equal((await handleAdminReminders(make(origin), env)).status, 503)
+  assert.equal((await handleAdminReminders(make(origin), env)).status, 410)
 })
 test("successful account sign-in and later logins never grant a subscription", async () => {
   for (let attempt = 0; attempt < 2; attempt++) {

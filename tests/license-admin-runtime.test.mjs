@@ -395,19 +395,15 @@ test("the built Pages Worker authorizes subscription administration only for a v
       }),
     }
   )
-  assert.equal(granted.status, 201)
-  const result = await granted.json()
-  assert.equal(result.subscription.userId, customer.id)
+  assert.equal(granted.status, 410)
+  assert.match((await granted.json()).error, /retired/)
   const listed = await worker.dispatchFetch(
     `${origin}/api/admin/subscriptions`,
     { headers }
   )
   assert.equal(listed.status, 200)
-  assert.equal(
-    (await listed.json()).users[0].subscription.id,
-    result.subscription.id
-  )
-  assert.equal(customerRequests, 2)
+  assert.equal((await listed.json()).users[0].subscription, null)
+  assert.equal(customerRequests, 1)
 })
 
 test("the built Pages Worker denies subscription administration after Owner membership is removed", async (t) => {

@@ -16,6 +16,7 @@ import {
   createBillingAccessConnection,
   createBillingCheckout,
   createBillingPortal,
+  createBillingSubscriptionFlow,
 } from "../../../lib/stripe-billing.ts"
 import { BillingConflictError } from "../../../lib/stripe-billing-store.ts"
 
@@ -74,6 +75,18 @@ export async function handleAccountBilling(request: Request, env: Env) {
       )
     if (body.action === "portal" && keys.length === 1)
       return respond(json(await createBillingPortal(env, auth)))
+    if (body.action === "cancel" && keys.length === 1)
+      return respond(
+        json(await createBillingSubscriptionFlow(env, auth, "cancel"))
+      )
+    if (
+      body.action === "upgrade" &&
+      body.interval === "annual" &&
+      keys.length === 2
+    )
+      return respond(
+        json(await createBillingSubscriptionFlow(env, auth, "upgrade"))
+      )
     if (body.action === "connect" && keys.length === 1)
       return respond(json(await createBillingAccessConnection(env, auth)))
     throw new TypeError("Choose an available billing action.")

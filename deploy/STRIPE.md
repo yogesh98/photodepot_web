@@ -16,14 +16,14 @@ listen to Stripe subscription webhooks or interpret invoices to authorize access
   Browser logout and removing one Mac do not revoke this shared billing session.
 - Verification of WorkOS-signed `entitlements` for the exact client, user and
   personal organization. Only `PHOTODEPOT_WORKOS_ENTITLEMENT` grants paid access.
-- Existing independent manual grants and stable signed desktop receipt IDs.
+- Stable signed desktop receipt IDs. Historical manual grants are ignored.
 
 WorkOS tokens contain feature keys, not subscription renewal dates or trial terms.
 The existing 48-hour offline allowance remains a Photodepot authorization policy:
 a receipt is bounded by the proof's issuance time plus 48 hours. An expired proof
 must be refreshed before another paid receipt can be issued. Provider failures
-cannot renew that allowance. Session expiry/revocation requires **Reconnect
-access** in the account dashboard. Manual grants do not postpone Stripe charges.
+cannot renew that allowance. Session expiry/revocation requires account
+confirmation from the dashboard. Subscription coupons are managed in Stripe.
 
 The billing panel retrieves live Stripe subscription status and dates only for
 display. It recognizes flexible-mode `cancel_at` cancellations. Changing an
@@ -40,15 +40,18 @@ connection cannot activate this add-on. Match the WorkOS environment to the app'
    Stripe Connect connection. Enable **Use Stripe entitlements**. Individual
    Photodepot accounts do not need Seat Sync. This OAuth connection requires the
    account owner's browser authorization; setting a local flag cannot create it.
-2. In Stripe test mode, create the product and recurring monthly and/or annual
-   Prices. Choose the amount, currency and explicit tax behavior. Attach a Stripe
+2. In Stripe test mode, create the product and recurring monthly and annual
+   Prices: USD20/month and USD200/year (two months free compared with monthly).
+   Use the same product and explicit tax behavior for both. Attach a Stripe
    Entitlements feature with lookup key `photodepot-standard` to the product,
    or set `PHOTODEPOT_WORKOS_ENTITLEMENT` to the chosen key. WorkOS propagates this
    feature into tokens. Adding features to existing subscriptions may take effect
    at the next billing cycle; verify with a newly created test subscription.
 3. Create a test-mode Customer Portal configuration. Enable payment updates,
-   invoices and period-end cancellation, and restrict plan changes to the intended
-   product and Prices. Set `STRIPE_PORTAL_CONFIGURATION_ID`.
+   invoices and period-end cancellation. Enable price updates and restrict them to
+   the Standard product's monthly and annual Prices, with quantity changes
+   disabled. Stripe calculates prorations and presents them for confirmation.
+   Set `STRIPE_PORTAL_CONFIGURATION_ID`.
 4. Apply migrations through `0016_workos_entitlements.sql`. Earlier Stripe ledger
    tables are retained for history/upgrade compatibility and are not used by
    runtime authorization. No Stripe webhook endpoint or signing secret is needed.
@@ -77,10 +80,12 @@ as well as normal account sessions.
 
 ## Customer flow
 
-The first **Review subscription** action prepares the private billing organization
-and sends the signed-in customer through a separate WorkOS authorization. After
-returning to the account dashboard, they choose their subscription and continue to
-Stripe Checkout. The app refreshes WorkOS entitlements after Checkout/Portal return;
+The Subscription section shows Free, Monthly, and Yearly. A free account selects
+**Upgrade** on a paid option. This
+prepares the private billing organization and, when needed, confirms identity
+through WorkOS. The server seals the chosen interval in the authorization
+transaction and resumes Stripe Checkout automatically after the callback. The app
+refreshes WorkOS entitlements after Checkout/Portal return;
 regular polling uses the current short-lived proof until it needs refreshing.
 This separate authorization requires a fresh sign-in (`max_age=0`) so AuthKit
 does not reuse the browser's token family. If social sign-in returns an unscoped
@@ -88,6 +93,26 @@ token, the callback explicitly selects the private billing organization using th
 new grant before saving it. The ordinary browser session is never rotated into
 the billing store.
 Stripe's own recovery and portal flows handle payment problems and cancellation.
+The current paid card's **Cancel** button opens a `subscription_cancel` portal
+flow for period-end cancellation. A monthly subscriber's yearly **Upgrade**
+button opens `subscription_update_confirm` for the server-selected annual Price
+and existing item. Both flows return directly to the account after confirmation;
+neither action creates a second subscription or directly changes billing.
+
+## Complimentary access and discounts
+
+Create coupons and customer-facing promotion codes in Stripe; users redeem them
+in hosted Checkout. `allow_promotion_codes=true` enables the field, and
+`payment_method_collection=if_required` allows a subscription with nothing due to
+complete without a card. Set a 100% coupon's duration to match the intended free
+period; `forever` discounts all future invoices. Use customer restrictions and
+redemption limits where appropriate. Discounts retain the same product and
+WorkOS entitlement path; there is no manual access request or grant.
+
+The account dashboard displays configured base prices from Stripe. For existing
+discounted subscriptions, the billing portal shows the applicable discount and
+actual invoice amounts. Never treat a coupon code or Checkout return URL as proof
+of access; only verified WorkOS entitlements authorize it.
 
 ## Verification before launch
 
@@ -101,7 +126,7 @@ history, promotions, Tax and Portal changes/cancellation. Confirm refreshed Work
 claims grant/remove the configured feature, unrelated organization/user claims do
 not authorize, and browser logout does not interrupt Mac access. Verify expired
 billing sessions reconnect, failed refreshes preserve rather than extend the last
-offline allowance, valid manual grants still work, and existing Mac receipts keep
+offline allowance, historical manual grants cannot authorize, and existing Mac receipts keep
 stable IDs and increasing revisions.
 
 No production deployment, remote migration, live payment or Stripe OAuth connection
@@ -118,3 +143,5 @@ explicit deployment decision.
 - [Hosted subscription Checkout](https://docs.stripe.com/billing/subscriptions/build-subscriptions?payment-ui=checkout&ui=stripe-hosted)
 - [Customer Portal](https://docs.stripe.com/customer-management/integrate-customer-portal)
 - [Stripe Tax setup](https://docs.stripe.com/tax/set-up)
+- [Stripe coupons and promotion codes](https://docs.stripe.com/billing/subscriptions/coupons)
+- [Checkout payment method collection](https://docs.stripe.com/api/checkout/sessions/create#create_checkout_session-payment_method_collection)

@@ -1,13 +1,6 @@
 "use client"
 
-import {
-  ArrowRight,
-  CircleCheck,
-  Clock3,
-  CreditCard,
-  Mail,
-  Users,
-} from "lucide-react"
+import { ArrowRight, CircleCheck, CreditCard, Users } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import type { SubscriptionOverview } from "@/lib/subscription-types"
@@ -24,7 +17,7 @@ export function AdminOverview({
     {
       title: "Active access",
       value: overview?.active,
-      text: `${overview?.activeTrials ?? 0} trial · ${overview?.activeStandard ?? 0} standard`,
+      text: "Verified subscription access",
       icon: CircleCheck,
       filter: "active",
       tone: "green",
@@ -38,14 +31,6 @@ export function AdminOverview({
       tone: "orange",
     },
     {
-      title: "Expiring this week",
-      value: overview?.expiringSoon,
-      text: null,
-      icon: Clock3,
-      filter: "expiring",
-      tone: "blue",
-    },
-    {
       title: "Waitlist signups",
       value: overview?.waitlistTotal,
       text: `${overview?.waitlistLast30Days ?? 0} joined in the last 30 days`,
@@ -57,13 +42,7 @@ export function AdminOverview({
   const total = overview?.totalSubscriptions ?? 0
   const stages = [
     {
-      label: "Active trials",
-      count: overview?.activeTrials ?? 0,
-      color: "var(--chart-1)",
-      filter: "trial",
-    },
-    {
-      label: "Active standard",
+      label: "Active subscriptions",
       count: overview?.activeStandard ?? 0,
       color: "var(--chart-2)",
       filter: "standard",
@@ -73,12 +52,6 @@ export function AdminOverview({
       count: overview?.expired ?? 0,
       color: "var(--chart-3)",
       filter: "expired",
-    },
-    {
-      label: "Revoked",
-      count: overview?.revoked ?? 0,
-      color: "var(--chart-4)",
-      filter: "revoked",
     },
   ]
   return (
@@ -123,7 +96,7 @@ export function AdminOverview({
             </div>
             <div className={styles.healthTotal}>
               <strong>{overview ? total : "—"}</strong>
-              <span>total access grants</span>
+              <span>subscription access records</span>
             </div>
             <div
               className={styles.healthBar}
@@ -159,38 +132,6 @@ export function AdminOverview({
                   <ArrowRight size={14} />
                 </button>
               ))}
-            </div>
-          </CardContent>
-        </Card>
-        <Card className={styles.panel}>
-          <CardContent>
-            <div className={styles.panelHeading}>
-              <div>
-                <h2>Needs your attention</h2>
-              </div>
-              <span className={styles.liveDot} />
-            </div>
-            <div className={styles.attentionList}>
-              <button onClick={() => navigate("operations")}>
-                <span className={styles.attentionIcon}>
-                  <Mail size={17} />
-                </span>
-                <span>
-                  <strong>Customer requests</strong>
-                </span>
-                <b>{overview?.openRequests ?? "—"}</b>
-                <ArrowRight size={15} />
-              </button>
-              <button onClick={() => navigate("accounts", "expiring")}>
-                <span className={styles.attentionIcon}>
-                  <Clock3 size={17} />
-                </span>
-                <span>
-                  <strong>Upcoming expirations</strong>
-                </span>
-                <b>{overview?.expiringSoon ?? "—"}</b>
-                <ArrowRight size={15} />
-              </button>
             </div>
           </CardContent>
         </Card>

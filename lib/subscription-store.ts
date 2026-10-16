@@ -151,43 +151,18 @@ export async function getSubscriptionOverview(
   now = Date.now()
 ): Promise<SubscriptionOverview> {
   validateTimestamp(now)
-  const expiringAt = Math.min(
-    maximumTimestamp,
-    now + SUBSCRIPTION_EXPIRING_DAYS * millisecondsPerDay
-  )
   const row = await database
     .prepare(
-      `WITH users AS (
-         SELECT user_id FROM subscriptions UNION SELECT user_id FROM workos_entitlements WHERE enabled=1
-       ), candidates AS (
-         SELECT m.id AS manual_id,m.type AS manual_type,m.end_at AS manual_end,
-           CASE WHEN m.status='revoked' THEN 'revoked' WHEN m.end_at<=? THEN 'expired' ELSE 'active' END AS manual_status,
-           (m.status='active' AND m.started_at<=? AND m.end_at>?) AS manual_valid,
-           p.issued_at + ${LICENSE_GRACE_MS} AS paid_end,
-           CASE WHEN p.enabled=0 THEN 'revoked' WHEN p.expires_at<=? OR p.issued_at+${LICENSE_GRACE_MS}<=? THEN 'expired' ELSE 'active' END AS paid_status,
-           (p.enabled=1 AND p.issued_at<=? AND p.expires_at>? AND p.issued_at+${LICENSE_GRACE_MS}>?) AS paid_valid
-         FROM users u LEFT JOIN subscriptions m ON m.user_id=u.user_id
-         LEFT JOIN workos_entitlements p ON p.user_id=u.user_id
-       ), choices AS (
-         SELECT *, CASE WHEN paid_valid AND (NOT COALESCE(manual_valid,0) OR paid_end>=manual_end)
-           THEN 1 WHEN manual_id IS NOT NULL THEN 0 ELSE 1 END AS choose_paid FROM candidates
-       ), effective AS (
-         SELECT choose_paid AS managed, CASE WHEN choose_paid THEN 'regular' ELSE manual_type END AS type,
-           CASE WHEN choose_paid THEN paid_end ELSE manual_end END AS end_at,
-           CASE WHEN choose_paid THEN paid_status ELSE manual_status END AS status,
-           CASE WHEN choose_paid THEN paid_valid ELSE manual_valid END AS valid FROM choices
-       ) SELECT COUNT(*) AS totalSubscriptions,
-       COALESCE(SUM(valid), 0) AS active,
-       COALESCE(SUM(valid AND type = 'trial'), 0) AS activeTrials,
-       COALESCE(SUM(valid AND type = 'regular'), 0) AS activeStandard,
-       COALESCE(SUM(status = 'expired'), 0) AS expired,
-       COALESCE(SUM(status = 'revoked'), 0) AS revoked,
-       COALESCE(SUM(valid AND NOT managed AND end_at <= ?), 0) AS expiringSoon,
+      `SELECT COUNT(*) AS totalSubscriptions,
+       COALESCE(SUM(issued_at<=? AND expires_at>? AND issued_at+${LICENSE_GRACE_MS}>?),0) AS active,
+       0 AS activeTrials,
+       COALESCE(SUM(issued_at<=? AND expires_at>? AND issued_at+${LICENSE_GRACE_MS}>?),0) AS activeStandard,
+       COALESCE(SUM(expires_at<=? OR issued_at+${LICENSE_GRACE_MS}<=?),0) AS expired,
+       0 AS revoked, 0 AS expiringSoon, 0 AS openRequests,
        (SELECT COUNT(*) FROM waitlist) AS waitlistTotal,
-       (SELECT COUNT(*) FROM waitlist WHERE julianday(created_at) >= julianday(?) AND julianday(created_at) <= julianday(?)) AS waitlistLast30Days,
-       (SELECT COUNT(*) FROM subscription_requests WHERE status IN ('pending', 'acknowledged')) AS openRequests,
-       (SELECT COUNT(*) FROM desktop_sessions WHERE active = 1) AS assignedMacs
-       FROM effective`
+       (SELECT COUNT(*) FROM waitlist WHERE julianday(created_at)>=julianday(?) AND julianday(created_at)<=julianday(?)) AS waitlistLast30Days,
+       (SELECT COUNT(*) FROM desktop_sessions WHERE active=1) AS assignedMacs
+       FROM workos_entitlements WHERE enabled=1`
     )
     .bind(
       now,
@@ -198,7 +173,6 @@ export async function getSubscriptionOverview(
       now,
       now,
       now,
-      expiringAt,
       new Date(Math.max(0, now - 30 * millisecondsPerDay)).toISOString(),
       new Date(now).toISOString()
     )

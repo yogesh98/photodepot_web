@@ -41,9 +41,7 @@ export interface AccountRequestAudit {
 export interface CustomerAccount {
   user: { email: string }
   access: AccountAccess
-  requests: CustomerRequest[]
   devices: AccountDevice[]
-  reminders: { enabled: boolean; revision: number }
 }
 export interface AdminRequestQueue {
   requests: (AccountRequest & {
