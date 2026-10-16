@@ -11,6 +11,7 @@ import type { Env } from "./cloudflare.ts"
 import {
   getWorkOSEntitlement,
   workosBillingConfiguration,
+  WorkOSEntitlementUnavailableError,
 } from "./workos-entitlements.ts"
 
 interface ManagedRow {
@@ -104,6 +105,12 @@ export async function getAccountEntitlement(
           managedRow.organization_id === managedOrganization))
         ? managedSummary(managedRow)
         : null
+    // A concurrent refresh retires its old positive snapshot before verifying
+    // the rotated token. Expiry here is unresolved access, not a paid denial.
+    if (env && managed?.enabled && managed.expiresAt <= now)
+      throw new WorkOSEntitlementUnavailableError(
+        "Billing access proof expired during account verification."
+      )
     const billing = null
     const selected = selectAccountGrant(manual, managed, now)
     const access = resolveAccountAccess(manual, now, managed)
@@ -160,6 +167,11 @@ export async function getAccountEntitlement(
           )
     const projection = await mutation.first<{ id: string; revision: number }>()
     if (!projection) continue
+    // Persistence can also cross the verified token's deadline.
+    if (env && managed?.enabled && managed.expiresAt <= decisionNow())
+      throw new WorkOSEntitlementUnavailableError(
+        "Billing access proof expired during account verification."
+      )
     return {
       manual,
       managed,

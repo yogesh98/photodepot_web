@@ -1336,6 +1336,138 @@ test("a billing refresh outage preserves approved desktop sign-in and signs unav
   assert.equal((await storedTokens()).refreshToken, "refresh_backend_initial")
 })
 
+test("a proof retired by concurrent refresh preserves the desktop outage marker", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: epoch })
+  await store()
+  const desktop = await approvedDesktop()
+  const healthy = await (await desktop.verify()).json()
+  assert.ok(healthy.receipt)
+  const projection = sqlite.prepare("SELECT * FROM account_entitlements").get()
+  const database = env.DB
+  const row = await getDesktopSession(database, desktop.sessionId)
+  let refreshing, release
+  env.DB = {
+    prepare: database.prepare.bind(database),
+    async batch(statements) {
+      if (!refreshing) {
+        let entered
+        const rotated = new Promise((resolve) => {
+          entered = resolve
+        })
+        const finish = new Promise((resolve) => {
+          release = resolve
+        })
+        // Retire the snapshot after this request verified its cache but before
+        // it reads the receipt inputs. Hold verification of the rotated token.
+        refreshing = getWorkOSEntitlement({ ...env, DB: database }, userId, {
+          forceRefresh: true,
+          async verifyAccessToken() {
+            entered()
+            await finish
+            throw new Error("JWKS temporarily unavailable")
+          },
+        }).catch((error) => error)
+        await rotated
+      }
+      return database.batch(statements)
+    },
+  }
+  let body
+  try {
+    body = await desktopSessionResponse(env, row, "A".repeat(43))
+  } finally {
+    release?.()
+    await refreshing
+    env.DB = database
+  }
+  assert.equal(body.receipt, undefined)
+  const payload = JSON.parse(Buffer.from(body.session.payload, "base64url"))
+  assert.equal(payload.status, "active")
+  assert.equal(payload.entitlementStatus, "unavailable")
+  assert.deepEqual(
+    sqlite.prepare("SELECT * FROM account_entitlements").get(),
+    projection
+  )
+  assert.equal((await storedTokens()).refreshToken, "refresh_backend_rotated")
+  const recovered = await (await desktop.verify()).json()
+  assert.ok(recovered.receipt)
+  assert.equal(
+    JSON.parse(Buffer.from(recovered.session.payload, "base64url"))
+      .entitlementStatus,
+    undefined
+  )
+})
+
+for (const phase of ["snapshot", "projection"]) {
+  test(`a positive proof expiring during the ${phase} read is unavailable`, async (t) => {
+    t.mock.timers.enable({ apis: ["Date"], now: epoch })
+    await store()
+    const desktop = await approvedDesktop()
+    assert.ok((await (await desktop.verify()).json()).receipt)
+    const database = env.DB
+    const row = await getDesktopSession(database, desktop.sessionId)
+    env.DB = {
+      prepare(query) {
+        const statement = database.prepare(query)
+        if (
+          phase === "projection" &&
+          query.startsWith("UPDATE account_entitlements")
+        ) {
+          const first = statement.first.bind(statement)
+          statement.first = async () => {
+            const result = await first()
+            t.mock.timers.tick(300_001)
+            return result
+          }
+        }
+        return statement
+      },
+      async batch(statements) {
+        const result = await database.batch(statements)
+        if (phase === "snapshot") t.mock.timers.tick(300_001)
+        return result
+      },
+    }
+    const body = await desktopSessionResponse(env, row, "A".repeat(43))
+    assert.equal(body.receipt, undefined)
+    const payload = JSON.parse(Buffer.from(body.session.payload, "base64url"))
+    assert.equal(payload.status, "active")
+    assert.equal(payload.entitlementStatus, "unavailable")
+    assert.equal(authenticationCalls.length, 0)
+  })
+}
+
+test("a concurrent verified entitlement withdrawal remains a desktop denial", async () => {
+  await store()
+  const desktop = await approvedDesktop()
+  assert.ok((await (await desktop.verify()).json()).receipt)
+  const database = env.DB
+  const row = await getDesktopSession(database, desktop.sessionId)
+  tokenResponse = authentication(jwt({ entitlements: [] }))
+  let withdrawn = false
+  env.DB = {
+    prepare: database.prepare.bind(database),
+    async batch(statements) {
+      if (!withdrawn) {
+        withdrawn = true
+        await getWorkOSEntitlement({ ...env, DB: database }, userId, {
+          forceRefresh: true,
+        })
+      }
+      return database.batch(statements)
+    },
+  }
+  const body = await desktopSessionResponse(env, row, "A".repeat(43))
+  assert.equal(body.receipt, undefined)
+  const payload = JSON.parse(Buffer.from(body.session.payload, "base64url"))
+  assert.equal(payload.status, "active")
+  assert.equal(payload.entitlementStatus, undefined)
+  assert.equal(
+    sqlite.prepare("SELECT enabled FROM workos_entitlements").get().enabled,
+    0
+  )
+})
+
 test("confirmed entitlement denial never carries the desktop outage marker or a paid receipt", async () => {
   await store(jwt({ entitlements: [] }))
   const desktop = await approvedDesktop()
