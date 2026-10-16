@@ -150,7 +150,11 @@ export function AdminUserProfile({
                 </div>
                 <dl className={styles.profileFacts}>
                   <div>
-                    <dt>Access starts</dt>
+                    <dt>
+                      {user.access.source === "workos"
+                        ? "Access checked"
+                        : "Access starts"}
+                    </dt>
                     <dd>
                       {user.access.startsAt != null
                         ? date(user.access.startsAt)
@@ -158,7 +162,11 @@ export function AdminUserProfile({
                     </dd>
                   </div>
                   <div>
-                    <dt>Access ends</dt>
+                    <dt>
+                      {user.access.source === "workos"
+                        ? "Offline access valid until"
+                        : "Access ends"}
+                    </dt>
                     <dd>
                       {user.access.endsAt != null
                         ? date(user.access.endsAt)
@@ -173,7 +181,13 @@ export function AdminUserProfile({
                   </div>
                   <div>
                     <dt>Access source</dt>
-                    <dd>{sub ? "Manual grant" : "Free account"}</dd>
+                    <dd>
+                      {user.access.source === "workos"
+                        ? "WorkOS subscription access"
+                        : user.access.source === "manual"
+                          ? "Manual grant"
+                          : "Free account"}
+                    </dd>
                   </div>
                 </dl>
                 <div className={styles.profileActions}>{actions}</div>

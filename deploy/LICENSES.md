@@ -23,7 +23,8 @@ only reviews the request. Existing request and audit history stays readable.
 
 Reminders are explicit preferences rather than billing cancellation. Trial mail
 is eligible in the final 48 hours through the existing deduplicated outbox; see
-[reminder delivery](../workers/README.md). No payment provider is connected.
+[reminder delivery](../workers/README.md). Manual reminders do not change any
+separate Stripe subscription.
 The optional signed WorkOS webhook acknowledges notifications without granting
 access or changing billing.
 
@@ -128,14 +129,17 @@ desktop trusting the replacement public key first.
 
 ## Stripe billing
 
-The access resolver is the integration boundary. Stripe owns paid terms,
-invoices, cancellation, coupons, promotion codes, and charge dates through hosted
-Checkout and billing management. WorkOS's Stripe add-on associates the customer
-with a private personal organization, separate from the administration organization.
-No team UI or seat sync is needed. Manual users enter billing only through explicit
-checkout. Extending paid time must postpone the next charge in Stripe and use its
-confirmed result for access; a local grant edit is not a billing extension. This
-integration keeps billing records separate from manual grants and uses native
-Stripe discounts. Billing is disabled by default. See
-[Stripe setup and verification](STRIPE.md) for configuration, Tax decisions,
-webhook setup and deferred sandbox checks.
+WorkOS's Stripe Entitlements add-on supplies the paid feature claim. The backend
+checks its signed token against the account's private personal organization and
+configured feature key, while manual grants remain independent. Stripe provides
+Checkout, Portal, discounts and Tax; live subscription details are for display.
+No custom Stripe webhook/invoice reconciliation grants access.
+
+A separate encrypted, backend-owned WorkOS session supports existing desktop
+sessions without sharing the browser's rotating refresh token. The server signs
+the existing receipt format with a stable identity and bounded 48-hour offline
+authorization deadline. This deadline is not a subscription renewal date. Provider
+failures do not extend it; expired or revoked WorkOS authorization requires
+reconnection. Manual access changes do not alter Stripe billing.
+
+Billing is disabled by default. See [setup and verification](STRIPE.md).

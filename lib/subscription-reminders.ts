@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto"
 import type { Env } from "./cloudflare.ts"
 import { getSubscription, listSubscriptions } from "./subscription-store.ts"
 import { trialReminderEligible } from "./account-access.ts"
+import { getWorkOSEntitlement } from "./workos-entitlements.ts"
 import { getWorkOSUser } from "./workos-users.ts"
 
 const day = 86_400_000
@@ -56,6 +57,17 @@ function accountUrl(env: Env) {
   )
     throw new Error("Invalid reminder account URL")
   return `${callback.origin}/account`
+}
+
+async function reminderSubscription(env: Env, userId: string, now: number) {
+  // Refresh paid proof before considering a manual trial notice. Provider outages
+  // defer delivery rather than making a paying customer look like an unpaid trial.
+  const started = Date.now()
+  const managed = await getWorkOSEntitlement(env, userId, { now })
+  now += Math.max(0, Date.now() - started)
+  if (managed?.enabled && managed.issuedAt <= now && managed.expiresAt > now)
+    return null
+  return getSubscription(env.DB, userId, now)
 }
 
 async function enqueueReminders(env: Env, now: number) {
@@ -126,7 +138,7 @@ export async function runSubscriptionReminders(
     if (!row) continue
     result.processed++
     try {
-      const subscription = await getSubscription(env.DB, row.user_id, now)
+      const subscription = await reminderSubscription(env, row.user_id, now)
       if (
         !trialReminderEligible(subscription, now) ||
         subscription?.endsAt !== row.end_at
@@ -183,7 +195,7 @@ export async function runSubscriptionReminders(
       const sender = row.sender ?? env.PHOTODEPOT_EMAIL_FROM ?? null
       const message =
         row.message ??
-        `Your free Photodepot trial ends on ${new Date(row.end_at).toISOString().replace("T", " ").replace(".000Z", " UTC")}.\n\nYou can view your access and connected computers, or request an extension here:\n${portal}\n\nAccess extensions are managed by an administrator. No payment is collected automatically.\n\nPhotodepot`
+        `Your free Photodepot trial ends on ${new Date(row.end_at).toISOString().replace("T", " ").replace(".000Z", " UTC")}.\n\nYou can view your access and connected computers, or request an extension here:\n${portal}\n\nThis reminder concerns trial access granted by an administrator. Manage any subscription separately in your account billing settings.\n\nPhotodepot`
       const prepared = await env.DB.prepare(
         `UPDATE subscription_reminders SET recipient=?,sender=?,subject=?,message=? WHERE id=? AND status='sending' AND lease_token=? AND lease_until>? RETURNING id`
       )
@@ -203,8 +215,8 @@ export async function runSubscriptionReminders(
       }
       // Recheck immediately before transmission so an admin change during lookup
       // cannot knowingly deliver an obsolete term reminder.
-      const current = await getSubscription(
-        env.DB,
+      const current = await reminderSubscription(
+        env,
         row.user_id,
         options.now ?? Date.now()
       )
@@ -248,7 +260,8 @@ export async function runSubscriptionReminders(
            AND first_attempt_at>CAST(unixepoch('subsec') * 1000 AS INTEGER)-?))
          AND EXISTS (SELECT 1 FROM subscriptions s WHERE s.id=subscription_reminders.subscription_id
            AND s.status='active' AND s.type='trial' AND s.reminder_opt_out_at IS NULL AND s.started_at<=? AND s.end_at=subscription_reminders.end_at AND s.end_at>?
-           AND s.end_at>CAST(unixepoch('subsec') * 1000 AS INTEGER))
+           AND s.end_at>CAST(unixepoch('subsec') * 1000 AS INTEGER)
+           AND NOT EXISTS (SELECT 1 FROM workos_entitlements e WHERE e.user_id=s.user_id AND e.enabled=1 AND e.issued_at<=? AND e.expires_at>?))
          RETURNING first_attempt_at,lease_until,end_at`
       )
         .bind(
@@ -259,6 +272,8 @@ export async function runSubscriptionReminders(
           deliveryNow,
           deliveryNow - providerWindow,
           providerWindow,
+          deliveryNow,
+          deliveryNow,
           deliveryNow,
           deliveryNow
         )

@@ -31,6 +31,7 @@ function matches(
     (filter === "standard" && active && user.access.tier === "standard") ||
     (filter === "expiring" &&
       active &&
+      user.access.source === "manual" &&
       user.access.endsAt !== null &&
       user.access.endsAt <= now + 7 * 86_400_000) ||
     (filter === "expired" && user.access.status === "expired") ||
@@ -73,7 +74,7 @@ export async function listAdminUsers(
     const page = await listWorkOSUsers(env, cursor)
     const userIds = page.users.map((user) => user.id)
     const [entitlements, deviceLists] = await Promise.all([
-      listAccountEntitlements(env.DB, userIds, now),
+      listAccountEntitlements(env, userIds, now),
       listAccountDevicesForUsers(env.DB, userIds),
     ])
     for (let index = 0; index < page.users.length; index++) {
@@ -87,6 +88,7 @@ export async function listAdminUsers(
         createdAt: Date.parse(user.createdAt),
         subscription: entitlements.get(user.id)!.manual,
         billing: entitlements.get(user.id)!.billing,
+        managed: entitlements.get(user.id)!.managed,
         access: entitlements.get(user.id)!.access,
         devices: deviceLists.get(user.id) ?? [],
       }

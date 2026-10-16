@@ -315,9 +315,7 @@ export async function desktopSessionResponse(
   now = Date.now()
 ) {
   const entitlement =
-    row.active === 1
-      ? await getAccountEntitlement(env.DB, row.user_id, now)
-      : null
+    row.active === 1 ? await getAccountEntitlement(env, row.user_id, now) : null
   const subscription = entitlement?.grant ?? null
   // A removal can race the subscription read; sign only the latest session.
   row = (await getDesktopSession(env.DB, row.id))!

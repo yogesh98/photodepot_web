@@ -382,23 +382,31 @@ migrated to reminders disabled, preserving their original audit history.
 
 ### Stripe billing boundary
 
-WorkOS owns identity, desktop sessions own device approval, and one server access
-resolver owns local-project/hosting entitlement. The existing `subscriptions` table
-stores manual grants rather than invoices or paid subscription state. The desktop
-receives the effective signed permission and deadline, without billing-provider data.
+WorkOS Stripe Entitlements owns paid feature access. The backend validates the
+organization-scoped entitlement claim for `PHOTODEPOT_WORKOS_ENTITLEMENT`; it does
+not reconcile Stripe invoices or maintain subscription state for authorization.
+Stripe still provides hosted Checkout, Customer Portal, promotion codes and Tax.
+Its live subscription dates are display-only.
 
-Optional Stripe Billing uses hosted subscription Checkout, Customer Portal,
-native promotion codes, and automatic Tax calculation. A private personal WorkOS
-organization links each Stripe customer separately from the administration
-organization, without team UI or seat sync. Existing manual accounts explicitly
-opt into Checkout. Separate billing records and a stable account entitlement
-projection preserve manual history and desktop receipt compatibility.
+Each billing account has a private WorkOS organization, active membership and
+Stripe customer link, separate from administration. A separate AuthKit PKCE
+flow authorizes one encrypted backend-owned WorkOS session for billing access.
+Browser login/logout and individual Mac removal remain independent. Tokens stay
+on the server, with serialized refresh and fail-closed expiry/revocation. An
+expired billing session can be reconnected from the account dashboard.
 
-Paid changes are confirmed through signed Stripe webhooks. Unpaid renewal terms
-do not extend access. A local expiry edit is never a billing extension; manual
-access-changing operations reject ongoing paid subscriptions. Manage paid terms
-through Stripe and use its confirmed result for access. See
-[the integration plan, configuration, and launch checks](deploy/STRIPE.md).
+The existing signed desktop protocol and stable receipt IDs remain compatible.
+A fresh WorkOS proof permits the existing 48-hour offline authorization allowance;
+that deadline is not a billing renewal date. Failed provider checks cannot extend
+it. Manual grants remain independent and do not change Stripe charges. Obsolete
+manual trial reminders are suppressed when WorkOS confirms standard access.
+
+Apply migration 0016 with the earlier migrations before running this backend.
+The old Stripe ledger tables remain historical only; no runtime authorization
+reads them and no custom Stripe subscription webhook is required. The add-on must
+be connected to a standard Stripe account, using test mode for development;
+WorkOS currently does not support Stripe Sandbox accounts. See
+[configuration and verification](deploy/STRIPE.md).
 
 ### Daily renewal queue and trial reminders
 

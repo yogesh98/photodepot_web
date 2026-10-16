@@ -3,18 +3,6 @@ import type { D1Database } from "@cloudflare/workers-types"
 export class BillingConflictError extends Error {}
 export class BillingUnavailableError extends Error {}
 
-export interface BillingSubscription {
-  id: string
-  userId: string
-  status: string
-  startsAt: number
-  endsAt: number
-  priceId: string
-  cancelAtPeriodEnd: boolean
-  revision: number
-  updatedAt: number
-}
-
 export interface BillingCustomer {
   user_id: string
   stripe_customer_id: string | null
@@ -39,28 +27,7 @@ export async function getBillingCustomer(db: D1Database, userId: string) {
     .first<BillingCustomer>()
 }
 
-export async function getBillingSubscription(
-  db: D1Database,
-  userId: string
-): Promise<BillingSubscription | null> {
-  const row = await db
-    .prepare(
-      `SELECT id, user_id AS userId, status,
-    starts_at AS startsAt, access_ends_at AS endsAt, price_id AS priceId,
-    cancel_at_period_end AS cancelAtPeriodEnd, revision, updated_at AS updatedAt
-    FROM stripe_subscriptions WHERE user_id = ?
-    ORDER BY (status NOT IN ('canceled', 'incomplete_expired')) DESC, starts_at DESC, id DESC LIMIT 1`
-    )
-    .bind(userId)
-    .first<
-      Omit<BillingSubscription, "cancelAtPeriodEnd"> & {
-        cancelAtPeriodEnd: number
-      }
-    >()
-  return row ? { ...row, cancelAtPeriodEnd: row.cancelAtPeriodEnd === 1 } : null
-}
-
-/** Both customer actions and webhook reconciliation share this account lease. */
+/** Serialize customer creation, Checkout and Portal operations for an account. */
 export async function lockBillingAccount(
   db: D1Database,
   userId: string,

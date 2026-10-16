@@ -17,6 +17,8 @@ type BillingState = {
   hasCustomer: boolean
   portalEnabled?: boolean
   trialDays: number | null
+  accessConnected: boolean
+  managedBy: "workos"
 }
 class BillingError extends Error {
   constructor(
@@ -37,15 +39,22 @@ const statusLabels: Record<string, string> = {
   canceled: "Canceled subscription",
   incomplete_expired: "Subscription setup expired",
 }
-async function billingApi(body?: object, signal?: AbortSignal) {
-  const response = await fetch("/api/account/billing", {
-    method: body ? "POST" : "GET",
-    credentials: "same-origin",
-    cache: "no-store",
-    signal,
-    headers: body ? { "Content-Type": "application/json" } : {},
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  })
+async function billingApi(
+  body?: object,
+  signal?: AbortSignal,
+  refreshAccess = false
+) {
+  const response = await fetch(
+    `/api/account/billing${!body && refreshAccess ? "?refresh=true" : ""}`,
+    {
+      method: body ? "POST" : "GET",
+      credentials: "same-origin",
+      cache: "no-store",
+      signal,
+      headers: body ? { "Content-Type": "application/json" } : {},
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    }
+  )
   if (response.status === 401)
     throw new BillingError(
       "Your session expired. Sign in again, then refresh billing.",
@@ -79,6 +88,8 @@ function readBilling(value: unknown): BillingState {
       (interval) => interval !== "monthly" && interval !== "annual"
     ) ||
     typeof state.hasCustomer !== "boolean" ||
+    typeof state.accessConnected !== "boolean" ||
+    state.managedBy !== "workos" ||
     (state.portalEnabled !== undefined &&
       typeof state.portalEnabled !== "boolean") ||
     (state.trialDays !== null &&
@@ -107,15 +118,25 @@ function stripeRedirect(value: unknown) {
     throw new Error("Unable to open Stripe. Please try again.")
   return url.href
 }
+function billingRedirect(value: unknown, provider: unknown) {
+  if (provider === "workos") {
+    if (value !== "/api/account/billing/authorize")
+      throw new Error("Unable to connect billing. Please try again.")
+    return value
+  }
+  if (provider !== undefined && provider !== "stripe")
+    throw new Error("Unable to open billing. Please try again.")
+  return stripeRedirect(value)
+}
 
 export function AccountBilling({
   refreshVersion,
   disabled,
-  onSubscriptionChange,
+  onAccessRefresh,
 }: {
   refreshVersion: number
   disabled: boolean
-  onSubscriptionChange: (subscribed: boolean | null) => void
+  onAccessRefresh: () => void
 }) {
   const [billing, setBilling] = useState<BillingState | null>(null)
   const [loading, setLoading] = useState(true)
@@ -126,44 +147,48 @@ export function AccountBilling({
   const mounted = useRef(false)
   const request = useRef<AbortController | null>(null)
   const mutation = useRef(false)
-  const load = useCallback(async () => {
-    request.current?.abort()
-    const controller = new AbortController()
-    request.current = controller
-    setLoading(true)
-    try {
-      const state = readBilling(await billingApi(undefined, controller.signal))
-      if (!mounted.current || controller.signal.aborted) return
-      setBilling(state)
-      setError("")
-      setSessionExpired(false)
-      onSubscriptionChange(
-        state.subscription !== null &&
-          !terminalStatuses.has(state.subscription.status)
-      )
-    } catch (cause) {
-      if (!mounted.current || controller.signal.aborted) return
-      onSubscriptionChange(null)
-      setError(
-        cause instanceof Error ? cause.message : "Unable to load billing."
-      )
-      if (cause instanceof BillingError && cause.status === 401)
-        setSessionExpired(true)
-    } finally {
-      if (request.current === controller) {
-        request.current = null
-        if (mounted.current) setLoading(false)
+  const load = useCallback(
+    async (refreshAccess = false) => {
+      request.current?.abort()
+      const controller = new AbortController()
+      request.current = controller
+      setLoading(true)
+      try {
+        const state = readBilling(
+          await billingApi(undefined, controller.signal, refreshAccess)
+        )
+        if (!mounted.current || controller.signal.aborted) return
+        setBilling(state)
+        setError("")
+        setSessionExpired(false)
+        if (refreshAccess) onAccessRefresh()
+      } catch (cause) {
+        if (!mounted.current || controller.signal.aborted) return
+        setError(
+          cause instanceof Error ? cause.message : "Unable to load billing."
+        )
+        if (cause instanceof BillingError && cause.status === 401)
+          setSessionExpired(true)
+      } finally {
+        if (request.current === controller) {
+          request.current = null
+          if (mounted.current) setLoading(false)
+        }
       }
-    }
-  }, [onSubscriptionChange])
+    },
+    [onAccessRefresh]
+  )
   useEffect(() => {
     mounted.current = true
     queueMicrotask(() => {
       if (mounted.current) {
-        setCheckoutReturn(
-          new URLSearchParams(window.location.search).get("billing")
+        const returned = new URLSearchParams(window.location.search).get(
+          "billing"
         )
-        void load()
+        setCheckoutReturn(returned)
+        void load(
+          refreshVersion > 0 || returned === "success" || returned === "return"
+        )
       }
     })
     return () => {
@@ -183,8 +208,8 @@ export function AccountBilling({
       document.removeEventListener("visibilitychange", refresh)
     }
   }, [load])
-  async function openStripe(
-    action: "checkout" | "portal",
+  async function openBilling(
+    action: "checkout" | "portal" | "connect",
     interval?: BillingInterval
   ) {
     if (mutation.current || disabled || sessionExpired || loading) return
@@ -197,11 +222,11 @@ export function AccountBilling({
         ...(interval ? { interval } : {}),
       })
       if (!mounted.current) return
-      window.location.assign(stripeRedirect(result?.url))
+      window.location.assign(billingRedirect(result?.url, result?.provider))
     } catch (cause) {
       if (!mounted.current) return
       setError(
-        cause instanceof Error ? cause.message : "Unable to open Stripe."
+        cause instanceof Error ? cause.message : "Unable to open billing."
       )
       if (cause instanceof BillingError && cause.status === 401)
         setSessionExpired(true)
@@ -226,8 +251,18 @@ export function AccountBilling({
       </h3>
       {checkoutReturn === "success" && (
         <p role="status" className={styles.description}>
-          Checking subscription status. Access updates after Stripe confirms
-          your subscription.
+          Checking subscription access. Access updates after billing is
+          confirmed.
+        </p>
+      )}
+      {checkoutReturn === "connected" && (
+        <p role="status" className={styles.description}>
+          Billing connected. Choose a subscription to continue.
+        </p>
+      )}
+      {checkoutReturn === "return" && (
+        <p role="status" className={styles.description}>
+          Billing updated. Checking subscription access.
         </p>
       )}
       {checkoutReturn === "canceled" && (
@@ -304,7 +339,7 @@ export function AccountBilling({
                 className={styles.button}
                 variant="outline"
                 disabled={controlsDisabled}
-                onClick={() => void openStripe("checkout", interval)}
+                onClick={() => void openBilling("checkout", interval)}
               >
                 {busy === interval
                   ? "Opening Stripe…"
@@ -321,16 +356,31 @@ export function AccountBilling({
             className={styles.button}
             variant="outline"
             disabled={controlsDisabled}
-            onClick={() => void openStripe("portal")}
+            onClick={() => void openBilling("portal")}
           >
             {busy === "portal" ? "Opening Stripe…" : "Manage billing"}
             <ArrowRight />
           </Button>
         </div>
       )}
+      {billing?.hasCustomer && !billing.accessConnected && (
+        <div className={styles.actions}>
+          <Button
+            className={styles.button}
+            variant="outline"
+            disabled={controlsDisabled}
+            onClick={() => void openBilling("connect")}
+          >
+            {busy === "connect" ? "Connecting access…" : "Reconnect access"}
+            <ArrowRight />
+          </Button>
+        </div>
+      )}
       {!!busy && (
         <p role="status" className={styles.description}>
-          Opening secure Stripe billing…
+          {busy === "connect"
+            ? "Connecting subscription access…"
+            : "Opening secure Stripe billing…"}
         </p>
       )}
       {error && (
@@ -338,7 +388,7 @@ export function AccountBilling({
           className={styles.button}
           variant="outline"
           disabled={loading || !!busy}
-          onClick={() => void load()}
+          onClick={() => void load(true)}
         >
           <RefreshCw />
           {loading ? "Refreshing billing…" : "Refresh billing"}

@@ -47,8 +47,10 @@ Changed/revoked/expired terms, reminder opt-outs, and deleted accounts cancel pe
 verification is required; a changed recipient cancels retries to the previous address.
 Provider responses, credentials and message recipients are not logged.
 
-No payment provider, automatic charges, or renewal billing is connected.
+Reminders concern manual trial grants. WorkOS-confirmed subscription access
+suppresses obsolete trial notices; subscription billing remains separate.
 
 Reminder preferences are independent of access. The account-access migration maps
 old canceled-renewal preferences to reminders disabled, preserving dates and audits.
-Paid renewal messages will belong to the future billing provider.
+Stripe handles paid renewal and payment-recovery messages through its configured
+customer emails.

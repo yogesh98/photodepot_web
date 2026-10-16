@@ -192,6 +192,22 @@ function overview() {
 
 function accountAccess(user) {
   const grant = user.subscription
+  if (
+    user.managed?.enabled &&
+    user.managed.expiresAt > Date.now() &&
+    (!grant ||
+      grant.status === "revoked" ||
+      user.managed.expiresAt >= grant.endsAt)
+  )
+    return {
+      tier: "standard",
+      status: "active",
+      source: "workos",
+      startsAt: user.managed.issuedAt,
+      endsAt: user.managed.expiresAt,
+      canUseLocal: true,
+      canHost: true,
+    }
   const status = !grant
     ? "none"
     : grant.status === "revoked"
@@ -527,6 +543,9 @@ async function requestsApi(request, response, url) {
           subscription:
             state.users.find((user) => user.id === item.userId)?.subscription ??
             null,
+          managed:
+            state.users.find((user) => user.id === item.userId)?.managed ??
+            null,
         })),
       openCount: state.accountRequests.filter((item) =>
         ["pending", "acknowledged"].includes(item.status)
@@ -711,6 +730,8 @@ before(async () => {
           subscription: null,
           hasCustomer: false,
           trialDays: null,
+          accessConnected: false,
+          managedBy: "workos",
         })
       if (url.pathname === "/api/account/dashboard-access") {
         state.dashboardAccessQueries.push(Object.fromEntries(url.searchParams))
@@ -1442,6 +1463,84 @@ test("grants support 7-day trials, standard presets, custom durations, and exact
   assert.equal("durationDays" in state.requests.at(-1), false)
 })
 
+test("WorkOS-managed accounts display access checks and allow independent manual grants", async () => {
+  const user = state.users.find((entry) => entry.id === "user_cara")
+  user.managed = {
+    userId: user.id,
+    organizationId: "org_cara_billing",
+    enabled: true,
+    issuedAt: Date.now(),
+    expiresAt: Date.now() + 2 * day,
+    revision: 1,
+  }
+  await page.reload()
+  const row = page.getByRole("row").filter({ hasText: user.email })
+  await expect(row.getByText(/Billing access managed by WorkOS/)).toBeVisible()
+  await openAction("Grant access", user.email)
+  await expect(
+    page
+      .getByRole("dialog")
+      .getByText("Manual access does not change Stripe billing.")
+  ).toBeVisible()
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Cancel", exact: true })
+    .click()
+  await page
+    .getByRole("button", { name: `View ${user.email}`, exact: true })
+    .click()
+  await expect(
+    page.getByText("WorkOS subscription access", { exact: true })
+  ).toBeVisible()
+  await expect(
+    page.getByText("Offline access valid until", { exact: true })
+  ).toBeVisible()
+})
+
+test("a manual access request can be approved while WorkOS billing access is active", async () => {
+  const user = state.users[0]
+  user.managed = {
+    userId: user.id,
+    organizationId: "org_alice_billing",
+    enabled: true,
+    issuedAt: Date.now(),
+    expiresAt: Date.now() + 2 * day,
+    revision: 1,
+  }
+  state.accountRequests.push({
+    id: "request_00000000-0000-4000-8000-000000000099",
+    userId: user.id,
+    email: user.email,
+    action: "renewal",
+    deviceId: null,
+    message: "Request additional manual access",
+    status: "pending",
+    revision: 1,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    adminNote: "",
+    handledBy: "",
+  })
+  await page.goto(`${origin}/admin?view=operations`)
+  const requests = page.getByRole("region", { name: /Customer requests/ })
+  await expect(
+    requests.getByText(/Billing access managed by WorkOS/)
+  ).toBeVisible()
+  await requests
+    .getByRole("button", { name: "Approve and extend", exact: true })
+    .click()
+  await expect(
+    page
+      .getByRole("dialog")
+      .getByText("Manual access does not change Stripe billing.")
+  ).toBeVisible()
+  await expect(
+    page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Approve and extend", exact: true })
+  ).toBeEnabled()
+})
+
 test("details, notes, extension, revoke, restore, and Mac reset use guarded mutations", async () => {
   await page
     .getByRole("button", { name: "View alice@example.test", exact: true })
@@ -1524,7 +1623,7 @@ test("exact extensions preserve revoked state and expired restores explain the o
   ).toBeEnabled()
   await openAction("Restore access", "dan@example.test")
   await expect(
-    page.getByText(/Expired access must also be extended/)
+    page.getByText(/Expired manual access must also be extended/)
   ).toBeVisible()
   await page.getByRole("button", { name: "Cancel", exact: true }).click()
   await openAction("Extend access", "dan@example.test")

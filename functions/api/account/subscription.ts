@@ -76,7 +76,7 @@ export async function handleAccountSubscription(request: Request, env: Env) {
         )
         return respond(
           json({
-            access: (await getAccountEntitlement(env.DB, auth.userId)).access,
+            access: (await getAccountEntitlement(env, auth.userId)).access,
             reminders: {
               enabled: grant.remindersEnabled,
               revision: grant.revision,
@@ -110,7 +110,7 @@ export async function handleAccountSubscription(request: Request, env: Env) {
       })
       return respond(json(result, result.created ? 201 : 200))
     }
-    const entitlement = await getAccountEntitlement(env.DB, auth.userId)
+    const entitlement = await getAccountEntitlement(env, auth.userId)
     const grant = entitlement.manual
     return respond(
       json({

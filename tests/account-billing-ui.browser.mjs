@@ -29,6 +29,8 @@ function fixtures() {
       hasCustomer: false,
       portalEnabled: true,
       trialDays: null,
+      accessConnected: true,
+      managedBy: "workos",
     },
     access: {
       tier: "standard",
@@ -41,10 +43,12 @@ function fixtures() {
     },
     posts: [],
     reads: 0,
+    readQueries: [],
     getStatus: 200,
     postStatus: 200,
     postDelay: 0,
     redirect: "https://checkout.stripe.com/c/pay/test_checkout",
+    provider: "stripe",
   }
 }
 
@@ -57,6 +61,7 @@ before(async () => {
       if (url.pathname === "/api/account/billing") {
         if (request.method === "GET") {
           state.reads++
+          state.readQueries.push(Object.fromEntries(url.searchParams))
           return respond(
             response,
             state.getStatus,
@@ -74,9 +79,13 @@ before(async () => {
           response,
           state.postStatus,
           state.postStatus === 200
-            ? { url: state.redirect }
+            ? { url: state.redirect, provider: state.provider }
             : { error: "Unable to open billing." }
         )
+      }
+      if (url.pathname === "/api/account/billing/authorize") {
+        response.writeHead(200, { "content-type": "text/html" })
+        return response.end("<h1>WorkOS billing fixture</h1>")
       }
       if (url.pathname === "/api/account/subscription")
         return respond(response, 200, {
@@ -217,7 +226,7 @@ test("subscription review requires an explicit click and prevents duplicate Chec
   assert.deepEqual(state.posts, [{ action: "checkout", interval: "monthly" }])
 })
 
-test("paid subscriptions suppress manual extensions even when manual access lasts longer", async () => {
+test("paid subscriptions retain independent manual requests and hosted billing controls", async () => {
   state.billing.subscription = {
     status: "active",
     endsAt: Date.now() + 30 * 86_400_000,
@@ -234,7 +243,12 @@ test("paid subscriptions suppress manual extensions even when manual access last
   ).toBeVisible()
   await expect(
     page.getByRole("button", { name: "Request extension", exact: true })
-  ).toHaveCount(0)
+  ).toBeEnabled()
+  await expect(
+    page.getByText("Manual access does not change Stripe billing.", {
+      exact: false,
+    })
+  ).toBeVisible()
   await expect(
     page.getByRole("button", {
       name: "Review monthly subscription",
@@ -252,6 +266,36 @@ test("paid subscriptions suppress manual extensions even when manual access last
   await page.waitForURL("https://billing.stripe.com/p/session/test_portal")
   assert.deepEqual(state.posts, [{ action: "portal" }])
 })
+
+for (const status of ["canceled", "incomplete_expired"]) {
+  test(`a ${status} paid-only account can request manual access again`, async () => {
+    state.billing.subscription = {
+      status,
+      endsAt: Date.now() - 86_400_000,
+      cancelAtPeriodEnd: false,
+    }
+    state.billing.hasCustomer = true
+    state.access = {
+      tier: "free",
+      status: "revoked",
+      source: "workos",
+      startsAt: Date.now() - 30 * 86_400_000,
+      endsAt: Date.now() - 86_400_000,
+      canUseLocal: false,
+      canHost: false,
+    }
+    await page.goto(`${origin}/account`)
+    await expect(
+      page.getByRole("button", { name: "Request extension", exact: true })
+    ).toBeEnabled()
+    await expect(
+      page.getByRole("button", {
+        name: "Review monthly subscription",
+        exact: true,
+      })
+    ).toBeEnabled()
+  })
+}
 
 test("a pending subscription with no paid period never renders an epoch date or duplicate offer", async () => {
   state.billing.subscription = {
@@ -274,7 +318,7 @@ test("a pending subscription with no paid period never renders an epoch date or 
   ).toHaveCount(0)
   await expect(
     page.getByRole("button", { name: "Request extension", exact: true })
-  ).toHaveCount(0)
+  ).toBeEnabled()
 })
 
 test("expired sessions offer sign-in recovery before another Checkout attempt", async () => {
@@ -333,7 +377,7 @@ test("a Checkout return query never claims payment or grants access", async () =
   await expect(
     page
       .getByRole("status")
-      .filter({ hasText: "Access updates after Stripe confirms" })
+      .filter({ hasText: "Access updates after billing is confirmed" })
   ).toBeVisible()
   await expect(
     page.getByRole("button", {
@@ -349,7 +393,7 @@ test("a Checkout return query never claims payment or grants access", async () =
   assert.deepEqual(state.posts, [])
 })
 
-test("an unknown billing state keeps manual mutations unavailable until retry succeeds", async () => {
+test("a billing outage does not block independent manual access requests", async () => {
   state.getStatus = 503
   await page.goto(`${origin}/account`)
   const request = page.getByRole("button", {
@@ -361,11 +405,100 @@ test("an unknown billing state keeps manual mutations unavailable until retry su
       .getByRole("region", { name: "Subscription billing" })
       .getByRole("alert")
   ).toHaveText("Billing is unavailable.")
-  await expect(request).toBeDisabled()
+  await expect(request).toBeEnabled()
   state.getStatus = 200
   state.billing.enabled = false
   await page
     .getByRole("button", { name: "Refresh billing", exact: true })
     .click()
   await expect(request).toBeEnabled()
+})
+
+test("Checkout can connect billing through the fixed WorkOS authorization route", async () => {
+  state.provider = "workos"
+  state.redirect = "/api/account/billing/authorize"
+  await page.goto(`${origin}/account`)
+  await page
+    .getByRole("button", { name: "Review monthly subscription", exact: true })
+    .click()
+  await page.waitForURL(`${origin}/api/account/billing/authorize`)
+  assert.deepEqual(state.posts, [{ action: "checkout", interval: "monthly" }])
+})
+
+test("an existing customer can reconnect subscription access through WorkOS", async () => {
+  state.billing.hasCustomer = true
+  state.billing.accessConnected = false
+  state.provider = "workos"
+  state.redirect = "/api/account/billing/authorize"
+  await page.goto(`${origin}/account`)
+  await page
+    .getByRole("button", { name: "Reconnect access", exact: true })
+    .click()
+  await page.waitForURL(`${origin}/api/account/billing/authorize`)
+  assert.deepEqual(state.posts, [{ action: "connect" }])
+})
+
+for (const redirect of [
+  "https://evil.test/api/account/billing/authorize",
+  "/api/account/billing/authorize?returnTo=https://evil.test",
+  "/api/account/billing/other",
+]) {
+  test(`WorkOS redirects reject an unexpected target: ${redirect}`, async () => {
+    state.provider = "workos"
+    state.redirect = redirect
+    await page.goto(`${origin}/account`)
+    await page
+      .getByRole("button", { name: "Review monthly subscription", exact: true })
+      .click()
+    await expect(
+      page
+        .getByRole("region", { name: "Subscription billing" })
+        .getByRole("alert")
+    ).toHaveText("Unable to connect billing. Please try again.")
+    assert.equal(page.url(), `${origin}/account`)
+  })
+}
+
+test("the WorkOS connection return explains the next purchase step", async () => {
+  await page.goto(`${origin}/account?billing=connected`)
+  await expect(
+    page.getByText("Billing connected. Choose a subscription to continue.", {
+      exact: true,
+    })
+  ).toBeVisible()
+})
+
+test("billing returns and manual refresh renew access while polling uses cached claims", async () => {
+  await page.clock.install()
+  await page.goto(`${origin}/account?billing=return`)
+  await expect(
+    page.getByRole("button", {
+      name: "Review monthly subscription",
+      exact: true,
+    })
+  ).toBeEnabled()
+  assert.deepEqual(state.readQueries, [{ refresh: "true" }])
+  await page.clock.fastForward(30_000)
+  await expect.poll(() => state.reads).toBe(2)
+  assert.deepEqual(state.readQueries[1], {})
+  await page.getByRole("button", { name: "Refresh", exact: true }).click()
+  await expect.poll(() => state.reads).toBe(3)
+  assert.deepEqual(state.readQueries[2], { refresh: "true" })
+})
+
+test("WorkOS access expiry is labeled separately from the Stripe billing period", async () => {
+  state.access.source = "workos"
+  state.access.endsAt = Date.now() + 2 * 86_400_000
+  state.billing.subscription = {
+    status: "active",
+    endsAt: Date.now() + 30 * 86_400_000,
+    cancelAtPeriodEnd: false,
+  }
+  await page.goto(`${origin}/account`)
+  await expect(
+    page.getByText("Offline access valid until", { exact: true })
+  ).toBeVisible()
+  await expect(
+    page.getByText("Current billing period ends", { exact: false })
+  ).toBeVisible()
 })

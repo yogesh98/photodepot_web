@@ -4,12 +4,11 @@ import type {
   AccountAccess,
   AccountDevice,
   SubscriptionSummary,
+  WorkOSEntitlementSummary,
   WorkOSUserSummary,
 } from "./subscription-types.ts"
 import {
   subscriptionSummary,
-  assertManualAccessAllowed,
-  manualAccessGuard,
   type SubscriptionRow,
 } from "./subscription-store.ts"
 
@@ -49,6 +48,8 @@ export interface CustomerAccount {
 export interface AdminRequestQueue {
   requests: (AccountRequest & {
     subscription: SubscriptionSummary | null
+    managed?: WorkOSEntitlementSummary | null
+    access?: AccountAccess
     user: Omit<WorkOSUserSummary, "subscription" | "access" | "devices"> | null
   })[]
   openCount: number
@@ -364,10 +365,9 @@ export async function approveAccountRequest(
   const item = await getAccountRequest(database, input.id)
   if (!item || item.action !== "renewal")
     throw new TypeError("Choose an access request.")
-  await assertManualAccessAllowed(database, item.userId)
   const auditId = randomUUID()
   const requestGuard = `EXISTS (SELECT 1 FROM subscription_requests WHERE id = ? AND user_id = ? AND action = 'renewal'
-    AND revision = ? AND status IN ('pending', 'acknowledged')) AND ${manualAccessGuard}`
+    AND revision = ? AND status IN ('pending', 'acknowledged'))`
   const mutation =
     input.expectedSubscriptionRevision === 0
       ? database
@@ -384,8 +384,7 @@ export async function approveAccountRequest(
             now,
             input.id,
             item.userId,
-            input.expectedRevision,
-            item.userId
+            input.expectedRevision
           )
       : database
           .prepare(
@@ -401,8 +400,7 @@ export async function approveAccountRequest(
             input.expectedSubscriptionRevision,
             input.id,
             item.userId,
-            input.expectedRevision,
-            item.userId
+            input.expectedRevision
           )
   const results = await database.batch([
     mutation,
@@ -447,10 +445,8 @@ export async function approveAccountRequest(
         input.expectedRevision + 1
       ),
   ])
-  if (!results[0].results.length || !results[2].results.length) {
-    await assertManualAccessAllowed(database, item.userId)
+  if (!results[0].results.length || !results[2].results.length)
     throw new AccountRequestConflictError()
-  }
   return {
     request: summary(results[2].results[0] as unknown as RequestRow),
     subscription: subscriptionSummary(

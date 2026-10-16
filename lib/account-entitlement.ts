@@ -6,18 +6,17 @@ import {
   subscriptionSummary,
   type SubscriptionRow,
 } from "./subscription-store.ts"
-import type { BillingSubscriptionSummary } from "./subscription-types.ts"
+import type { WorkOSEntitlementSummary } from "./subscription-types.ts"
+import type { Env } from "./cloudflare.ts"
+import { getWorkOSEntitlement } from "./workos-entitlements.ts"
 
-interface BillingRow {
-  id: string
+interface ManagedRow {
   user_id: string
-  status: string
-  starts_at: number
-  access_ends_at: number
-  price_id: string
-  cancel_at_period_end: number
+  organization_id: string
+  enabled: number
+  issued_at: number
+  expires_at: number
   revision: number
-  updated_at: number
 }
 interface ProjectionRow {
   id: string
@@ -25,31 +24,24 @@ interface ProjectionRow {
   fingerprint: string
 }
 
-const billingOrder =
-  "CASE WHEN status NOT IN ('canceled','incomplete_expired') THEN 0 ELSE 1 END, starts_at DESC, id DESC"
-const billingQuery = `SELECT * FROM stripe_subscriptions WHERE user_id = ? ORDER BY ${billingOrder} LIMIT 1`
-
-function billingSummary(
-  row: BillingRow | undefined
-): BillingSubscriptionSummary | null {
+function managedSummary(
+  row: ManagedRow | undefined
+): WorkOSEntitlementSummary | null {
   return row
     ? {
-        id: row.id,
         userId: row.user_id,
-        status: row.status,
-        startsAt: row.starts_at,
-        endsAt: row.access_ends_at,
-        priceId: row.price_id,
-        cancelAtPeriodEnd: row.cancel_at_period_end === 1,
+        organizationId: row.organization_id,
+        enabled: row.enabled === 1,
+        issuedAt: row.issued_at,
+        expiresAt: row.expires_at,
         revision: row.revision,
-        updatedAt: row.updated_at,
       }
     : null
 }
 
-/** Snapshot inputs and CAS the receipt projection; a concurrent grant/webhook forces a retry. */
+/** Snapshot inputs and CAS the receipt projection; a concurrent grant/token refresh forces a retry. */
 export async function getAccountEntitlement(
-  database: D1Database,
+  source: D1Database | Env,
   userId: string,
   now = Date.now()
 ) {
@@ -60,10 +52,38 @@ export async function getAccountEntitlement(
     now < 0
   )
     throw new TypeError("Invalid account access request.")
+  const started = Date.now()
+  const requestedAt = now
+  const decisionNow = () => requestedAt + Math.max(0, Date.now() - started)
+  const env = "DB" in source ? source : null
+  const database = env ? env.DB : (source as D1Database)
+  let allowManaged = true
+  if (env) {
+    try {
+      // A missing/revoked dedicated session cannot revive an old cached proof.
+      allowManaged = (await getWorkOSEntitlement(env, userId, { now })) !== null
+    } catch (error) {
+      // An independent valid manual grant survives an upstream outage.
+      const row = await database
+        .prepare(`${subscriptionQuery} WHERE s.user_id = ?`)
+        .bind(userId)
+        .first<SubscriptionRow>()
+      if (
+        !resolveAccountAccess(
+          row ? subscriptionSummary(row, decisionNow()) : null,
+          decisionNow()
+        ).canHost
+      )
+        throw error
+      allowManaged = false
+    }
+  }
   for (let attempt = 0; attempt < 8; attempt++) {
     const snapshot = await database.batch([
       database.prepare(`${subscriptionQuery} WHERE s.user_id = ?`).bind(userId),
-      database.prepare(billingQuery).bind(userId),
+      database
+        .prepare("SELECT * FROM workos_entitlements WHERE user_id = ?")
+        .bind(userId),
       database
         .prepare(
           "SELECT id,revision,fingerprint FROM account_entitlements WHERE user_id = ?"
@@ -72,34 +92,36 @@ export async function getAccountEntitlement(
     ])
     const manualRow = snapshot[0].results[0] as unknown as
       SubscriptionRow | undefined
-    const billingRow = snapshot[1].results[0] as unknown as
-      BillingRow | undefined
+    const managedRow = snapshot[1].results[0] as unknown as
+      ManagedRow | undefined
     const prior = snapshot[2].results[0] as unknown as ProjectionRow | undefined
+    if (env) now = decisionNow()
     const manual = manualRow ? subscriptionSummary(manualRow, now) : null
-    const billing = billingSummary(billingRow)
-    const selected = selectAccountGrant(manual, billing, now)
-    const access = resolveAccountAccess(manual, now, billing)
+    const managed = allowManaged ? managedSummary(managedRow) : null
+    const billing = null
+    const selected = selectAccountGrant(manual, managed, now)
+    const access = resolveAccountAccess(manual, now, managed)
     // Accounts without any entitlement have never received a license identity.
     if (!selected.grant && !prior)
-      return { manual, billing, access, grant: null }
+      return { manual, managed, billing, access, grant: null }
     const fingerprint = JSON.stringify([
       manualRow?.revision ?? 0,
-      billingRow?.id ?? null,
-      billingRow?.revision ?? 0,
+      managedRow?.revision ?? 0,
+      allowManaged,
       selected.source,
       selected.grant?.type ?? null,
       access.status,
       access.startsAt,
       access.endsAt,
     ])
-    // Guard both raw inputs, including absence and a newly preferred subscription.
+    // Guard both raw inputs, including absence of a managed proof.
     const guard = `COALESCE((SELECT revision FROM subscriptions WHERE user_id = ?),0) = ?
-      AND COALESCE((SELECT id || ':' || revision FROM stripe_subscriptions WHERE user_id = ? ORDER BY ${billingOrder} LIMIT 1),'') = ?`
+      AND COALESCE((SELECT revision FROM workos_entitlements WHERE user_id = ?),0) = ?`
     const bindings = [
       userId,
       manualRow?.revision ?? 0,
       userId,
-      billingRow ? `${billingRow.id}:${billingRow.revision}` : "",
+      managedRow?.revision ?? 0,
     ]
     const mutation = prior
       ? database
@@ -134,6 +156,7 @@ export async function getAccountEntitlement(
     if (!projection) continue
     return {
       manual,
+      managed,
       billing,
       access,
       grant: selected.grant
@@ -149,7 +172,7 @@ export async function getAccountEntitlement(
 }
 
 export async function listAccountEntitlements(
-  database: D1Database,
+  source: D1Database | Env,
   userIds: string[],
   now = Date.now()
 ) {
@@ -157,10 +180,19 @@ export async function listAccountEntitlements(
     string,
     Awaited<ReturnType<typeof getAccountEntitlement>>
   >()
-  for (let offset = 0; offset < userIds.length; offset += 10) {
+  const started = Date.now()
+  const uniqueIds = [...new Set(userIds)]
+  for (let offset = 0; offset < uniqueIds.length; offset += 10) {
     await Promise.all(
-      userIds.slice(offset, offset + 10).map(async (userId) => {
-        results.set(userId, await getAccountEntitlement(database, userId, now))
+      uniqueIds.slice(offset, offset + 10).map(async (userId) => {
+        results.set(
+          userId,
+          await getAccountEntitlement(
+            source,
+            userId,
+            now + ("DB" in source ? Math.max(0, Date.now() - started) : 0)
+          )
+        )
       })
     )
   }

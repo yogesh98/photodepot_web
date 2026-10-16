@@ -222,9 +222,6 @@ export function CustomerAccountPage() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
   const [sessionExpired, setSessionExpired] = useState(false)
-  const [billingSubscribed, setBillingSubscribed] = useState<boolean | null>(
-    null
-  )
   const [billingRefreshVersion, setBillingRefreshVersion] = useState(0)
   const [notice, setNotice] = useState("")
   const [form, setForm] = useState<RequestForm | null>(null)
@@ -270,6 +267,11 @@ export function CustomerAccountPage() {
       }
     }
   }, [])
+  const refreshAccess = useCallback(() => {
+    request.current?.abort()
+    request.current = null
+    void load()
+  }, [load])
   useEffect(() => {
     mounted.current = true
     queueMicrotask(() => {
@@ -425,7 +427,6 @@ export function CustomerAccountPage() {
     (request) => request.action === "renewal"
   )
   const active = access?.status === "active"
-  const paidSubscription = access?.source === "stripe" || billingSubscribed
   const status = active
     ? "Active"
     : access?.status === "revoked"
@@ -576,7 +577,7 @@ export function CustomerAccountPage() {
                     </span>
                     <div>
                       <p className={styles.plan}>
-                        {access?.source === "stripe"
+                        {access?.source === "workos"
                           ? access.tier === "trial"
                             ? "Subscription trial"
                             : "Subscription access"
@@ -591,19 +592,28 @@ export function CustomerAccountPage() {
                   {access?.source ? (
                     <dl className={styles.planDetails}>
                       <div>
-                        <dt>Access started</dt>
+                        <dt>
+                          {access.source === "workos"
+                            ? "Access checked"
+                            : "Access started"}
+                        </dt>
                         <dd>
                           <DateTime value={access.startsAt!} short />
                         </dd>
                       </div>
                       <div>
                         <dt>
-                          {access.status === "expired"
-                            ? "Access expired"
-                            : "Access until"}
+                          {access.source === "workos"
+                            ? "Offline access valid until"
+                            : access.status === "expired"
+                              ? "Access expired"
+                              : "Access until"}
                         </dt>
                         <dd>
-                          <DateTime value={access.endsAt!} short />
+                          <DateTime
+                            value={access.endsAt!}
+                            short={access.source !== "workos"}
+                          />
                         </dd>
                       </div>
                     </dl>
@@ -614,25 +624,18 @@ export function CustomerAccountPage() {
                       host collaboration.
                     </p>
                   )}
-                  {!paidSubscription && (
-                    <div className={styles.planActions}>
-                      <Button
-                        className={styles.button}
-                        onClick={() => open({ action: "request-renewal" })}
-                        disabled={
-                          busy ||
-                          sessionExpired ||
-                          renewalPending ||
-                          billingSubscribed === null
-                        }
-                      >
-                        {renewalPending ? <Check /> : <ArrowRight />}
-                        {renewalPending
-                          ? "Request awaiting review"
-                          : requestLabel}
-                      </Button>
-                    </div>
-                  )}
+                  <div className={styles.planActions}>
+                    <Button
+                      className={styles.button}
+                      onClick={() => open({ action: "request-renewal" })}
+                      disabled={busy || sessionExpired || renewalPending}
+                    >
+                      {renewalPending ? <Check /> : <ArrowRight />}
+                      {renewalPending
+                        ? "Request awaiting review"
+                        : requestLabel}
+                    </Button>
+                  </div>
                   {account.reminders.revision > 0 && (
                     <div className={styles.renewalInfo}>
                       <CalendarDays size={17} />
@@ -656,16 +659,15 @@ export function CustomerAccountPage() {
                       </div>
                     </div>
                   )}
-                  {!paidSubscription && (
-                    <p className={styles.billingNote}>
-                      <ShieldCheck size={13} />
-                      Access requests require administrator approval.
-                    </p>
-                  )}
+                  <p className={styles.billingNote}>
+                    <ShieldCheck size={13} />
+                    Access requests require administrator approval. Manual
+                    access does not change Stripe billing.
+                  </p>
                   <AccountBilling
                     refreshVersion={billingRefreshVersion}
                     disabled={busy || sessionExpired}
-                    onSubscriptionChange={setBillingSubscribed}
+                    onAccessRefresh={refreshAccess}
                   />
                 </CardContent>
               </Card>

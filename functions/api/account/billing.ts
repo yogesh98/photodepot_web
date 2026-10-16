@@ -13,6 +13,7 @@ import {
 import {
   billingConfiguration,
   billingSummary,
+  createBillingAccessConnection,
   createBillingCheckout,
   createBillingPortal,
 } from "../../../lib/stripe-billing.ts"
@@ -24,7 +25,14 @@ export async function handleAccountBilling(request: Request, env: Env) {
   const respond = (response: Response) => withAdminSession(response, auth)
   try {
     if (request.method === "GET")
-      return respond(json(await billingSummary(env, auth.userId)))
+      return respond(
+        json(
+          await billingSummary(env, auth.userId, {
+            forceRefresh:
+              new URL(request.url).searchParams.get("refresh") === "true",
+          })
+        )
+      )
     if (request.method !== "POST") {
       const response = json({ error: "Method not allowed." }, 405)
       response.headers.set("Allow", "GET, POST")
@@ -66,6 +74,8 @@ export async function handleAccountBilling(request: Request, env: Env) {
       )
     if (body.action === "portal" && keys.length === 1)
       return respond(json(await createBillingPortal(env, auth)))
+    if (body.action === "connect" && keys.length === 1)
+      return respond(json(await createBillingAccessConnection(env, auth)))
     throw new TypeError("Choose an available billing action.")
   } catch (error) {
     const status =

@@ -48,7 +48,7 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
         const [user, entitlement, devices, audit, requests, deviceAudit] =
           await Promise.all([
             getWorkOSUser(env, userId),
-            getAccountEntitlement(env.DB, userId, now),
+            getAccountEntitlement(env, userId, now),
             listAccountDeviceHistory(env.DB, userId),
             listSubscriptionAudit(env.DB, userId),
             listUserAdminRequests(env.DB, userId),
@@ -60,7 +60,7 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
           ])
         if (!user)
           return json({ error: "This user no longer exists in WorkOS." }, 404)
-        const { manual: subscription, access, billing } = entitlement
+        const { manual: subscription, access, billing, managed } = entitlement
         return json({
           user: {
             id: user.id,
@@ -71,6 +71,7 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
             createdAt: Date.parse(user.createdAt),
             subscription,
             billing,
+            managed,
             access,
             devices: devices
               .filter((device) => device.current)
@@ -81,6 +82,7 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
           },
           subscription,
           billing,
+          managed,
           access,
           devices,
           audit,
@@ -92,7 +94,7 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
         listAdminUsers(env, query, now),
         getSubscriptionOverview(env.DB, now),
       ])
-      return json({ ...page, overview, billingMode: "manual-and-stripe" })
+      return json({ ...page, overview, billingMode: "manual-and-workos" })
     }
     if (request.method !== "POST") {
       const response = json({ error: "Method not allowed." }, 405)
@@ -242,9 +244,14 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
         { reason, endsAt: body.endsAt as number | undefined }
       )
     }
-    const effective = await getAccountEntitlement(env.DB, user.id, now)
+    const effective = await getAccountEntitlement(env, user.id, now)
     return json(
-      { subscription, access: effective.access, billing: effective.billing },
+      {
+        subscription,
+        access: effective.access,
+        billing: effective.billing,
+        managed: effective.managed,
+      },
       body.action === "set" && revision === 0 ? 201 : 200
     )
   } catch (error) {

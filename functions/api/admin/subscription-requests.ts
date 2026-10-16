@@ -53,7 +53,7 @@ export async function handleAdminSubscriptionRequests(
         queue.requests.map((item) => item.userId)
       )
       const entitlements = await listAccountEntitlements(
-        env.DB,
+        env,
         queue.requests.map((item) => item.userId)
       )
       const users = new Map()
@@ -87,6 +87,7 @@ export async function handleAdminSubscriptionRequests(
             ...item,
             subscription: subscriptions.get(item.userId) ?? null,
             billing: entitlements.get(item.userId)?.billing ?? null,
+            managed: entitlements.get(item.userId)?.managed ?? null,
             access: entitlements.get(item.userId)!.access,
             user: users.get(item.userId) ?? null,
           })),

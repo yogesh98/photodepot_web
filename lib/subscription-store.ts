@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto"
+import { LICENSE_GRACE_MS } from "./license-crypto.ts"
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types"
 import type {
   SubscriptionAudit,
@@ -28,27 +29,6 @@ export class SubscriptionConflictError extends Error {
   constructor() {
     super("The subscription changed. Refresh and try again.")
     this.name = "SubscriptionConflictError"
-  }
-}
-
-export const manualAccessGuard =
-  "NOT EXISTS (SELECT 1 FROM stripe_subscriptions WHERE user_id = ? AND status NOT IN ('canceled','incomplete_expired'))"
-
-export async function assertManualAccessAllowed(
-  database: D1Database,
-  userId: string
-) {
-  const paid = await database
-    .prepare(
-      "SELECT id FROM stripe_subscriptions WHERE user_id = ? AND status NOT IN ('canceled','incomplete_expired') LIMIT 1"
-    )
-    .bind(userId)
-    .first()
-  if (paid) {
-    const error = new SubscriptionConflictError()
-    error.message =
-      "This account has a Stripe subscription. Manage its paid access and charge dates through Stripe billing."
-    throw error
   }
 }
 
@@ -177,27 +157,22 @@ export async function getSubscriptionOverview(
   )
   const row = await database
     .prepare(
-      `WITH ranked_paid AS (
-         SELECT *, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY
-           CASE WHEN status NOT IN ('canceled','incomplete_expired') THEN 0 ELSE 1 END,
-           starts_at DESC,id DESC) AS rank FROM stripe_subscriptions
-       ), users AS (
-         SELECT user_id FROM subscriptions UNION SELECT user_id FROM stripe_subscriptions
+      `WITH users AS (
+         SELECT user_id FROM subscriptions UNION SELECT user_id FROM workos_entitlements WHERE enabled=1
        ), candidates AS (
          SELECT m.id AS manual_id,m.type AS manual_type,m.end_at AS manual_end,
            CASE WHEN m.status='revoked' THEN 'revoked' WHEN m.end_at<=? THEN 'expired' ELSE 'active' END AS manual_status,
            (m.status='active' AND m.started_at<=? AND m.end_at>?) AS manual_valid,
-           p.id AS paid_id,p.access_ends_at AS paid_end,
-           CASE WHEN p.status='trialing' THEN 'trial' ELSE 'regular' END AS paid_type,
-           CASE WHEN p.status NOT IN ('active','trialing','past_due') THEN 'revoked' WHEN p.access_ends_at<=? THEN 'expired' ELSE 'active' END AS paid_status,
-           (p.status IN ('active','trialing','past_due') AND p.starts_at<=? AND p.access_ends_at>?) AS paid_valid
+           p.issued_at + ${LICENSE_GRACE_MS} AS paid_end,
+           CASE WHEN p.enabled=0 THEN 'revoked' WHEN p.expires_at<=? OR p.issued_at+${LICENSE_GRACE_MS}<=? THEN 'expired' ELSE 'active' END AS paid_status,
+           (p.enabled=1 AND p.issued_at<=? AND p.expires_at>? AND p.issued_at+${LICENSE_GRACE_MS}>?) AS paid_valid
          FROM users u LEFT JOIN subscriptions m ON m.user_id=u.user_id
-         LEFT JOIN ranked_paid p ON p.user_id=u.user_id AND p.rank=1
+         LEFT JOIN workos_entitlements p ON p.user_id=u.user_id
        ), choices AS (
          SELECT *, CASE WHEN paid_valid AND (NOT COALESCE(manual_valid,0) OR paid_end>=manual_end)
            THEN 1 WHEN manual_id IS NOT NULL THEN 0 ELSE 1 END AS choose_paid FROM candidates
        ), effective AS (
-         SELECT CASE WHEN choose_paid THEN paid_type ELSE manual_type END AS type,
+         SELECT choose_paid AS managed, CASE WHEN choose_paid THEN 'regular' ELSE manual_type END AS type,
            CASE WHEN choose_paid THEN paid_end ELSE manual_end END AS end_at,
            CASE WHEN choose_paid THEN paid_status ELSE manual_status END AS status,
            CASE WHEN choose_paid THEN paid_valid ELSE manual_valid END AS valid FROM choices
@@ -207,7 +182,7 @@ export async function getSubscriptionOverview(
        COALESCE(SUM(valid AND type = 'regular'), 0) AS activeStandard,
        COALESCE(SUM(status = 'expired'), 0) AS expired,
        COALESCE(SUM(status = 'revoked'), 0) AS revoked,
-       COALESCE(SUM(valid AND end_at <= ?), 0) AS expiringSoon,
+       COALESCE(SUM(valid AND NOT managed AND end_at <= ?), 0) AS expiringSoon,
        (SELECT COUNT(*) FROM waitlist) AS waitlistTotal,
        (SELECT COUNT(*) FROM waitlist WHERE julianday(created_at) >= julianday(?) AND julianday(created_at) <= julianday(?)) AS waitlistLast30Days,
        (SELECT COUNT(*) FROM subscription_requests WHERE status IN ('pending', 'acknowledged')) AS openRequests,
@@ -215,6 +190,8 @@ export async function getSubscriptionOverview(
        FROM effective`
     )
     .bind(
+      now,
+      now,
       now,
       now,
       now,
@@ -240,8 +217,7 @@ async function mutateWithAudit(
   actor: string,
   detail: string,
   reason: string,
-  now: number,
-  requiresManualAccess = false
+  now: number
 ): Promise<SubscriptionSummary> {
   // D1 executes a batch as one transaction. changes() observes the immediately
   // preceding conditional mutation, so conflicts cannot create audit records.
@@ -265,10 +241,7 @@ async function mutateWithAudit(
       ),
     database.prepare(`${subscriptionQuery} WHERE s.user_id = ?`).bind(userId),
   ])
-  if (!results[0].results[0]) {
-    if (requiresManualAccess) await assertManualAccessAllowed(database, userId)
-    throw new SubscriptionConflictError()
-  }
+  if (!results[0].results[0]) throw new SubscriptionConflictError()
   const row = results[2].results[0]
   if (!row) throw new Error("Updated subscription is unavailable")
   return subscriptionSummary(row, now)
@@ -295,32 +268,22 @@ export async function setSubscription(
     values.notes === undefined ? null : subscriptionNotes(values.notes)
   if ((type !== "trial" && type !== "regular") || endsAt <= now)
     throw new TypeError("Choose a subscription type and future expiration.")
-  await assertManualAccessAllowed(database, userId)
   const mutation =
     expectedRevision === 0
       ? database
           .prepare(
             `INSERT INTO subscriptions (id, user_id, type, status, started_at, end_at, updated_at, revision, notes)
-             SELECT ?, ?, ?, 'active', ?, ?, ?, 1, ? WHERE ${manualAccessGuard}
+             VALUES (?, ?, ?, 'active', ?, ?, ?, 1, ?)
              ON CONFLICT(user_id) DO NOTHING RETURNING *`
           )
-          .bind(
-            randomUUID(),
-            userId,
-            type,
-            now,
-            endsAt,
-            now,
-            notes ?? "",
-            userId
-          )
+          .bind(randomUUID(), userId, type, now, endsAt, now, notes ?? "")
       : database
           .prepare(
             `UPDATE subscriptions SET type = ?, status = 'active', started_at = ?,
              end_at = ?, updated_at = ?, revision = revision + 1, notes = COALESCE(?, notes)
-             WHERE user_id = ? AND revision = ? AND ${manualAccessGuard} RETURNING *`
+             WHERE user_id = ? AND revision = ? RETURNING *`
           )
-          .bind(type, now, endsAt, now, notes, userId, expectedRevision, userId)
+          .bind(type, now, endsAt, now, notes, userId, expectedRevision)
   return mutateWithAudit(
     database,
     mutation,
@@ -330,8 +293,7 @@ export async function setSubscription(
     actor,
     `Set ${type} access until ${new Date(endsAt).toISOString()}${notes !== null ? ` / Notes: ${notes || "(cleared)"}` : ""}`,
     reason,
-    now,
-    true
+    now
   )
 }
 
@@ -349,7 +311,6 @@ export async function changeSubscription(
   const reason = subscriptionReason(options.reason)
   if (!["revoke", "restore", "extend"].includes(action))
     throw new TypeError("Invalid subscription action.")
-  await assertManualAccessAllowed(database, userId)
   let mutation: D1PreparedStatement
   let detail: string
   if (action === "extend") {
@@ -370,16 +331,9 @@ export async function changeSubscription(
       mutation = database
         .prepare(
           `UPDATE subscriptions SET end_at = ?, updated_at = ?, revision = revision + 1
-           WHERE user_id = ? AND revision = ? AND end_at < ? AND ${manualAccessGuard} RETURNING *`
+           WHERE user_id = ? AND revision = ? AND end_at < ? RETURNING *`
         )
-        .bind(
-          options.endsAt,
-          now,
-          userId,
-          expectedRevision,
-          options.endsAt,
-          userId
-        )
+        .bind(options.endsAt, now, userId, expectedRevision, options.endsAt)
       detail = `Extended access until ${new Date(options.endsAt).toISOString()}`
     } else {
       if (
@@ -395,7 +349,7 @@ export async function changeSubscription(
         .prepare(
           `UPDATE subscriptions SET end_at = MAX(end_at, ?) + ?, updated_at = ?,
            revision = revision + 1 WHERE user_id = ? AND revision = ?
-           AND MAX(end_at, ?) <= ? AND ${manualAccessGuard} RETURNING *`
+           AND MAX(end_at, ?) <= ? RETURNING *`
         )
         .bind(
           now,
@@ -404,8 +358,7 @@ export async function changeSubscription(
           userId,
           expectedRevision,
           now,
-          maximumTimestamp - duration,
-          userId
+          maximumTimestamp - duration
         )
       detail = `Extended access by ${durationDays} ${durationDays === 1 ? "day" : "days"}`
     }
@@ -415,14 +368,13 @@ export async function changeSubscription(
     mutation = database
       .prepare(
         `UPDATE subscriptions SET status = ?, updated_at = ?, revision = revision + 1
-         WHERE user_id = ? AND revision = ? AND ${manualAccessGuard} RETURNING *`
+         WHERE user_id = ? AND revision = ? RETURNING *`
       )
       .bind(
         action === "revoke" ? "revoked" : "active",
         now,
         userId,
-        expectedRevision,
-        userId
+        expectedRevision
       )
     detail = action === "revoke" ? "Revoked access" : "Restored access"
   }
@@ -435,8 +387,7 @@ export async function changeSubscription(
     actor,
     detail,
     reason,
-    now,
-    true
+    now
   )
 }
 

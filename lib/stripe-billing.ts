@@ -5,13 +5,16 @@ import {
   BillingConflictError,
   BillingUnavailableError,
   getBillingCustomer,
-  getBillingSubscription,
   hasUsedManualTrial,
   lockBillingAccount,
   unlockBillingAccount,
   updateBillingCustomer,
   type BillingCustomer,
 } from "./stripe-billing-store.ts"
+import {
+  getWorkOSEntitlement,
+  hasWorkOSBillingSession,
+} from "./workos-entitlements.ts"
 
 export type BillingInterval = "monthly" | "annual"
 export interface BillingIdentity {
@@ -20,7 +23,6 @@ export interface BillingIdentity {
 }
 interface BillingConfig {
   secret: string
-  webhookSecret: string
   live: boolean
   origin: string
   prices: Partial<Record<BillingInterval, string>>
@@ -33,16 +35,6 @@ interface BillingDependencies {
   workos?: ReturnType<typeof createWorkOS>
 }
 const terminalStatuses = new Set(["canceled", "incomplete_expired"])
-const subscriptionStatuses = new Set([
-  "incomplete",
-  "incomplete_expired",
-  "trialing",
-  "active",
-  "past_due",
-  "canceled",
-  "unpaid",
-  "paused",
-])
 
 export function billingConfiguration(
   env: Env,
@@ -66,8 +58,6 @@ export function billingConfiguration(
     )
   )
     return fail()
-  const webhookSecret = env.STRIPE_WEBHOOK_SECRET ?? ""
-  if (!/^whsec_[A-Za-z0-9]+$/.test(webhookSecret)) return fail()
   let origin: string
   try {
     const url = new URL(env.PHOTODEPOT_STRIPE_ORIGIN ?? "")
@@ -119,7 +109,6 @@ export function billingConfiguration(
   if (!env.WORKOS_API_KEY || !env.WORKOS_CLIENT_ID) return fail()
   return {
     secret,
-    webhookSecret,
     live,
     origin,
     prices,
@@ -137,22 +126,54 @@ export function createBillingStripe(config: BillingConfig) {
   })
 }
 
-export async function billingSummary(env: Env, userId: string) {
+/** Stripe state is display-only. WorkOS entitlements alone authorize paid access. */
+export async function billingSummary(
+  env: Env,
+  userId: string,
+  options: { forceRefresh?: boolean; stripe?: Stripe } = {}
+) {
   const config = billingConfiguration(env, true)
-  if (!config)
-    return {
-      enabled: false,
-      intervals: [],
-      subscription: null,
-      hasCustomer: false,
-      portalEnabled: false,
-      trialDays: null,
-    }
-  const [customer, subscription, manualTrial] = await Promise.all([
-    getBillingCustomer(env.DB, userId),
-    getBillingSubscription(env.DB, userId),
-    config.trialDays ? hasUsedManualTrial(env.DB, userId) : false,
-  ])
+  const disabled = {
+    enabled: false,
+    intervals: [] as BillingInterval[],
+    subscription: null,
+    hasCustomer: false,
+    portalEnabled: false,
+    trialDays: null,
+    accessConnected: false,
+    managedBy: "workos" as const,
+  }
+  if (!config) return disabled
+  const customer = await getBillingCustomer(env.DB, userId)
+  let connected = await hasWorkOSBillingSession(env.DB, userId)
+  if (connected)
+    await getWorkOSEntitlement(env, userId, {
+      forceRefresh: options.forceRefresh,
+    })
+  connected = await hasWorkOSBillingSession(env.DB, userId)
+  const stripe = options.stripe ?? createBillingStripe(config)
+  const subscriptions = customer?.stripe_customer_id
+    ? await stripe.subscriptions.list({
+        customer: customer.stripe_customer_id,
+        status: "all",
+        limit: 100,
+      })
+    : null
+  if (subscriptions?.has_more)
+    throw new BillingUnavailableError("Billing history requires review.")
+  const subscription =
+    subscriptions?.data.find((sub) => !terminalStatuses.has(sub.status)) ??
+    subscriptions?.data[0] ??
+    null
+  if (
+    subscription &&
+    (subscription.livemode !== config.live ||
+      objectId(subscription.customer) !== customer!.stripe_customer_id)
+  )
+    throw new BillingUnavailableError("Billing customer mismatch.")
+  const manualTrial = config.trialDays
+    ? await hasUsedManualTrial(env.DB, userId)
+    : false
   return {
     enabled:
       env.PHOTODEPOT_STRIPE_ENABLED === "true" ||
@@ -164,8 +185,18 @@ export async function billingSummary(env: Env, userId: string) {
     subscription: subscription
       ? {
           status: subscription.status,
-          endsAt: subscription.endsAt,
-          cancelAtPeriodEnd: subscription.cancelAtPeriodEnd,
+          endsAt:
+            (subscription.status === "trialing" && subscription.trial_end
+              ? subscription.trial_end
+              : Math.max(
+                  0,
+                  ...subscription.items.data.map(
+                    (item) => item.current_period_end
+                  )
+                )) * 1000,
+          cancelAtPeriodEnd: Boolean(
+            subscription.cancel_at_period_end || subscription.cancel_at
+          ),
         }
       : null,
     hasCustomer: Boolean(customer?.stripe_customer_id),
@@ -173,9 +204,12 @@ export async function billingSummary(env: Env, userId: string) {
     trialDays:
       env.PHOTODEPOT_STRIPE_ENABLED !== "true" ||
       customer?.trial_used ||
-      manualTrial
+      manualTrial ||
+      subscriptions?.data.some((sub) => Boolean(sub.trial_start))
         ? null
         : config.trialDays,
+    accessConnected: connected,
+    managedBy: "workos" as const,
   }
 }
 
@@ -244,6 +278,27 @@ async function ensureCustomer(
     throw new BillingUnavailableError(
       "Billing organization does not match this account."
     )
+  // Entitlements are issued only for an active membership in this private org.
+  const memberships = await workos.userManagement.listOrganizationMemberships({
+    organizationId: organization.id,
+    statuses: ["active", "inactive", "pending"],
+    limit: 100,
+  })
+  if (
+    memberships.listMetadata.after ||
+    memberships.data.some((membership) => membership.userId !== identity.userId)
+  )
+    throw new BillingUnavailableError("Billing organization is not private.")
+  const membership = memberships.data.find(
+    (item) => item.userId === identity.userId
+  )
+  if (membership && membership.status !== "active")
+    throw new BillingUnavailableError("Billing membership is unavailable.")
+  if (!membership)
+    await workos.userManagement.createOrganizationMembership({
+      organizationId: organization.id,
+      userId: identity.userId,
+    })
   await updateBillingCustomer(env.DB, identity.userId, token, {
     workos_organization_id: organization.id,
   })
@@ -310,11 +365,6 @@ export async function createBillingCheckout(
     true
   )
   try {
-    const stored = await getBillingSubscription(env.DB, identity.userId)
-    if (stored && !terminalStatuses.has(stored.status))
-      throw new BillingConflictError(
-        "Manage your current subscription in billing settings."
-      )
     const { stripe, customerId } = await ensureCustomer(
       env,
       config,
@@ -323,6 +373,11 @@ export async function createBillingCheckout(
       token,
       deps
     )
+    if (!(await hasWorkOSBillingSession(env.DB, identity.userId)))
+      return {
+        url: "/api/account/billing/authorize",
+        provider: "workos" as const,
+      }
     const subscriptions = await stripe.subscriptions.list({
       customer: customerId,
       status: "all",
@@ -386,11 +441,20 @@ export async function createBillingCheckout(
           )
       }
       if (session.status === "open") {
-        if (row.checkout_price_id !== priceId)
-          throw new BillingConflictError(
-            "Finish your open checkout before selecting another billing interval."
-          )
-        return { url: safeStripeUrl(session.url, "checkout") }
+        if (row.checkout_price_id === priceId)
+          return {
+            url: safeStripeUrl(session.url, "checkout"),
+            provider: "stripe" as const,
+          }
+        // A cancel_url return leaves Checkout open. Close that session before
+        // replacing its price so only one session can complete a purchase.
+        const expired = await stripe.checkout.sessions.expire(session.id)
+        if (
+          expired.status !== "expired" ||
+          expired.livemode !== config.live ||
+          objectId(expired.customer) !== customerId
+        )
+          throw new BillingUnavailableError("Checkout could not be closed.")
       }
     }
     const pending = !row.checkout_session_id && row.checkout_started_at !== null
@@ -463,7 +527,10 @@ export async function createBillingCheckout(
       checkout_session_id: session.id,
       checkout_expires_at: session.expires_at * 1000,
     })
-    return { url: safeStripeUrl(session.url, "checkout") }
+    return {
+      url: safeStripeUrl(session.url, "checkout"),
+      provider: "stripe" as const,
+    }
   } finally {
     await unlockBillingAccount(env.DB, identity.userId, token)
   }
@@ -491,9 +558,34 @@ export async function createBillingPortal(
     const session = await stripe.billingPortal.sessions.create({
       customer: row.stripe_customer_id,
       configuration: config.portalConfiguration,
-      return_url: `${config.origin}/account`,
+      return_url: `${config.origin}/account?billing=return`,
     })
-    return { url: safeStripeUrl(session.url, "portal") }
+    return {
+      url: safeStripeUrl(session.url, "portal"),
+      provider: "stripe" as const,
+    }
+  } finally {
+    await unlockBillingAccount(env.DB, identity.userId, token)
+  }
+}
+
+/** Reconnect the dedicated WorkOS grant without creating a paid subscription. */
+export async function createBillingAccessConnection(
+  env: Env,
+  identity: BillingIdentity,
+  deps: BillingDependencies = {}
+) {
+  const config = billingConfiguration(env, true)
+  if (!config) throw new BillingUnavailableError("Billing is not configured.")
+  const { customer, token } = await lockBillingAccount(env.DB, identity.userId)
+  try {
+    if (!customer.stripe_customer_id)
+      throw new TypeError("Choose a subscription before connecting billing.")
+    await ensureCustomer(env, config, identity, customer, token, deps)
+    return {
+      url: "/api/account/billing/authorize",
+      provider: "workos" as const,
+    }
   } finally {
     await unlockBillingAccount(env.DB, identity.userId, token)
   }
@@ -509,233 +601,4 @@ function objectId(value: unknown): string | null {
   )
     return value.id
   return null
-}
-
-function invoiceSubscription(invoice: Stripe.Invoice) {
-  return objectId(invoice.parent?.subscription_details?.subscription)
-}
-
-/** Paid recurring lines, including positive upgrade prorations, prove a period. */
-export function paidInvoiceEnd(
-  invoice: Stripe.Invoice,
-  subscriptionId: string,
-  priceId: string,
-  currentPeriodEnd: number
-) {
-  if (
-    invoice.status !== "paid" ||
-    invoiceSubscription(invoice) !== subscriptionId
-  )
-    return 0
-  return invoice.lines.data.reduce((end, line) => {
-    const details = line.parent?.subscription_item_details
-    if (
-      line.pricing?.price_details?.price !== priceId ||
-      objectId(line.subscription) !== subscriptionId ||
-      !details ||
-      details.subscription !== subscriptionId ||
-      line.quantity !== 1 ||
-      !Number.isSafeInteger(line.amount) ||
-      line.amount < 0 ||
-      (details.proration && line.amount === 0) ||
-      !Number.isSafeInteger(line.period.end) ||
-      !Number.isSafeInteger(currentPeriodEnd) ||
-      line.period.end <= line.period.start
-    )
-      return end
-    return Math.max(end, Math.min(line.period.end, currentPeriodEnd) * 1000)
-  }, 0)
-}
-
-const supportedEvents = new Set([
-  "checkout.session.completed",
-  "checkout.session.async_payment_succeeded",
-  "checkout.session.async_payment_failed",
-  "invoice.paid",
-  "invoice.payment_failed",
-  "invoice.finalization_failed",
-  "customer.subscription.created",
-  "customer.subscription.updated",
-  "customer.subscription.deleted",
-  "customer.subscription.paused",
-  "customer.subscription.resumed",
-])
-
-/** Event data selects an account; fresh Stripe state determines its entitlement. */
-export async function processBillingEvent(
-  env: Env,
-  event: Stripe.Event,
-  deps: BillingDependencies = {}
-) {
-  const config = billingConfiguration(env, true)
-  if (!config) throw new BillingUnavailableError("Billing is not configured.")
-  if (event.livemode !== config.live || !supportedEvents.has(event.type)) return
-  const object = event.data.object
-  let customerId: string | null = null
-  let subscriptionId: string | null = null
-  let invoiceId: string | null = null
-  if (object.object === "subscription") {
-    customerId = objectId(object.customer)
-    subscriptionId = object.id
-  } else if (object.object === "invoice") {
-    customerId = objectId(object.customer)
-    subscriptionId = invoiceSubscription(object)
-    invoiceId = object.id
-  } else if (object.object === "checkout.session") {
-    customerId = objectId(object.customer)
-    subscriptionId = objectId(object.subscription)
-  }
-  if (!customerId || !subscriptionId) return
-  const row = await env.DB.prepare(
-    "SELECT * FROM stripe_customers WHERE stripe_customer_id = ?"
-  )
-    .bind(customerId)
-    .first<BillingCustomer>()
-  if (!row) return
-  const { token } = await lockBillingAccount(env.DB, row.user_id)
-  try {
-    if (
-      await env.DB.prepare("SELECT 1 FROM stripe_webhook_events WHERE id = ?")
-        .bind(event.id)
-        .first()
-    )
-      return
-    const stripe = deps.stripe ?? createBillingStripe(config)
-    const sub = await stripe.subscriptions.retrieve(subscriptionId, {
-      expand: ["latest_invoice"],
-    })
-    const previous = await env.DB.prepare(
-      "SELECT paid_through_at, price_id FROM stripe_subscriptions WHERE id = ? AND user_id = ?"
-    )
-      .bind(sub.id, row.user_id)
-      .first<{ paid_through_at: number; price_id: string }>()
-    const candidatePrice = sub.items.data[0]?.price.id
-    const supported = !(
-      sub.livemode !== config.live ||
-      objectId(sub.customer) !== customerId ||
-      sub.metadata.photodepot_user_id !== row.user_id ||
-      sub.items.has_more ||
-      sub.items.data.length !== 1 ||
-      sub.items.data[0]?.quantity !== 1 ||
-      !Object.values(config.prices).includes(candidatePrice) ||
-      !subscriptionStatuses.has(sub.status)
-    )
-    // Ignore unrelated subscriptions. A tracked subscription that leaves the
-    // configured catalog must stop authorizing access, including after a price
-    // is removed from deployment configuration or an invalid portal change.
-    if (!supported && !previous) return
-    const priceId = supported ? candidatePrice! : previous!.price_id
-    const status = supported
-      ? sub.status
-      : terminalStatuses.has(sub.status)
-        ? sub.status
-        : "unpaid"
-    let paidThrough = 0
-    const invoices: Stripe.Invoice[] = []
-    if (
-      supported &&
-      typeof sub.latest_invoice === "object" &&
-      sub.latest_invoice
-    )
-      invoices.push(sub.latest_invoice)
-    else if (supported && typeof sub.latest_invoice === "string")
-      invoices.push(await stripe.invoices.retrieve(sub.latest_invoice))
-    if (
-      supported &&
-      invoiceId &&
-      !invoices.some((invoice) => invoice.id === invoiceId)
-    )
-      invoices.push(await stripe.invoices.retrieve(invoiceId))
-    for (const invoice of invoices) {
-      if (
-        invoice.livemode !== config.live ||
-        objectId(invoice.customer) !== customerId ||
-        invoice.status !== "paid" ||
-        (sub.trial_start &&
-          invoice.billing_reason === "subscription_create" &&
-          invoice.total === 0)
-      )
-        continue
-      if (invoice.lines.has_more) {
-        const lines = await stripe.invoices.listLineItems(invoice.id, {
-          limit: 100,
-        })
-        // This one-seat product never needs more than 100 invoice lines. Refuse
-        // to acknowledge incomplete payment evidence and let the event retry.
-        if (lines.has_more)
-          throw new BillingUnavailableError("Invoice requires reconciliation.")
-        invoice.lines = lines
-      }
-      paidThrough = Math.max(
-        paidThrough,
-        paidInvoiceEnd(
-          invoice,
-          sub.id,
-          priceId,
-          sub.items.data[0].current_period_end
-        )
-      )
-    }
-    const now = Date.now()
-    const trialEnd =
-      supported && sub.status === "trialing" && sub.trial_end
-        ? sub.trial_end * 1000
-        : null
-    paidThrough = Math.max(previous?.paid_through_at ?? 0, paidThrough)
-    const endsAt = Math.max(paidThrough, trialEnd ?? 0)
-    // Conditional writes keep the entitlement and deduplication record in one
-    // D1 transaction, and a missing receipt rejects a lost account lease.
-    await env.DB.batch([
-      env.DB.prepare(
-        `INSERT INTO stripe_webhook_events (id, type, created_at, processed_at)
-        SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM stripe_customers WHERE user_id = ? AND operation_token = ? AND operation_lease_until > ?)`
-      ).bind(
-        event.id,
-        event.type,
-        event.created * 1000,
-        now,
-        row.user_id,
-        token,
-        now
-      ),
-      env.DB.prepare(
-        `INSERT INTO stripe_subscriptions (id, user_id, customer_id, status, price_id, starts_at, access_ends_at, paid_through_at, trial_ends_at, cancel_at_period_end, updated_at, revision)
-        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT MAX(revision) FROM stripe_subscriptions WHERE user_id = ?), 0) + 1
-        WHERE EXISTS (SELECT 1 FROM stripe_webhook_events WHERE id = ?) AND EXISTS (SELECT 1 FROM stripe_customers WHERE user_id = ? AND operation_token = ? AND operation_lease_until > ?)
-        ON CONFLICT(id) DO UPDATE SET status = excluded.status, price_id = excluded.price_id,
-        access_ends_at = excluded.access_ends_at, paid_through_at = excluded.paid_through_at, trial_ends_at = excluded.trial_ends_at,
-        cancel_at_period_end = excluded.cancel_at_period_end, updated_at = excluded.updated_at, revision = excluded.revision`
-      ).bind(
-        sub.id,
-        row.user_id,
-        customerId,
-        status,
-        priceId,
-        sub.start_date * 1000,
-        endsAt,
-        paidThrough,
-        trialEnd,
-        sub.cancel_at_period_end ? 1 : 0,
-        now,
-        row.user_id,
-        event.id,
-        row.user_id,
-        token,
-        now
-      ),
-      env.DB.prepare(
-        `UPDATE stripe_customers SET trial_used = MAX(trial_used, ?)
-        WHERE user_id = ? AND operation_token = ? AND operation_lease_until > ?`
-      ).bind(sub.trial_start ? 1 : 0, row.user_id, token, now),
-    ])
-    const receipt = await env.DB.prepare(
-      "SELECT 1 FROM stripe_webhook_events WHERE id = ?"
-    )
-      .bind(event.id)
-      .first()
-    if (!receipt)
-      throw new BillingUnavailableError("Billing lease expired before update.")
-  } finally {
-    await unlockBillingAccount(env.DB, row.user_id, token)
-  }
 }

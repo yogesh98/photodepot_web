@@ -169,33 +169,44 @@ async function accessClaims(
   accessToken: string,
   config: Configuration
 ): Promise<JWTPayload> {
-  let keys = jwks.get(config.clientId)
+  return verifyWorkOSAccessToken(accessToken, config.clientId)
+}
+
+/** Shared signature and application checks for browser and backend AuthKit sessions. */
+export async function verifyWorkOSAccessToken(
+  accessToken: string,
+  clientId: string,
+  now = Date.now()
+): Promise<JWTPayload> {
+  let keys = jwks.get(clientId)
   if (!keys) {
+    const workos = createWorkOS({ clientId, timeout: 5000, maxRetries: 0 })
     keys = createRemoteJWKSet(
-      new URL(config.workos.userManagement.getJwksUrl(config.clientId)),
+      new URL(workos.userManagement.getJwksUrl(clientId)),
       {
         timeoutDuration: 5000,
         [customFetch]: (input, init) =>
           fetch(input, { ...init, redirect: "manual" }),
       }
     )
-    jwks.set(config.clientId, keys)
+    jwks.set(clientId, keys)
   }
   const { payload } = await jwtVerify(accessToken, keys, {
     algorithms: ["RS256"],
     issuer: [
       "https://api.workos.com",
       "https://api.workos.com/",
-      `https://api.workos.com/user_management/${config.clientId}`,
+      `https://api.workos.com/user_management/${clientId}`,
     ],
     requiredClaims: ["sub", "sid", "client_id", "exp", "iat"],
+    currentDate: new Date(now),
   })
   if (
-    payload.client_id !== config.clientId ||
+    payload.client_id !== clientId ||
     typeof payload.sub !== "string" ||
     typeof payload.sid !== "string" ||
     typeof payload.iat !== "number" ||
-    payload.iat > Date.now() / 1000 + 60
+    payload.iat > now / 1000 + 60
   )
     throw new errors.JWTClaimValidationFailed(
       "Invalid session claims",
@@ -500,6 +511,11 @@ async function beginLogin(
 }
 export async function handleAdminCallback(request: Request, env: Env) {
   if (request.method !== "GET") return methodNotAllowed("GET")
+  if (new URL(request.url).searchParams.get("state")?.startsWith("billing_")) {
+    const { handleWorkOSBillingCallback } =
+      await import("./workos-billing-auth.ts")
+    return handleWorkOSBillingCallback(request, env)
+  }
   // The callback is shared. A missing transaction must recover through customer
   // sign-in, never send a customer into the organization-scoped Owner flow.
   let config = configuration(request, env, "account")

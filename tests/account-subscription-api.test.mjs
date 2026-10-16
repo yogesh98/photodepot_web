@@ -153,6 +153,9 @@ beforeEach(async () => {
   })
   await env.DB.batch(
     [
+      "DELETE FROM workos_entitlements",
+      "DELETE FROM workos_billing_sessions",
+      "DELETE FROM stripe_customers",
       "DELETE FROM subscription_request_audit",
       "DELETE FROM subscription_requests",
       "DELETE FROM account_pairings",
@@ -473,4 +476,53 @@ test("former profile settings do not alter customer requests or Owner reviews", 
     status: "resolved",
     revision: 2,
   })
+})
+
+test("reminder preference responses preserve effective WorkOS access and independent manual revisions", async () => {
+  const userId = "user_dashboard_customer",
+    now = Date.now(),
+    day = 86_400_000
+  await env.DB.prepare("UPDATE subscriptions SET end_at=? WHERE user_id=?")
+    .bind(now + day, userId)
+    .run()
+  const manual = await getSubscription(env.DB, userId, now)
+  await env.DB.prepare(
+    "INSERT INTO stripe_customers (user_id,stripe_customer_id,workos_organization_id,customer_create_token) VALUES (?,?,?,?)"
+  )
+    .bind(userId, "cus_preference", "org_preference", "fixture")
+    .run()
+  await env.DB.prepare(
+    "INSERT INTO workos_billing_sessions (user_id,session_id,encrypted_tokens,updated_at) VALUES (?,?,?,?)"
+  )
+    .bind(userId, "session_preference", "unused-until-refresh", now)
+    .run()
+  await env.DB.prepare(
+    "INSERT INTO workos_entitlements (user_id,organization_id,enabled,issued_at,expires_at,revision,context) VALUES (?,?,1,?,?,1,?)"
+  )
+    .bind(
+      userId,
+      "org_preference",
+      now,
+      now + 300_000,
+      JSON.stringify([
+        env.WORKOS_CLIENT_ID,
+        env.PHOTODEPOT_WORKOS_ENTITLEMENT ?? "photodepot-standard",
+      ])
+    )
+    .run()
+  const response = await handleAccountSubscription(
+    request("/api/account/subscription", await cookie(userId), {
+      action: "set-reminders",
+      enabled: false,
+      expectedRevision: manual.revision,
+    }),
+    env
+  )
+  assert.equal(response.status, 200)
+  const result = await response.json()
+  assert.equal(result.access.source, "workos")
+  assert.equal(result.access.canHost, true)
+  assert.equal(result.reminders.enabled, false)
+  assert.equal(result.reminders.revision, manual.revision + 1)
+  assert.equal((await getSubscription(env.DB, userId)).endsAt, manual.endsAt)
 })

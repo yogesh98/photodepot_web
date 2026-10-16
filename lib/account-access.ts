@@ -1,6 +1,7 @@
+import { LICENSE_GRACE_MS } from "./license-crypto.ts"
 import type {
   AccountAccess,
-  BillingSubscriptionSummary,
+  WorkOSEntitlementSummary,
   SubscriptionSummary,
 } from "./subscription-types.ts"
 
@@ -8,15 +9,15 @@ import type {
 export function resolveAccountAccess(
   grant: SubscriptionSummary | null,
   now = Date.now(),
-  billing: BillingSubscriptionSummary | null = null
+  managed: WorkOSEntitlementSummary | null = null
 ): AccountAccess {
-  const selected = selectAccountGrant(grant, billing, now)
+  const selected = selectAccountGrant(grant, managed, now)
   grant = selected.grant
   const status = !grant
     ? "none"
     : grant.status === "revoked"
       ? "revoked"
-      : now >= grant.endsAt
+      : grant.status === "expired" || now >= grant.endsAt
         ? "expired"
         : "active"
   const canHost = status === "active" && grant !== null && grant.startsAt <= now
@@ -31,26 +32,23 @@ export function resolveAccountAccess(
   }
 }
 
-/** Preserve a valid manual grant; choose the later deadline, with Stripe winning ties. */
+/** Manual grants remain independent; WorkOS proves paid feature access. */
 export function selectAccountGrant(
   manual: SubscriptionSummary | null,
-  billing: BillingSubscriptionSummary | null,
+  managed: WorkOSEntitlementSummary | null,
   now = Date.now()
 ): { grant: SubscriptionSummary | null; source: AccountAccess["source"] } {
-  const paid: SubscriptionSummary | null = billing
+  const paid: SubscriptionSummary | null = managed?.enabled
     ? {
-        id: billing.id,
-        userId: billing.userId,
-        type: billing.status === "trialing" ? "trial" : "regular",
-        status: ["active", "trialing", "past_due"].includes(billing.status)
-          ? now >= billing.endsAt
-            ? "expired"
-            : "active"
-          : "revoked",
-        startsAt: billing.startsAt,
-        endsAt: billing.endsAt,
-        updatedAt: billing.updatedAt,
-        revision: billing.revision,
+        id: `workos:${managed.userId}`,
+        userId: managed.userId,
+        type: "regular",
+        status: managed.expiresAt <= now ? "expired" : "active",
+        startsAt: managed.issuedAt,
+        // This is our fixed offline authorization allowance, never a renewal date.
+        endsAt: managed.issuedAt + LICENSE_GRACE_MS,
+        updatedAt: managed.issuedAt,
+        revision: managed.revision,
         notes: "",
         remindersEnabled: false,
       }
@@ -58,9 +56,9 @@ export function selectAccountGrant(
   const valid = (grant: SubscriptionSummary | null) =>
     grant?.status === "active" && grant.startsAt <= now && grant.endsAt > now
   if (valid(paid) && (!valid(manual) || paid!.endsAt >= manual!.endsAt))
-    return { grant: paid, source: "stripe" }
+    return { grant: paid, source: "workos" }
   if (manual) return { grant: manual, source: "manual" }
-  return { grant: paid, source: paid ? "stripe" : null }
+  return { grant: paid, source: paid ? "workos" : null }
 }
 
 export function trialReminderEligible(

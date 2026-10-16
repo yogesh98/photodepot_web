@@ -11,6 +11,7 @@ import {
   changeSubscription,
   changeSubscriptionReminders,
 } from "../lib/subscription-store.ts"
+import { getAccountEntitlement } from "../lib/account-entitlement.ts"
 import { handleScheduledReminders } from "../functions/api/internal/subscription-reminders.ts"
 import { triggerReminders } from "../workers/subscription-reminders.ts"
 
@@ -29,6 +30,8 @@ before(async () => {
     ...platform.env,
     WORKOS_CLIENT_ID: "client_reminder_tests",
     WORKOS_API_KEY: "sk_test_reminder_fixture",
+    WORKOS_COOKIE_PASSWORD:
+      "test-workos-reminder-cookie-at-least-32-characters",
     WORKOS_REDIRECT_URI: "https://photodepot.app/api/auth/callback",
     PHOTODEPOT_REMINDER_TOKEN: token,
     RESEND_API_KEY: "re_fixture",
@@ -76,6 +79,9 @@ beforeEach(async () => {
   await env.DB.batch(
     [
       "DELETE FROM subscription_reminders",
+      "DELETE FROM workos_entitlements",
+      "DELETE FROM workos_billing_sessions",
+      "DELETE FROM stripe_customers",
       "DELETE FROM subscription_audit",
       "DELETE FROM account_devices",
       "DELETE FROM subscriptions",
@@ -147,7 +153,11 @@ test("absent mail settings disable delivery; configured mail only sends one mess
   assert.equal(mail.status, "sent")
   assert.equal(mail.attempts, 1)
   assert.ok(mail.message.includes("https://photodepot.app/account"))
-  assert.ok(mail.message.includes("No payment"))
+  assert.ok(mail.message.includes("Manage any subscription separately"))
+  assert.equal(
+    mail.message.includes("No payment is collected automatically"),
+    false
+  )
   assert.equal(mail.recipient, "user_due@example.test")
   const queue = await subscriptionReminderQueue(env, now)
   assert.equal(queue.mode, "resend")
@@ -541,4 +551,133 @@ test("reminder opt-out suppresses new reminders and stops queued delivery withou
   } finally {
     globalThis.fetch = previousFetch
   }
+})
+
+test("a manual trial does not send an obsolete ending notice after WorkOS confirms paid access", async () => {
+  const userId = "user_trial_now_paid"
+  // The independent manual trial outlasts the paid offline allowance by 30s.
+  // Even when manual access wins, paid customers must not get this email.
+  await grant(userId, now + 2 * day)
+  await env.DB.prepare(
+    "INSERT INTO stripe_customers (user_id,stripe_customer_id,workos_organization_id,customer_create_token) VALUES (?,?,?,?)"
+  )
+    .bind(userId, "cus_now_paid", "org_now_paid", "fixture")
+    .run()
+  await env.DB.prepare(
+    "INSERT INTO workos_billing_sessions (user_id,session_id,encrypted_tokens,updated_at) VALUES (?,?,?,?)"
+  )
+    .bind(userId, "session_now_paid", "unused-until-refresh", now)
+    .run()
+  await env.DB.prepare(
+    "INSERT INTO workos_entitlements (user_id,organization_id,enabled,issued_at,expires_at,revision,context) VALUES (?,?,1,?,?,1,?)"
+  )
+    .bind(
+      userId,
+      "org_now_paid",
+      now - 30_000,
+      now + 270_000,
+      JSON.stringify([
+        env.WORKOS_CLIENT_ID,
+        env.PHOTODEPOT_WORKOS_ENTITLEMENT ?? "photodepot-standard",
+      ])
+    )
+    .run()
+  assert.equal(
+    (await getAccountEntitlement(env.DB, userId, now)).access.source,
+    "manual"
+  )
+  let sends = 0
+  const result = await runSubscriptionReminders(env, {
+    now,
+    fetch: async () => {
+      sends++
+      return Response.json({ id: "unexpected" })
+    },
+  })
+  assert.equal(sends, 0)
+  assert.equal(result.cancelled, 1)
+  assert.equal((await rows())[0].status, "cancelled")
+  assert.deepEqual(lookups, [])
+})
+
+test("an unavailable WorkOS proof defers a manual-trial email instead of misrepresenting paid access", async () => {
+  const userId = "user_paid_proof_unavailable"
+  await grant(userId)
+  await env.DB.prepare(
+    "INSERT INTO stripe_customers (user_id,stripe_customer_id,workos_organization_id,customer_create_token) VALUES (?,?,?,?)"
+  )
+    .bind(userId, "cus_unavailable", "org_unavailable", "fixture")
+    .run()
+  await env.DB.prepare(
+    "INSERT INTO workos_billing_sessions (user_id,session_id,encrypted_tokens,updated_at) VALUES (?,?,?,?)"
+  )
+    .bind(
+      userId,
+      "session_unavailable",
+      "not-read-during-transient-storage-failure",
+      now
+    )
+    .run()
+  await env.DB.prepare(
+    "INSERT INTO workos_entitlements (user_id,organization_id,enabled,issued_at,expires_at,revision,context) VALUES (?,?,1,?,?,1,?)"
+  )
+    .bind(
+      userId,
+      "org_unavailable",
+      now - 300_000,
+      now,
+      JSON.stringify([
+        env.WORKOS_CLIENT_ID,
+        env.PHOTODEPOT_WORKOS_ENTITLEMENT ?? "photodepot-standard",
+      ])
+    )
+    .run()
+  let unavailable = true
+  const transientEnv = {
+    ...env,
+    DB: {
+      prepare(sql) {
+        if (
+          unavailable &&
+          sql === "SELECT * FROM workos_entitlements WHERE user_id = ?"
+        ) {
+          unavailable = false
+          throw new Error("Entitlement storage temporarily unavailable")
+        }
+        return env.DB.prepare(sql)
+      },
+      batch: env.DB.batch.bind(env.DB),
+    },
+  }
+  let sends = 0
+  const result = await runSubscriptionReminders(transientEnv, {
+    now,
+    fetch: async () => {
+      sends++
+      return Response.json({ id: "unexpected" })
+    },
+  })
+  assert.equal(sends, 0)
+  assert.equal(result.deferred, 1)
+  assert.equal((await rows())[0].status, "pending")
+  assert.equal(
+    (
+      await env.DB.prepare(
+        "SELECT reauth_needed FROM workos_billing_sessions WHERE user_id=?"
+      )
+        .bind(userId)
+        .first()
+    ).reauth_needed,
+    0
+  )
+  assert.equal(
+    (
+      await env.DB.prepare(
+        "SELECT expires_at FROM workos_entitlements WHERE user_id=?"
+      )
+        .bind(userId)
+        .first()
+    ).expires_at,
+    now
+  )
 })

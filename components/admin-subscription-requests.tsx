@@ -299,9 +299,16 @@ export function AdminSubscriptionRequests({
               </div>
               <p className={styles.queueContext}>
                 {item.subscription
-                  ? `${item.subscription.type === "trial" ? "Trial" : "Standard"} · ${item.subscription.status} · expires ${date(item.subscription.endsAt)}`
-                  : "No subscription assigned"}
+                  ? `Manual ${item.subscription.type === "trial" ? "trial" : "standard access"} · ${item.subscription.status} · expires ${date(item.subscription.endsAt)}`
+                  : "No manual access assigned"}
               </p>
+              {item.managed && (
+                <p className={styles.queueContext}>
+                  Billing access managed by WorkOS · Last checked{" "}
+                  {date(item.managed.issuedAt)}. Manual access does not change
+                  Stripe billing.
+                </p>
+              )}
               {!item.user && (
                 <p className={styles.queueContext}>
                   This account is no longer available. Its request can still be

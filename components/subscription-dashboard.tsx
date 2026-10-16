@@ -129,18 +129,6 @@ async function api<T>(
 function userName(user: WorkOSUserSummary) {
   return [user.firstName, user.lastName].filter(Boolean).join(" ") || user.email
 }
-function billingManaged(user: WorkOSUserSummary) {
-  return user.billing
-    ? !["canceled", "incomplete_expired"].includes(user.billing.status)
-    : user.access.source === "stripe"
-}
-const manualAccessActions = new Set<DialogAction>([
-  "set",
-  "extend",
-  "revoke",
-  "restore",
-  "approve",
-])
 function status(user: WorkOSUserSummary): Status {
   return user.access.status === "active"
     ? "Active"
@@ -489,12 +477,6 @@ export function SubscriptionDashboard({
   }, [])
   const openDialog = useCallback(
     (user: WorkOSUserSummary, action: DialogAction, device?: AccountDevice) => {
-      if (billingManaged(user) && manualAccessActions.has(action)) {
-        setError(
-          "This subscription is managed in Stripe. Manual access changes are unavailable while it is current."
-        )
-        return
-      }
       if (action === "details") {
         showProfile(user)
         return
@@ -553,7 +535,7 @@ export function SubscriptionDashboard({
           : "/api/admin/subscriptions"
       )
       setNotice(
-        `${approval ? "Request approved and access extended" : dialog.action === "remove-device" ? "Mac removed" : dialog.action === "revoke" ? "Access revoked" : dialog.action === "restore" ? "Access restored; expiry unchanged" : dialog.action === "update-notes" ? "Account notes saved" : dialog.action === "set-reminders" ? `Expiry reminders ${dialog.user.subscription?.remindersEnabled ? "disabled" : "enabled"}` : dialog.action === "extend" ? "Access extended" : "Access granted"} for ${dialog.user.email}.`
+        `${approval ? "Request approved and manual access extended" : dialog.action === "remove-device" ? "Mac removed" : dialog.action === "revoke" ? "Manual access revoked" : dialog.action === "restore" ? "Manual access restored; expiry unchanged" : dialog.action === "update-notes" ? "Account notes saved" : dialog.action === "set-reminders" ? `Expiry reminders ${dialog.user.subscription?.remindersEnabled ? "disabled" : "enabled"}` : dialog.action === "extend" ? "Manual access extended" : "Manual access granted"} for ${dialog.user.email}.`
       )
       setDialog(null)
       setRefreshVersion((value) => value + 1)
@@ -622,7 +604,6 @@ export function SubscriptionDashboard({
     const disabled =
       actionsDisabled ||
       (inDetails && (detailsLoading || !!dialogError || !details))
-    const managed = billingManaged(user)
     return (
       <div className={styles.rowActions}>
         {!inDetails && (
@@ -639,7 +620,7 @@ export function SubscriptionDashboard({
         <Button
           variant="outline"
           type="button"
-          disabled={disabled || managed}
+          disabled={disabled}
           onClick={() => openDialog(user, "set")}
           aria-label={`Grant access for ${user.email}`}
         >
@@ -650,7 +631,7 @@ export function SubscriptionDashboard({
             <Button
               variant="outline"
               type="button"
-              disabled={disabled || managed}
+              disabled={disabled}
               onClick={() => openDialog(user, "extend")}
               aria-label={`Extend access for ${user.email}`}
             >
@@ -659,7 +640,7 @@ export function SubscriptionDashboard({
             <Button
               variant="outline"
               type="button"
-              disabled={disabled || managed}
+              disabled={disabled}
               onClick={() =>
                 openDialog(
                   user,
@@ -695,7 +676,17 @@ export function SubscriptionDashboard({
             )}
           </>
         )}
-        {managed && <span>Subscription managed in Stripe</span>}
+        {user.managed && (
+          <span>
+            Billing access managed by WorkOS · Last checked{" "}
+            <time dateTime={new Date(user.managed.issuedAt).toISOString()}>
+              {new Date(user.managed.issuedAt).toLocaleString(undefined, {
+                dateStyle: "medium",
+                timeStyle: "short",
+              })}
+            </time>
+          </span>
+        )}
       </div>
     )
   }
@@ -843,10 +834,6 @@ export function SubscriptionDashboard({
                         const result = await api<AccountDetails>(
                           `?userId=${encodeURIComponent(request.userId)}&history=1`
                         )
-                        if (billingManaged(result.user))
-                          throw new Error(
-                            "This subscription is managed in Stripe. Review billing before approving a manual access extension."
-                          )
                         openDialog(result.user, "approve")
                         setDialog({
                           user: result.user,
@@ -1026,7 +1013,9 @@ export function SubscriptionDashboard({
                                   })}
                                 </span>
                                 <small className={layout.cellSecondary}>
-                                  {remaining(user.access.endsAt, now)}
+                                  {user.access.source === "workos"
+                                    ? "Offline access deadline"
+                                    : remaining(user.access.endsAt, now)}
                                 </small>
                               </>
                             ) : (
@@ -1126,6 +1115,9 @@ export function SubscriptionDashboard({
               <br />
               {dialog.user.email}
             </p>
+            {["set", "extend", "revoke", "restore", "approve"].includes(
+              dialog.action
+            ) && <p>Manual access does not change Stripe billing.</p>}
             {dialogError && (
               <ErrorMessage
                 message={dialogError}
@@ -1155,14 +1147,15 @@ export function SubscriptionDashboard({
               <form onSubmit={save}>
                 {dialog.action === "revoke" && (
                   <p>
-                    Revoke local project and hosting access. The account remains
-                    signed in and can join collaboration.
+                    Revoke this manual grant. Subscription access is checked
+                    separately. The account remains signed in and can join
+                    collaboration.
                   </p>
                 )}
                 {dialog.action === "restore" && (
                   <p>
-                    Restore access with its existing expiry. Expired access must
-                    also be extended.
+                    Restore this manual grant with its existing expiry. Expired
+                    manual access must also be extended.
                   </p>
                 )}
                 {dialog.action === "remove-device" && (

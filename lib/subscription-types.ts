@@ -5,7 +5,7 @@ export type SubscriptionStatus = "active" | "expired" | "revoked"
 export interface AccountAccess {
   tier: "free" | "trial" | "standard"
   status: "none" | SubscriptionStatus
-  source: "manual" | "stripe" | null
+  source: "manual" | "workos" | null
   startsAt: number | null
   endsAt: number | null
   canUseLocal: boolean
@@ -38,7 +38,17 @@ export interface SubscriptionSummary {
   remindersEnabled: boolean
 }
 
-/** Server-confirmed billing state; dates use milliseconds like manual grants. */
+/** Verified WorkOS proof; expiry is a token deadline, not a billing renewal date. */
+export interface WorkOSEntitlementSummary {
+  userId: string
+  organizationId: string
+  enabled: boolean
+  issuedAt: number
+  expiresAt: number
+  revision: number
+}
+
+/** Billing display only; never an input to authorization. */
 export interface BillingSubscriptionSummary {
   id: string
   userId: string
@@ -76,6 +86,7 @@ export interface WorkOSUserSummary {
   createdAt: number
   subscription: SubscriptionSummary | null
   billing?: BillingSubscriptionSummary | null
+  managed?: WorkOSEntitlementSummary | null
   access: AccountAccess
   devices: AccountDevice[]
 }

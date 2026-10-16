@@ -120,6 +120,7 @@ before(async () => {
   await migrate("0013_manual_access_cleanup.sql")
   await migrate("0014_stripe_billing.sql")
   await migrate("0015_account_entitlements.sql")
+  await migrate("0016_workos_entitlements.sql")
 })
 
 after(async () => {
