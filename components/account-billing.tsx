@@ -487,6 +487,18 @@ export function AccountBilling({
           Subscriptions are temporarily unavailable.
         </p>
       )}
+      {canManage && !attention && (!subscribed || currentInterval) && (
+        <div className={styles.recovery}>
+          <Button
+            className={styles.button}
+            variant="outline"
+            disabled={controlsDisabled}
+            onClick={() => void openBilling("portal")}
+          >
+            {busy === "portal" ? "Opening billing…" : "Manage billing"}
+          </Button>
+        </div>
+      )}
       {attention && (
         <div className={styles.recovery}>
           <p className={styles.note}>Your payment needs attention.</p>

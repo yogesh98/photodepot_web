@@ -66,6 +66,7 @@ export interface SubscriptionOverview {
   active: number
   activeTrials: number
   activeStandard: number
+  verificationNeeded: number
   expired: number
   revoked: number
   expiringSoon: number

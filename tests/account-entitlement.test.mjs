@@ -24,6 +24,7 @@ import {
   updateSubscriptionNotes,
 } from "../lib/subscription-store.ts"
 import { LICENSE_GRACE_MS } from "../lib/license-crypto.ts"
+import { hasWorkOSBillingSession } from "../lib/workos-entitlements.ts"
 
 const now = 1_800_000_000_000,
   day = 86_400_000,
@@ -493,14 +494,26 @@ test("admin filters and overview include current WorkOS proof independently of m
       .all()
   ).results
   const effective = (
-    await Promise.all(ids.map((x) => getAccountEntitlement(db, x.user_id, now)))
+    await Promise.all(
+      ids.map(async (x) => ({
+        ...(await getAccountEntitlement(db, x.user_id, now)),
+        connected: await hasWorkOSBillingSession(db, x.user_id),
+      }))
+    )
   ).filter((x) => x.grant !== null)
   const overview = await getSubscriptionOverview(db, now)
   assert.equal(overview.totalSubscriptions, effective.length)
   for (const [field, filter] of [
-    ["active", (x) => x.access.canHost],
-    ["activeTrials", (x) => x.access.canHost && x.access.tier === "trial"],
-    ["activeStandard", (x) => x.access.canHost && x.access.tier === "standard"],
+    ["active", (x) => x.access.canHost && x.connected],
+    [
+      "activeTrials",
+      (x) => x.access.canHost && x.connected && x.access.tier === "trial",
+    ],
+    [
+      "activeStandard",
+      (x) => x.access.canHost && x.connected && x.access.tier === "standard",
+    ],
+    ["verificationNeeded", (x) => !x.access.canHost || !x.connected],
     [
       "expiringSoon",
       (x) =>
@@ -508,7 +521,7 @@ test("admin filters and overview include current WorkOS proof independently of m
         x.access.source === "manual" &&
         x.access.endsAt <= now + 7 * day,
     ],
-    ["expired", (x) => x.access.status === "expired"],
+    ["expired", () => false],
     ["revoked", (x) => x.access.status === "revoked"],
   ])
     assert.equal(overview[field], effective.filter(filter).length, field)

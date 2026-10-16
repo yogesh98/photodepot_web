@@ -19,6 +19,7 @@ import {
 import { handleAccountSubscription } from "../functions/api/account/subscription.ts"
 import { handleAccountBilling } from "../functions/api/account/billing.ts"
 import { getAccountEntitlement } from "../lib/account-entitlement.ts"
+import { getSubscriptionOverview } from "../lib/subscription-store.ts"
 
 const origin = "https://photodepot.app"
 const clientId = "client_workos_entitlements_tests"
@@ -695,6 +696,63 @@ test("expired JWTs refresh in the mapped organization and persist rotated backen
   assert.equal(authenticationCalls[0].refresh_token, "refresh_backend_initial")
   assert.equal(authenticationCalls[0].organization_id, organizationId)
   assert.equal((await storedTokens()).refreshToken, "refresh_backend_second")
+})
+
+test("overview proof expiry needs verification without declaring a subscription ended or renewing access", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: epoch })
+  await store()
+  const current = await getSubscriptionOverview(env.DB)
+  assert.equal(current.active, 1)
+  assert.equal(current.verificationNeeded, 0)
+  t.mock.timers.tick(300_001)
+  epoch = Date.now()
+  const proof = sqlite.prepare("SELECT * FROM workos_entitlements").get()
+  const stale = await getSubscriptionOverview(env.DB)
+  assert.equal(stale.totalSubscriptions, 1)
+  assert.equal(stale.active, 0)
+  assert.equal(stale.verificationNeeded, 1)
+  assert.equal(stale.expired, 0)
+  assert.equal(authenticationCalls.length, 0)
+  assert.deepEqual(
+    sqlite.prepare("SELECT * FROM workos_entitlements").get(),
+    proof
+  )
+  assert.equal(
+    (await getAccountEntitlement(env.DB, userId)).access.canHost,
+    false
+  )
+  tokenResponse = authentication(jwt())
+  assert.equal((await getAccountEntitlement(env, userId)).access.canHost, true)
+  const refreshed = await getSubscriptionOverview(env.DB)
+  assert.equal(refreshed.active, 1)
+  assert.equal(refreshed.verificationNeeded, 0)
+  assert.equal(refreshed.expired, 0)
+  assert.equal(authenticationCalls.length, 1)
+})
+
+test("overview requires a usable billing session and matching customer binding for current cached proof", async () => {
+  for (const change of [
+    "DELETE FROM workos_billing_sessions",
+    "UPDATE workos_billing_sessions SET reauth_needed=1",
+    "UPDATE stripe_customers SET workos_organization_id='org_replaced'",
+  ]) {
+    sqlite
+      .prepare("UPDATE stripe_customers SET workos_organization_id=?")
+      .run(organizationId)
+    await store()
+    sqlite.exec(change)
+    const overview = await getSubscriptionOverview(env.DB)
+    assert.equal(overview.totalSubscriptions, 1)
+    assert.equal(overview.active, 0)
+    assert.equal(overview.verificationNeeded, 1)
+    assert.equal(overview.expired, 0)
+  }
+  sqlite.prepare("UPDATE workos_entitlements SET enabled=0").run()
+  const denied = await getSubscriptionOverview(env.DB)
+  assert.equal(denied.totalSubscriptions, 0)
+  assert.equal(denied.active, 0)
+  assert.equal(denied.verificationNeeded, 0)
+  assert.equal(authenticationCalls.length, 0)
 })
 
 test("force refresh observes revocation of a feature before the previous JWT expires", async () => {

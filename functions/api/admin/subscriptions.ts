@@ -82,10 +82,9 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
           deviceAudit: deviceAudit.results,
         })
       }
-      const [page, overview] = await Promise.all([
-        listAdminUsers(env, query, now),
-        getSubscriptionOverview(env.DB, now),
-      ])
+      const page = await listAdminUsers(env, query, now)
+      // Include this bounded page's completed proof refreshes in the same response.
+      const overview = await getSubscriptionOverview(env.DB)
       return json({ ...page, overview, billingMode: "subscriptions" })
     }
     if (request.method !== "POST") {

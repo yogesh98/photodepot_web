@@ -382,6 +382,41 @@ test("scheduled cancellation disables the current-plan Cancel and shows the end 
   await snapshot("08-cancellation-scheduled")
 })
 
+for (const [scenario, changes] of [
+  ["a cardless monthly trial", { status: "trialing" }],
+  ["an active monthly subscription", {}],
+  ["an active yearly subscription", { interval: "annual", amount: 20000 }],
+  [
+    "a yearly subscription with cancellation scheduled",
+    { interval: "annual", amount: 20000, cancelAtPeriodEnd: true },
+  ],
+  ["an ended subscription with billing history", { status: "canceled" }],
+])
+  test(`${scenario} can open the portal for payments, invoices, and renewal`, async () => {
+    setSubscription(changes, changes.status !== "canceled")
+    state.redirect = "https://billing.stripe.com/p/session/test_manage"
+    await page.goto(`${origin}/account`)
+    const manage = subscription().getByRole("button", {
+      name: "Manage billing",
+      exact: true,
+    })
+    await expect(manage).toBeEnabled()
+    await manage.click()
+    await page.waitForURL("https://billing.stripe.com/p/session/test_manage")
+    assert.deepEqual(state.posts, [{ action: "portal" }])
+  })
+
+test("billing management respects portal availability", async () => {
+  setSubscription({ status: "trialing" })
+  state.billing.portalEnabled = false
+  await page.goto(`${origin}/account`)
+  await expect(cancel("Monthly")).toBeDisabled()
+  await expect(
+    subscription().getByRole("button", { name: "Manage billing", exact: true })
+  ).toHaveCount(0)
+  assert.deepEqual(state.posts, [])
+})
+
 for (const status of ["canceled", "incomplete_expired"])
   test(`an ended ${status} subscription returns to Free and offers new paid plans`, async () => {
     setSubscription({ status, endsAt: Date.now() - 86400000 }, false)

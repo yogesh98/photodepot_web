@@ -369,8 +369,9 @@ Free-account upgrades continue to hosted Stripe Checkout. If identity confirmati
 is needed, the server preserves the chosen interval and resumes Checkout after
 sign-in. Promotion codes are entered in Stripe Checkout. A 100% discount can
 complete without a payment method when nothing is due. Stripe controls the
-discount's duration, limits, and future charges. Payment methods, invoices, and
-cancellation are managed through the hosted Stripe Customer Portal. Cancel opens
+discount's duration, limits, and future charges. **Manage billing** opens the hosted
+Stripe Customer Portal for payment methods, invoices, and renewal management,
+including during a cardless trial or after scheduling cancellation. Cancel opens
 the subscription's cancellation confirmation; Monthly-to-Yearly Upgrade opens
 Stripe's plan-change confirmation, including any tax and prorations. Neither
 button directly changes a subscription before the customer confirms in Stripe.

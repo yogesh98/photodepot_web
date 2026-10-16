@@ -15,9 +15,9 @@ export function AdminOverview({
 }) {
   const metrics = [
     {
-      title: "Active access",
+      title: "Verified access",
       value: overview?.active,
-      text: "Verified subscription access",
+      text: "Current access checks",
       icon: CircleCheck,
       filter: "active",
       tone: "green",
@@ -42,16 +42,16 @@ export function AdminOverview({
   const total = overview?.totalSubscriptions ?? 0
   const stages = [
     {
-      label: "Active subscriptions",
+      label: "Verified access",
       count: overview?.activeStandard ?? 0,
       color: "var(--chart-2)",
       filter: "standard",
     },
     {
-      label: "Expired",
-      count: overview?.expired ?? 0,
+      label: "Needs verification",
+      count: overview?.verificationNeeded ?? 0,
       color: "var(--chart-3)",
-      filter: "expired",
+      filter: "all",
     },
   ]
   return (
@@ -91,12 +91,16 @@ export function AdminOverview({
             <div className={styles.panelHeading}>
               <div>
                 <h2>Access overview</h2>
+                <p>
+                  Checks that need verification do not indicate a subscription
+                  has ended.
+                </p>
               </div>
               <CreditCard size={18} />
             </div>
             <div className={styles.healthTotal}>
               <strong>{overview ? total : "—"}</strong>
-              <span>subscription access records</span>
+              <span>access verification records</span>
             </div>
             <div
               className={styles.healthBar}

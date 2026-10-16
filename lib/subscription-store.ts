@@ -151,25 +151,34 @@ export async function getSubscriptionOverview(
   now = Date.now()
 ): Promise<SubscriptionOverview> {
   validateTimestamp(now)
+  // A JWT's deadline describes verification freshness, never when billing ends.
+  // Count all stored proofs together without refreshing an unbounded directory.
   const row = await database
     .prepare(
-      `SELECT COUNT(*) AS totalSubscriptions,
-       COALESCE(SUM(issued_at<=? AND expires_at>? AND issued_at+${LICENSE_GRACE_MS}>?),0) AS active,
+      `WITH access_checks AS (
+         SELECT issued_at<=? AND expires_at>? AND issued_at+${LICENSE_GRACE_MS}>?
+           AND EXISTS (
+             SELECT 1 FROM workos_billing_sessions AS session
+             JOIN stripe_customers AS customer ON customer.user_id=session.user_id
+             WHERE session.user_id=proof.user_id AND session.reauth_needed=0
+               AND customer.workos_organization_id=proof.organization_id
+               AND customer.stripe_customer_id IS NOT NULL
+           ) AS verified
+         FROM workos_entitlements AS proof WHERE enabled=1
+       )
+       SELECT COUNT(*) AS totalSubscriptions,
+       COALESCE(SUM(verified),0) AS active,
        0 AS activeTrials,
-       COALESCE(SUM(issued_at<=? AND expires_at>? AND issued_at+${LICENSE_GRACE_MS}>?),0) AS activeStandard,
-       COALESCE(SUM(expires_at<=? OR issued_at+${LICENSE_GRACE_MS}<=?),0) AS expired,
+       COALESCE(SUM(verified),0) AS activeStandard,
+       COALESCE(SUM(NOT verified),0) AS verificationNeeded,
+       0 AS expired,
        0 AS revoked, 0 AS expiringSoon, 0 AS openRequests,
        (SELECT COUNT(*) FROM waitlist) AS waitlistTotal,
        (SELECT COUNT(*) FROM waitlist WHERE julianday(created_at)>=julianday(?) AND julianday(created_at)<=julianday(?)) AS waitlistLast30Days,
        (SELECT COUNT(*) FROM desktop_sessions WHERE active=1) AS assignedMacs
-       FROM workos_entitlements WHERE enabled=1`
+       FROM access_checks`
     )
     .bind(
-      now,
-      now,
-      now,
-      now,
-      now,
       now,
       now,
       now,

@@ -165,7 +165,10 @@ function overview() {
     active: active.length,
     activeTrials: 0,
     activeStandard: active.length,
-    expired: entries.filter((item) => item.status === "expired").length,
+    verificationNeeded:
+      state.users.filter((user) => user.managed?.enabled).length -
+      active.length,
+    expired: 0,
     revoked: 0,
     expiringSoon: 0,
     assignedMacs: state.users.reduce(
@@ -762,13 +765,13 @@ test("server-side search, subscription segments, and pagination include the comp
   })
 })
 
-test("the admin overview links live access counts to Accounts filters", async () => {
+test("the admin overview links verified access counts to Accounts filters", async () => {
   await page.goto(`${origin}/admin`)
   await expect(
-    page.getByText("Verified subscription access", { exact: true })
+    page.getByText("Current access checks", { exact: true })
   ).toBeVisible()
   await page
-    .getByRole("button", { name: "View active access", exact: true })
+    .getByRole("button", { name: "View verified access", exact: true })
     .click()
   await expect(page.locator("tbody tr")).toHaveCount(2)
   await expect(
@@ -782,6 +785,27 @@ test("the admin overview links live access counts to Accounts filters", async ()
       )
     )
     .toBe(true)
+})
+
+test("the overview labels stale proof as needing verification and opens all accounts", async () => {
+  state.users[4].managed.expiresAt = Date.now() - 1
+  await page.goto(`${origin}/admin`)
+  await expect(
+    page.getByRole("img", {
+      name: "Verified access: 1, Needs verification: 1",
+      exact: true,
+    })
+  ).toBeVisible()
+  await expect(
+    page.getByText("Active subscriptions", { exact: true })
+  ).toHaveCount(0)
+  await expect(page.getByText("Expired", { exact: true })).toHaveCount(0)
+  await page.getByRole("button", { name: /^Needs verification/ }).click()
+  await expect(
+    page.getByRole("heading", { name: "Accounts", exact: true })
+  ).toBeVisible()
+  await expect(page.locator("tbody tr")).toHaveCount(3)
+  assert.equal(state.listQueries.at(-1).filter, "all")
 })
 
 test("waitlist signups have real source counts, server search, pagination, and a scoped export", async () => {

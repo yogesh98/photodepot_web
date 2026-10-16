@@ -604,6 +604,7 @@ test("overview excludes historical manual grants in every state", async () => {
     active: 0,
     activeTrials: 0,
     activeStandard: 0,
+    verificationNeeded: 0,
     expired: 0,
     revoked: 0,
     expiringSoon: 0,
