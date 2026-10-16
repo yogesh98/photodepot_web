@@ -18,7 +18,10 @@ import {
   handleAccountApproval,
   handleAccountPairing,
 } from "../lib/account-pairing.ts"
-import { handleLicenseRequest } from "../lib/license-api.ts"
+import { handleDesktopSession } from "../lib/account-sessions.ts"
+import { handleAccountSubscription } from "../functions/api/account/subscription.ts"
+import { handleAdminSubscriptionRequests } from "../functions/api/admin/subscription-requests.ts"
+import { getAccountRequest } from "../lib/account-requests.ts"
 import { handleAdminSubscriptions } from "../functions/api/admin/subscriptions.ts"
 import {
   getSubscription,
@@ -165,7 +168,8 @@ function request(path, body, cookie) {
       ...(body === undefined ? {} : { "content-type": "application/json" }),
       ...(cookie ? { cookie } : {}),
       "cf-connecting-ip": `local-lifecycle-${sequence++}`,
-      "Photodepot-Receipt-Version": "2",
+      "Photodepot-Receipt-Version": "3",
+      "Photodepot-Account-Version": "1",
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   })
@@ -205,7 +209,7 @@ function pairing(device, action = "start", pairingId) {
     action
   )
 }
-function receipt(envelope, device, status) {
+function receipt(envelope, device, status, endsAt = grantedUntil) {
   const bytes = Buffer.from(envelope.payload, "base64url")
   assert.ok(
     verify(
@@ -218,7 +222,7 @@ function receipt(envelope, device, status) {
   const payload = JSON.parse(bytes)
   assert.equal(payload.deviceId, device.deviceId)
   assert.equal(payload.status, status)
-  assert.equal(payload.subscriptionEndsAt, grantedUntil)
+  assert.equal(payload.subscriptionEndsAt, endsAt)
   assert.ok(payload.expiresAt > payload.issuedAt)
   assert.ok(payload.expiresAt - payload.issuedAt <= LICENSE_GRACE_MS)
   for (const field of [
@@ -231,17 +235,34 @@ function receipt(envelope, device, status) {
     assert.equal(field in payload, false)
   return payload
 }
-async function verifyMac(device, status) {
+function signedClaims(envelope, device, status) {
+  const bytes = Buffer.from(envelope.payload, "base64url")
+  assert.ok(
+    verify(
+      null,
+      bytes,
+      authority.publicKey,
+      Buffer.from(envelope.signature, "base64url")
+    )
+  )
+  const claims = JSON.parse(bytes)
+  assert.equal(claims.deviceId, device.deviceId)
+  assert.equal(claims.status, status)
+  return claims
+}
+async function verifyMac(device, sessionId, action = "verify") {
   const challenge = randomBytes(32).toString("base64url")
   const body = {
+    sessionId,
     deviceId: device.deviceId,
     challenge,
-    signature: sign(
+    deviceSignature: sign(
       null,
       Buffer.from(
         JSON.stringify([
-          "photodepot-license-v1",
-          "verify",
+          "photodepot-account-session-v1",
+          action,
+          sessionId,
           device.deviceId,
           challenge,
         ])
@@ -249,15 +270,34 @@ async function verifyMac(device, status) {
       device.privateKey
     ).toString("base64url"),
   }
-  const response = await handleLicenseRequest(
-    request("/api/licenses/verify", body),
+  const response = await handleDesktopSession(
+    request(`/api/account/session/${action}`, body),
     env,
-    "verify"
+    action
   )
   assert.equal(response.status, 200)
-  const payload = receipt(await response.json(), device, status)
-  assert.equal(payload.challenge, challenge)
-  return payload
+  const result = await response.json()
+  const claims = signedClaims(
+    result.session,
+    device,
+    action === "logout" ? "revoked" : "active"
+  )
+  assert.equal(claims.challenge, challenge)
+  return { ...result, claims }
+}
+async function account(cookie, body) {
+  const response = await handleAccountSubscription(
+    request("/api/account/subscription", body, cookie),
+    env
+  )
+  assert.ok([200, 201].includes(response.status), await response.clone().text())
+  return response.json()
+}
+async function review(cookie, body) {
+  return handleAdminSubscriptionRequests(
+    request("/api/admin/subscription-requests", body, cookie),
+    env
+  )
 }
 async function signIn(started) {
   const code = new URL(started.approvalUrl).searchParams.get("code")
@@ -331,17 +371,29 @@ async function admin(action, expectedRevision, cookie, values = {}) {
   return (await response.json()).subscription
 }
 async function approve(started, cookie) {
+  const form = await handleAccountApproval(
+    new Request(started.approvalUrl, { headers: { cookie } }),
+    env
+  )
+  assert.equal(form.status, 200)
+  const csrf = (await form.text()).match(/name="csrf" value="([^"]+)"/)?.[1]
+  assert.ok(csrf)
   const response = await handleAccountApproval(
     new Request(started.approvalUrl, {
       method: "POST",
-      headers: { origin, cookie },
+      headers: {
+        origin,
+        cookie,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ csrf }),
     }),
     env
   )
   assert.equal(response.status, 200)
 }
 
-test("signup and login require an Owner grant before Mac pairing, revocation and replacement", async () => {
+test("browser login, free Mac approval, atomic access approval and independent device removal share one lifecycle", async () => {
   const firstMac = mac()
   const startResponse = await pairing(firstMac)
   assert.equal(startResponse.status, 201)
@@ -349,104 +401,151 @@ test("signup and login require an Owner grant before Mac pairing, revocation and
   assert.equal(new URL(started.approvalUrl).origin, origin)
   const accountCookie = await signIn(started)
   assert.equal(await getSubscription(env.DB, customerId), null)
-  await signIn(started)
-  assert.equal(await getSubscription(env.DB, customerId), null)
   assert.deepEqual(await listSubscriptionAudit(env.DB, customerId), [])
-  const blocked = await handleAccountApproval(
-    new Request(started.approvalUrl, {
-      method: "POST",
-      headers: { origin, cookie: accountCookie },
-    }),
-    env
-  )
-  assert.equal(blocked.status, 403)
-  assert.equal((await blocked.text()).includes("Approve Mac sign-in"), false)
-  const pending = await pairing(firstMac, "poll", started.pairingId)
-  assert.equal(pending.status, 200)
-  assert.deepEqual(await pending.json(), { status: "pending" })
-  assert.equal(await getSubscription(env.DB, customerId), null)
+  await approve(started, accountCookie)
+  const polled = await pairing(firstMac, "poll", started.pairingId)
+  assert.equal(polled.status, 200)
+  const paired = await polled.json()
+  const firstSession = signedClaims(paired.session, firstMac, "active")
+  assert.equal(paired.receipt, undefined)
+  assert.equal(firstSession.challenge, firstMac.challenge)
+  assert.equal(firstSession.userId, customerId)
+  assert.equal(firstSession.expiresAt - firstSession.issuedAt, LICENSE_GRACE_MS)
+  let view = await account(accountCookie)
+  assert.equal(view.access.canUseLocal, false)
+  assert.equal(view.access.canHost, false)
+  assert.equal(view.access.status, "none")
+  assert.equal(view.devices[0].sessionId, firstSession.sessionId)
+  assert.equal("subscription" in view, false)
+  for (const privateField of ["notes", "audit", "publicKey", "privateKey"])
+    assert.equal(privateField in view, false)
 
+  const requestResult = await account(accountCookie, {
+    action: "request-renewal",
+    message: "Please approve trial access",
+  })
+  assert.equal(requestResult.created, true)
+  assert.equal(
+    (await account(accountCookie, { action: "request-renewal" })).request.id,
+    requestResult.request.id
+  )
+  assert.equal(await getSubscription(env.DB, customerId), null)
   const cookie = await ownerCookie()
-  const ungranted = await (
-    await handleAdminSubscriptions(
-      request("/api/admin/subscriptions", undefined, cookie),
-      env
-    )
-  ).json()
-  assert.equal(ungranted.users[0].subscription, null)
-  assert.equal(ungranted.overview.totalSubscriptions, 0)
-  const trial = await admin("set", 0, cookie, {
+  const approval = await review(cookie, {
+    action: "approve",
+    requestId: requestResult.request.id,
+    expectedRevision: requestResult.request.revision ?? 1,
+    expectedSubscriptionRevision: 0,
     type: "trial",
     endsAt: grantedUntil,
-    reason: "Owner-approved alpha access",
+    note: "Owner-approved alpha access",
   })
-  assert.ok(trial.startsAt > signupAt)
+  assert.equal(approval.status, 200, await approval.clone().text())
+  const approved = await approval.json()
+  assert.equal(approved.request.status, "resolved")
+  assert.equal(approved.subscription.revision, 1)
+  const trial = await getSubscription(env.DB, customerId)
   assert.equal(trial.endsAt, grantedUntil)
-  assert.equal(trial.type, "trial")
-  assert.equal(trial.revision, 1)
-  await approve(started, accountCookie)
-  const poll = await pairing(firstMac, "poll", started.pairingId)
-  assert.equal(poll.status, 200)
-  const paired = await poll.json()
-  assert.equal(paired.status, "approved")
-  const firstReceipt = receipt(paired.receipt, firstMac, "active")
-  assert.equal(firstReceipt.licenseId, trial.id)
-  assert.equal(firstReceipt.type, "trial")
-  assert.equal(firstReceipt.challenge, firstMac.challenge)
-  assert.equal(firstReceipt.revision, 2)
-  assert.ok(firstReceipt.expiresAt <= trial.endsAt)
-  assert.equal((await verifyMac(firstMac, "active")).revision, 2)
-
-  const before = await (
-    await handleAdminSubscriptions(
-      request("/api/admin/subscriptions", undefined, cookie),
-      env
-    )
-  ).json()
-  assert.equal(before.billingMode, "manual")
-  assert.equal(before.overview.activeTrials, 1)
-  assert.equal(before.overview.assignedMacs, 1)
-  assert.equal(before.users[0].subscription.devices[0].id, firstMac.deviceId)
-  const revoked = await admin("revoke", 2, cookie, {
-    reason: "Local revocation test",
-  })
-  assert.equal(revoked.status, "revoked")
-  assert.equal((await verifyMac(firstMac, "revoked")).revision, 3)
-  // Signing in again cannot revive a revoked Owner grant.
-  await signIn(started)
-  assert.deepEqual(await getSubscription(env.DB, customerId), revoked)
-  const restored = await admin("restore", 3, cookie)
-  assert.equal(restored.status, "active")
-  assert.equal(restored.endsAt, trial.endsAt)
-  assert.equal((await verifyMac(firstMac, "active")).revision, 4)
-  const reset = await admin("reset-device", 4, cookie, {
-    reason: "Local replacement Mac test",
-  })
-  assert.deepEqual(reset.devices, [])
-  assert.equal(reset.bindingRevision, 2)
-  assert.equal((await verifyMac(firstMac, "revoked")).revision, 5)
-  assert.equal((await pairing(firstMac, "poll", started.pairingId)).status, 409)
-
-  const replacement = mac()
-  const newStart = await pairing(replacement)
-  assert.equal(newStart.status, 201)
-  const newPairing = await newStart.json()
-  await approve(newPairing, accountCookie)
-  const replacementPoll = await pairing(
-    replacement,
-    "poll",
-    newPairing.pairingId
-  )
-  assert.equal(replacementPoll.status, 200)
-  const finalReceipt = receipt(
-    (await replacementPoll.json()).receipt,
-    replacement,
+  assert.equal(trial.startsAt > signupAt, true)
+  const verified = await verifyMac(firstMac, firstSession.sessionId)
+  const grantClaims = receipt(verified.receipt, firstMac, "active")
+  assert.equal(grantClaims.licenseId, trial.id)
+  assert.equal(grantClaims.revision, 1)
+  assert.equal(grantClaims.challenge, verified.claims.challenge)
+  const compatible = signedClaims(
+    verified.receipt.collaborationReceipt,
+    firstMac,
     "active"
   )
-  assert.equal(finalReceipt.licenseId, trial.id)
-  assert.equal(finalReceipt.revision, 6)
-  assert.equal((await verifyMac(firstMac, "revoked")).revision, 6)
-  assert.equal((await verifyMac(replacement, "active")).revision, 6)
+  assert.equal("subscriptionEndsAt" in compatible, false)
+  assert.equal(compatible.licenseId, grantClaims.licenseId)
+  view = await account(accountCookie)
+  assert.equal(view.access.canUseLocal, true)
+  assert.equal(view.access.canHost, true)
+  assert.equal(view.access.tier, "trial")
+
+  await account(accountCookie, {
+    action: "set-reminders",
+    enabled: false,
+    expectedRevision: trial.revision,
+  })
+  const optedOut = await getSubscription(env.DB, customerId)
+  assert.equal(optedOut.endsAt, trial.endsAt)
+  assert.equal(optedOut.remindersEnabled, false)
+  assert.equal((await account(accountCookie)).access.canHost, true)
+  const nextRequest = await account(accountCookie, {
+    action: "request-renewal",
+  })
+  const beforeAudits = await listSubscriptionAudit(env.DB, customerId)
+  const stale = await review(cookie, {
+    action: "approve",
+    requestId: nextRequest.request.id,
+    expectedRevision: 1,
+    expectedSubscriptionRevision: trial.revision,
+    type: "regular",
+    endsAt: grantedUntil + day,
+  })
+  assert.equal(stale.status, 409)
+  assert.deepEqual(await getSubscription(env.DB, customerId), optedOut)
+  assert.equal(
+    (await getAccountRequest(env.DB, nextRequest.request.id)).status,
+    "pending"
+  )
+  assert.deepEqual(
+    await listSubscriptionAudit(env.DB, customerId),
+    beforeAudits
+  )
+
+  const revoked = await admin("revoke", optedOut.revision, cookie, {
+    reason: "Local withdrawal test",
+  })
+  const freeAgain = await verifyMac(firstMac, firstSession.sessionId)
+  assert.equal(freeAgain.receipt, undefined)
+  assert.equal(freeAgain.claims.status, "active")
+  view = await account(accountCookie)
+  assert.equal(view.access.status, "revoked")
+  assert.equal(view.access.canHost, false)
+  assert.equal(view.access.canUseLocal, false)
+  const restored = await admin("restore", revoked.revision, cookie)
+  assert.equal(restored.endsAt, trial.endsAt)
+  assert.ok((await verifyMac(firstMac, firstSession.sessionId)).receipt)
+
+  const secondMac = mac()
+  const secondStart = await (await pairing(secondMac)).json()
+  await approve(secondStart, accountCookie)
+  const second = await (
+    await pairing(secondMac, "poll", secondStart.pairingId)
+  ).json()
+  const secondSession = signedClaims(second.session, secondMac, "active")
+  assert.equal(
+    (await getSubscription(env.DB, customerId)).revision,
+    restored.revision
+  )
+  const removed = await handleAdminSubscriptions(
+    request(
+      "/api/admin/subscriptions",
+      {
+        action: "remove-device",
+        userId: customerId,
+        sessionId: firstSession.sessionId,
+        expectedSessionRevision: firstSession.revision,
+        reason: "Selected computer replacement",
+      },
+      cookie
+    ),
+    env
+  )
+  assert.equal(removed.status, 200, await removed.clone().text())
+  assert.equal(
+    (await getSubscription(env.DB, customerId)).revision,
+    restored.revision
+  )
+  view = await account(accountCookie)
+  assert.equal(view.devices.length, 1)
+  assert.equal(view.devices[0].sessionId, secondSession.sessionId)
+  const oldLogout = await verifyMac(firstMac, firstSession.sessionId, "logout")
+  assert.equal(oldLogout.receipt, undefined)
+  assert.ok((await verifyMac(secondMac, secondSession.sessionId)).receipt)
   const historyResponse = await handleAdminSubscriptions(
     request(
       `/api/admin/subscriptions?history=1&userId=${customerId}`,
@@ -455,37 +554,19 @@ test("signup and login require an Owner grant before Mac pairing, revocation and
     ),
     env
   )
-  assert.equal(historyResponse.status, 200)
   const history = await historyResponse.json()
-  assert.equal(history.subscription.endsAt, trial.endsAt)
-  assert.equal(history.subscription.devices[0].id, replacement.deviceId)
   assert.equal(history.devices.length, 2)
   assert.equal(history.devices.filter((device) => device.current).length, 1)
-  const audit = await listSubscriptionAudit(env.DB, customerId)
-  assert.equal(audit.length, 6)
-  assert.equal(audit.filter((entry) => entry.action === "set").length, 1)
+  assert.equal(history.devices[0].sessionId !== undefined, true)
   assert.equal(
-    audit.find((entry) => entry.action === "set").actor,
-    "owner@example.test"
+    history.audit.some((entry) => entry.action === "set"),
+    true
   )
   assert.equal(
-    audit.find((entry) => entry.action === "set").reason,
-    "Owner-approved alpha access"
+    history.deviceAudit.some(
+      (entry) => entry.reason === "Selected computer replacement"
+    ),
+    true
   )
-  assert.equal(
-    audit.some((entry) => entry.action === "initial-trial"),
-    false
-  )
-  assert.equal(
-    audit.filter((entry) => entry.action === "bind-device").length,
-    2
-  )
-  assert.equal(
-    audit.find((entry) => entry.action === "revoke").reason,
-    "Local revocation test"
-  )
-  assert.equal(
-    audit.find((entry) => entry.action === "reset-device").reason,
-    "Local replacement Mac test"
-  )
+  assert.equal((await getSubscription(env.DB, customerId)).endsAt, grantedUntil)
 })

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto"
 import type { Env } from "./cloudflare.ts"
 import { getSubscription, listSubscriptions } from "./subscription-store.ts"
+import { trialReminderEligible } from "./account-access.ts"
 import { getWorkOSUser } from "./workos-users.ts"
 
 const day = 86_400_000
@@ -61,7 +62,7 @@ async function enqueueReminders(env: Env, now: number) {
   await env.DB.prepare(
     `INSERT INTO subscription_reminders (id,subscription_id,user_id,end_at,kind,created_at,updated_at,retry_at)
      SELECT lower(hex(randomblob(16))),s.id,s.user_id,s.end_at,'trial-ending',?,?,? FROM subscriptions s
-     WHERE s.type='trial' AND s.status='active' AND s.canceled_at IS NULL AND s.started_at<=? AND s.end_at>? AND s.end_at<=?
+     WHERE s.type='trial' AND s.status='active' AND s.reminder_opt_out_at IS NULL AND s.started_at<=? AND s.end_at>? AND s.end_at<=?
      AND NOT EXISTS (SELECT 1 FROM subscription_reminders r WHERE r.subscription_id=s.id AND r.end_at=s.end_at AND r.kind='trial-ending')
      ORDER BY s.end_at,s.id LIMIT 100 ON CONFLICT(subscription_id,end_at,kind) DO NOTHING`
   )
@@ -127,10 +128,8 @@ export async function runSubscriptionReminders(
     try {
       const subscription = await getSubscription(env.DB, row.user_id, now)
       if (
-        subscription?.status !== "active" ||
-        subscription.cancelAtPeriodEnd ||
-        subscription.type !== "trial" ||
-        subscription.endsAt !== row.end_at
+        !trialReminderEligible(subscription, now) ||
+        subscription?.endsAt !== row.end_at
       ) {
         await finish(
           env,
@@ -184,7 +183,7 @@ export async function runSubscriptionReminders(
       const sender = row.sender ?? env.PHOTODEPOT_EMAIL_FROM ?? null
       const message =
         row.message ??
-        `Your free Photodepot trial ends on ${new Date(row.end_at).toISOString().replace("T", " ").replace(".000Z", " UTC")}.\n\nYou can view your subscription and connected Macs, or request renewal here:\n${portal}\n\nRenewals are managed by an administrator. No payment is collected automatically.\n\nPhotodepot`
+        `Your free Photodepot trial ends on ${new Date(row.end_at).toISOString().replace("T", " ").replace(".000Z", " UTC")}.\n\nYou can view your access and connected computers, or request an extension here:\n${portal}\n\nAccess extensions are managed by an administrator. No payment is collected automatically.\n\nPhotodepot`
       const prepared = await env.DB.prepare(
         `UPDATE subscription_reminders SET recipient=?,sender=?,subject=?,message=? WHERE id=? AND status='sending' AND lease_token=? AND lease_until>? RETURNING id`
       )
@@ -210,10 +209,8 @@ export async function runSubscriptionReminders(
         options.now ?? Date.now()
       )
       if (
-        current?.status !== "active" ||
-        current.cancelAtPeriodEnd ||
-        current.type !== "trial" ||
-        current.endsAt !== row.end_at
+        !trialReminderEligible(current, options.now ?? Date.now()) ||
+        current?.endsAt !== row.end_at
       ) {
         await finish(
           env,
@@ -250,7 +247,7 @@ export async function runSubscriptionReminders(
          AND (first_attempt_at IS NULL OR (first_attempt_at>?
            AND first_attempt_at>CAST(unixepoch('subsec') * 1000 AS INTEGER)-?))
          AND EXISTS (SELECT 1 FROM subscriptions s WHERE s.id=subscription_reminders.subscription_id
-           AND s.status='active' AND s.type='trial' AND s.canceled_at IS NULL AND s.started_at<=? AND s.end_at=subscription_reminders.end_at AND s.end_at>?
+           AND s.status='active' AND s.type='trial' AND s.reminder_opt_out_at IS NULL AND s.started_at<=? AND s.end_at=subscription_reminders.end_at AND s.end_at>?
            AND s.end_at>CAST(unixepoch('subsec') * 1000 AS INTEGER))
          RETURNING first_attempt_at,lease_until,end_at`
       )
@@ -389,7 +386,7 @@ export async function runSubscriptionReminders(
 
 export async function subscriptionReminderQueue(env: Env, now = Date.now()) {
   const ids = await env.DB.prepare(
-    `SELECT user_id FROM subscriptions WHERE status='active' AND canceled_at IS NULL AND started_at<=? AND end_at>? AND end_at<=? ORDER BY end_at,user_id LIMIT 100`
+    `SELECT user_id FROM subscriptions WHERE status='active' AND reminder_opt_out_at IS NULL AND started_at<=? AND end_at>? AND end_at<=? ORDER BY end_at,user_id LIMIT 100`
   )
     .bind(now, now, now + 7 * day)
     .all<{ user_id: string }>()

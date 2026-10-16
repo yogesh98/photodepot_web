@@ -9,7 +9,7 @@ import {
 import {
   setSubscription,
   changeSubscription,
-  changeSubscriptionRenewal,
+  changeSubscriptionReminders,
 } from "../lib/subscription-store.ts"
 import { handleScheduledReminders } from "../functions/api/internal/subscription-reminders.ts"
 import { triggerReminders } from "../workers/subscription-reminders.ts"
@@ -458,12 +458,12 @@ test("internal triggers require a dedicated secret and scheduler obeys bounded b
   )
 })
 
-test("renewal cancellation suppresses new reminders and stops queued delivery without revoking access", async () => {
+test("reminder opt-out suppresses new reminders and stops queued delivery without revoking access", async () => {
   const canceled = await grant("user_canceled_renewal")
-  await changeSubscriptionRenewal(
+  await changeSubscriptionReminders(
     env.DB,
     canceled.userId,
-    "cancel-renewal",
+    false,
     canceled.revision,
     "customer@example.test",
     now
@@ -473,10 +473,10 @@ test("renewal cancellation suppresses new reminders and stops queued delivery wi
   const previousFetch = globalThis.fetch
   globalThis.fetch = async (input, options) => {
     if (String(input).includes(`/users/${active.userId}`))
-      await changeSubscriptionRenewal(
+      await changeSubscriptionReminders(
         env.DB,
         active.userId,
-        "cancel-renewal",
+        false,
         active.revision,
         "customer@example.test",
         now

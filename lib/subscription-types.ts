@@ -1,15 +1,27 @@
 export type SubscriptionType = "trial" | "regular"
 export type SubscriptionStatus = "active" | "expired" | "revoked"
 
-/** Dashboard-safe Mac assignment data. Device public keys stay on the server. */
-export interface SubscriptionDevice {
-  id: string
-  bindingRevision: number
-  assignmentRevision: number
-  activatedAt: number
+/** A provider-neutral access decision. Verified identity is checked by each caller. */
+export interface AccountAccess {
+  tier: "free" | "trial" | "standard"
+  status: "none" | SubscriptionStatus
+  source: "manual" | null
+  startsAt: number | null
+  endsAt: number | null
+  canUseLocal: boolean
+  canHost: boolean
 }
 
-export interface SubscriptionDeviceHistory extends SubscriptionDevice {
+/** Public device information; public keys and proof state stay on the server. */
+export interface AccountDevice {
+  id: string
+  activatedAt: number
+  sessionId: string
+  revision: number
+  deviceName: string | null
+  lastUsedAt: number | null
+}
+export interface AccountDeviceHistory extends AccountDevice {
   current: boolean
 }
 
@@ -23,11 +35,7 @@ export interface SubscriptionSummary {
   updatedAt: number
   revision: number
   notes: string
-  bindingRevision: number
-  devices: SubscriptionDevice[]
-  deviceLimit: number
-  cancelAtPeriodEnd: boolean
-  canceledAt: number | null
+  remindersEnabled: boolean
 }
 
 export interface SubscriptionOverview {
@@ -39,7 +47,6 @@ export interface SubscriptionOverview {
   revoked: number
   expiringSoon: number
   assignedMacs: number
-  canceling: number
   waitlistTotal: number
   waitlistLast30Days: number
   openRequests: number
@@ -55,6 +62,8 @@ export interface WorkOSUserSummary {
   emailVerified: boolean
   createdAt: number
   subscription: SubscriptionSummary | null
+  access: AccountAccess
+  devices: AccountDevice[]
 }
 
 export interface SubscriptionAudit {

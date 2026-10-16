@@ -13,7 +13,7 @@ type ReminderQueue = {
   mode: "resend" | "disabled"
   upcoming: {
     subscription: SubscriptionSummary
-    user: Omit<WorkOSUserSummary, "subscription"> | null
+    user: Omit<WorkOSUserSummary, "subscription" | "access" | "devices"> | null
   }[]
   outbox: {
     id: string
@@ -45,7 +45,7 @@ export function AdminSubscriptionReminders({
 }: {
   disabled: boolean
   refreshVersion?: number
-  onReview: (user: WorkOSUserSummary) => void
+  onReview: (userId: string) => void
 }) {
   const [queue, setQueue] = useState<ReminderQueue | null>(null)
   const [loading, setLoading] = useState(true)
@@ -221,12 +221,7 @@ export function AdminSubscriptionReminders({
                     type="button"
                     className={styles.quiet}
                     disabled={disabled}
-                    onClick={() =>
-                      onReview({
-                        ...user,
-                        subscription,
-                      })
-                    }
+                    onClick={() => onReview(user.id)}
                   >
                     Review access
                   </Button>

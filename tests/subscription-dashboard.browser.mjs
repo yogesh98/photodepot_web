@@ -22,7 +22,7 @@ let browser, context, page, server, origin, state
 
 function fixtures() {
   const now = Date.now()
-  const subscription = (id, type, status, days, device = null) => ({
+  const subscription = (id, type, status, days) => ({
     id: `subscription_${id}`,
     userId: `user_${id}`,
     type,
@@ -31,12 +31,8 @@ function fixtures() {
     endsAt: now + days * day,
     updatedAt: now,
     revision: 1,
-    bindingRevision: 0,
     notes: "",
-    cancelAtPeriodEnd: false,
-    canceledAt: null,
-    devices: device ? [device] : [],
-    deviceLimit: 2,
+    remindersEnabled: true,
   })
   const users = [
     {
@@ -46,12 +42,7 @@ function fixtures() {
       lastName: "Example",
       emailVerified: true,
       createdAt: now - day,
-      subscription: subscription("alice", "trial", "active", 4, {
-        id: firstMac,
-        activatedAt: now - day,
-        bindingRevision: 0,
-        assignmentRevision: 0,
-      }),
+      subscription: subscription("alice", "trial", "active", 4),
     },
     {
       id: "user_bob",
@@ -92,14 +83,15 @@ function fixtures() {
   ]
   users[0].subscription.notes =
     "Pilot account <script>window.injected=true</script>"
-  users[4].subscription.cancelAtPeriodEnd = true
-  users[4].subscription.canceledAt = now - day
-  users[0].subscription.devices.push({
-    id: secondMac,
-    activatedAt: now,
-    bindingRevision: 0,
-    assignmentRevision: 0,
-  })
+  users[0].devices = [firstMac, secondMac].map((id, index) => ({
+    id,
+    activatedAt: now - day,
+    sessionId: `00000000-0000-4000-8000-00000000000${index + 1}`,
+    revision: 1,
+    deviceName: index === 0 ? "Alice’s MacBook Pro" : "Alice’s iMac",
+    lastUsedAt: now,
+  }))
+  for (const user of users) user.devices ??= []
   return {
     users,
     waitlist: [
@@ -130,6 +122,7 @@ function fixtures() {
     ],
     listQueries: [],
     requests: [],
+    deviceAudits: [],
     failNext: null,
     listFailure: false,
     delayNext: 0,
@@ -137,6 +130,7 @@ function fixtures() {
     customerMutations: [],
     customerFailNext: null,
     reviewFailNext: null,
+    reviewMutations: [],
     reminderOutbox: [],
     reminderRuns: 0,
     reminderFailure: null,
@@ -180,12 +174,10 @@ function overview() {
     expiringSoon: active.filter(
       (subscription) => subscription.endsAt <= now + 7 * day
     ).length,
-    assignedMacs: subscriptions.reduce(
-      (sum, subscription) => sum + subscription.devices.length,
+    assignedMacs: state.users.reduce(
+      (sum, user) => sum + user.devices.length,
       0
     ),
-    canceling: active.filter((subscription) => subscription.cancelAtPeriodEnd)
-      .length,
     waitlistTotal: state.waitlist.length,
     waitlistLast30Days: state.waitlist.filter(
       (entry) => entry.createdAt >= now - 30 * day
@@ -196,6 +188,29 @@ function overview() {
     asOf: now,
     expiringWithinDays: 7,
   }
+}
+
+function accountAccess(user) {
+  const grant = user.subscription
+  const status = !grant
+    ? "none"
+    : grant.status === "revoked"
+      ? "revoked"
+      : grant.endsAt <= Date.now()
+        ? "expired"
+        : "active"
+  return {
+    tier: !grant ? "free" : grant.type === "trial" ? "trial" : "standard",
+    status,
+    source: grant ? "manual" : null,
+    startsAt: grant?.startsAt ?? null,
+    endsAt: grant?.endsAt ?? null,
+    canUseLocal: status === "active",
+    canHost: status === "active",
+  }
+}
+function publicUser(user) {
+  return { ...user, access: accountAccess(user) }
 }
 
 function respond(response, status, body) {
@@ -215,18 +230,19 @@ async function handleApi(request, response, url) {
         (user) => user.id === url.searchParams.get("userId")
       )
       return respond(response, 200, {
-        user,
+        user: publicUser(user),
+        access: accountAccess(user),
         subscription: user.subscription,
         requests: state.accountRequests.filter(
           (item) => item.userId === user.id
         ),
-        devices:
-          user.devices ??
-          user.subscription?.devices.map((device) => ({
-            ...device,
-            current: true,
-          })) ??
-          [],
+        deviceAudit: state.deviceAudits.filter(
+          (entry) => entry.userId === user.id
+        ),
+        devices: (user.deviceHistory ?? user.devices).map((device) => ({
+          ...device,
+          current: device.current ?? true,
+        })),
         audit: [
           {
             id: "audit_test",
@@ -260,7 +276,6 @@ async function handleApi(request, response, url) {
         (filter === "active" && active) ||
         (filter === "trial" && active && sub.type === "trial") ||
         (filter === "standard" && active && sub.type === "regular") ||
-        (filter === "canceling" && active && sub.cancelAtPeriodEnd) ||
         (filter === "expiring" && active && sub.endsAt <= now + 7 * day) ||
         (filter === "expired" &&
           sub &&
@@ -276,7 +291,7 @@ async function handleApi(request, response, url) {
       : 0
     const users = matching.slice(start, start + 3)
     return respond(response, 200, {
-      users,
+      users: users.map(publicUser),
       nextCursor:
         start + users.length < matching.length ? users.at(-1).id : null,
       overview: overview(),
@@ -305,6 +320,30 @@ async function handleApi(request, response, url) {
     })
   }
   const user = state.users.find((user) => user.id === body.userId)
+  if (body.action === "remove-device") {
+    const device = user.devices.find(
+      (device) =>
+        device.sessionId === body.sessionId &&
+        device.revision === body.expectedSessionRevision
+    )
+    if (!device)
+      return respond(response, 409, { error: "Mac session conflict" })
+    user.deviceHistory = user.devices.map((value) => ({
+      ...value,
+      current: value !== device,
+    }))
+    user.devices = user.devices.filter((value) => value !== device)
+    state.deviceAudits.push({
+      id: `device-audit-${state.deviceAudits.length}`,
+      userId: user.id,
+      sessionId: device.sessionId,
+      action: "remove-device",
+      actor: "owner@example.test",
+      reason: body.reason ?? "",
+      createdAt: Date.now(),
+    })
+    return respond(response, 200, { devices: user.devices })
+  }
   if (body.expectedRevision !== (user.subscription?.revision ?? 0))
     return respond(response, 409, { error: "Revision conflict" })
   const now = Date.now()
@@ -318,11 +357,7 @@ async function handleApi(request, response, url) {
       startsAt: now,
       endsAt: body.endsAt || now + body.durationDays * day,
       notes: body.notes,
-      cancelAtPeriodEnd: false,
-      canceledAt: null,
-      bindingRevision: user.subscription?.bindingRevision ?? 0,
-      devices: user.subscription?.devices ?? [],
-      deviceLimit: 2,
+      remindersEnabled: user.subscription?.remindersEnabled ?? true,
       revision: (user.subscription?.revision ?? 0) + 1,
       updatedAt: now,
     }
@@ -335,17 +370,7 @@ async function handleApi(request, response, url) {
     if (body.action === "revoke") subscription.status = "revoked"
     if (body.action === "restore")
       subscription.status = subscription.endsAt > now ? "active" : "expired"
-    if (body.action === "reset-device") {
-      subscription.devices = body.deviceId
-        ? subscription.devices.filter((device) => device.id !== body.deviceId)
-        : []
-      if (!body.deviceId) subscription.bindingRevision++
-    }
     if (body.action === "update-notes") subscription.notes = body.notes
-    if (["cancel-renewal", "resume-renewal"].includes(body.action)) {
-      subscription.cancelAtPeriodEnd = body.action === "cancel-renewal"
-      subscription.canceledAt = subscription.cancelAtPeriodEnd ? now : null
-    }
     subscription.revision++
     subscription.updatedAt = now
   }
@@ -369,25 +394,15 @@ function customerRequest(item) {
   }
 }
 function customerAccount() {
-  const subscription = state.users[0].subscription
+  const user = state.users[0]
   return {
-    user: { email: state.users[0].email },
-    subscription: subscription
-      ? {
-          type: subscription.type,
-          status: subscription.status,
-          startsAt: subscription.startsAt,
-          endsAt: subscription.endsAt,
-          revision: subscription.revision,
-          cancelAtPeriodEnd: subscription.cancelAtPeriodEnd,
-          canceledAt: subscription.canceledAt,
-          devices: subscription.devices.map(({ id, activatedAt }) => ({
-            id,
-            activatedAt,
-          })),
-          deviceLimit: 2,
-        }
-      : null,
+    user: { email: user.email },
+    access: accountAccess(user),
+    devices: user.devices,
+    reminders: {
+      enabled: user.subscription?.remindersEnabled ?? true,
+      revision: user.subscription?.revision ?? 0,
+    },
     requests: state.accountRequests
       .filter((item) => item.userId === "user_alice")
       .map(customerRequest),
@@ -407,30 +422,27 @@ async function customerApi(request, response) {
           : "Session expired",
     })
   }
-  if (
-    ["cancel-renewal", "resume-renewal", "remove-device"].includes(body.action)
-  ) {
+  if (body.action === "remove-device") {
+    const user = state.users[0]
+    const device = user.devices.find(
+      (device) =>
+        device.sessionId === body.sessionId &&
+        device.revision === body.expectedSessionRevision
+    )
+    if (!device)
+      return respond(response, 409, {
+        error: "This Mac changed. Refresh your account.",
+      })
+    user.devices = user.devices.filter((value) => value !== device)
+    return respond(response, 200, { devices: user.devices })
+  }
+  if (body.action === "set-reminders") {
     const subscription = state.users[0].subscription
     if (body.expectedRevision !== subscription.revision)
       return respond(response, 409, { error: "Revision conflict" })
-    if (body.action === "remove-device") {
-      if (!subscription.devices.some((device) => device.id === body.deviceId))
-        return respond(response, 409, {
-          error: "This Mac is no longer connected. Refresh your account.",
-        })
-      subscription.devices = subscription.devices.filter(
-        (device) => device.id !== body.deviceId
-      )
-    } else {
-      subscription.cancelAtPeriodEnd = body.action === "cancel-renewal"
-      subscription.canceledAt = subscription.cancelAtPeriodEnd
-        ? Date.now()
-        : null
-    }
+    subscription.remindersEnabled = body.enabled
     subscription.revision++
-    return respond(response, 200, {
-      subscription: customerAccount().subscription,
-    })
+    return respond(response, 200, { reminders: customerAccount().reminders })
   }
   if (body.action !== "request-renewal")
     return respond(response, 400, { error: "Unsupported account action" })
@@ -521,6 +533,7 @@ async function requestsApi(request, response, url) {
     })
   }
   const body = await bodyOf(request)
+  state.reviewMutations.push(body)
   if (state.reviewFailNext) {
     const status = state.reviewFailNext
     state.reviewFailNext = null
@@ -532,10 +545,30 @@ async function requestsApi(request, response, url) {
   const item = state.accountRequests.find((item) => item.id === body.requestId)
   if (item.revision !== body.expectedRevision)
     return respond(response, 409, { error: "Request conflict" })
+  if (body.action === "approve") {
+    const user = state.users.find((user) => user.id === item.userId)
+    if (
+      (user.subscription?.revision ?? 0) !== body.expectedSubscriptionRevision
+    )
+      return respond(response, 409, { error: "Access changed" })
+    user.subscription = {
+      ...user.subscription,
+      id: user.subscription?.id ?? `subscription_${user.id}`,
+      userId: user.id,
+      type: body.type,
+      status: "active",
+      startsAt: Date.now(),
+      endsAt: body.endsAt,
+      revision: (user.subscription?.revision ?? 0) + 1,
+      notes: user.subscription?.notes ?? "",
+      remindersEnabled: user.subscription?.remindersEnabled ?? true,
+      updatedAt: Date.now(),
+    }
+  }
   item.status =
     body.action === "acknowledge"
       ? "acknowledged"
-      : body.action === "resolve"
+      : ["approve", "resolve"].includes(body.action)
         ? "resolved"
         : "rejected"
   item.adminNote = body.note
@@ -788,7 +821,7 @@ test("Owners can switch between their individual and admin dashboards", async ()
     .click()
   await expect(page).toHaveURL(`${origin}/account`)
   await expect(
-    page.getByRole("heading", { name: "Plan & connected Macs" })
+    page.getByRole("heading", { name: "Access & connected Macs" })
   ).toBeVisible()
   await expect(switcher).toContainText("Individual dashboard")
   await switcher.click()
@@ -813,7 +846,7 @@ test("ordinary customers have no dashboard switcher or admin entry", async () =>
   state.dashboardAccess = false
   await page.goto(`${origin}/account`)
   await expect(
-    page.getByRole("heading", { name: "Plan & connected Macs" })
+    page.getByRole("heading", { name: "Access & connected Macs" })
   ).toBeVisible()
   await expect
     .poll(() => state.dashboardAccessQueries.at(-1)?.dashboard)
@@ -829,7 +862,7 @@ test("ordinary customers have no dashboard switcher or admin entry", async () =>
     page.getByRole("navigation", { name: "Account navigation" })
   ).toBeVisible()
   await expect(
-    page.getByRole("button", { name: "Cancel renewal", exact: true })
+    page.getByRole("button", { name: "Turn off reminders", exact: true })
   ).toBeEnabled()
 })
 
@@ -852,7 +885,7 @@ test("dashboard switching stays hidden while access loads or cannot be verified"
       page.getByText("Admin dashboard", { exact: true })
     ).toHaveCount(0)
     await expect(
-      page.getByRole("button", { name: "Request renewal", exact: true })
+      page.getByRole("button", { name: "Request extension", exact: true })
     ).toBeEnabled()
   }
 })
@@ -988,36 +1021,19 @@ test("server-side search, subscription segments, and pagination include the comp
   })
 })
 
-test("the admin overview links live counts to active access and canceled renewal segments", async () => {
+test("the admin overview links live access counts to Accounts filters", async () => {
   await page.goto(`${origin}/admin`)
-  await expect(
-    page.getByRole("heading", { name: "Overview", exact: true })
-  ).toBeVisible()
   await expect(
     page.getByText("1 trial · 1 standard", { exact: true })
   ).toBeVisible()
-  await page.screenshot({
-    path: join(screenshots, "admin-overview-desktop.png"),
-    fullPage: true,
-  })
   await page
-    .getByRole("button", { name: "View active subscriptions", exact: true })
+    .getByRole("button", { name: "View active access", exact: true })
     .click()
   await expect(page.locator("tbody tr")).toHaveCount(2)
   await expect(
-    page.getByRole("button", { name: "View eva@example.test", exact: true })
-  ).toBeVisible()
-  await page.getByRole("tab", { name: "Renewal canceled", exact: true }).click()
-  await expect(page.locator("tbody tr")).toHaveCount(1)
-  const row = page.locator("tbody tr").filter({ hasText: "eva@example.test" })
-  await expect(row.getByText("Active", { exact: true })).toBeVisible()
-  await expect(row.getByText("Canceled", { exact: true })).toBeVisible()
-  assert.equal(state.users[4].subscription.status, "active")
+    page.getByRole("tab", { name: "Renewal canceled", exact: true })
+  ).toHaveCount(0)
   await page.setViewportSize({ width: 390, height: 844 })
-  await page.goto(`${origin}/admin`)
-  await expect(
-    page.getByRole("heading", { name: "Overview", exact: true })
-  ).toBeVisible()
   await expect
     .poll(() =>
       page.evaluate(
@@ -1025,10 +1041,6 @@ test("the admin overview links live counts to active access and canceled renewal
       )
     )
     .toBe(true)
-  await page.screenshot({
-    path: join(screenshots, "admin-overview-mobile.png"),
-    fullPage: true,
-  })
 })
 
 test("waitlist signups have real source counts, server search, pagination, and a scoped export", async () => {
@@ -1071,29 +1083,18 @@ test("waitlist signups have real source counts, server search, pagination, and a
     .toBe(true)
 })
 
-test("a user profile opens directly and manages renewal without changing the access end date", async () => {
+test("old profile links display access, reminders, and account history", async () => {
   await page.goto(`${origin}/admin?view=users&user=user_eva`)
-  await expect(
-    page.getByRole("heading", { name: "User management", exact: true })
-  ).toBeVisible()
   await expect(
     page.getByRole("heading", { name: "Eva Example", exact: true })
   ).toBeVisible()
   await expect(
     page.getByText("Browser test history reason", { exact: true })
   ).toBeVisible()
-  const endsAt = state.users[4].subscription.endsAt
-  await page
-    .getByRole("button", { name: "Resume renewal", exact: true })
-    .click()
-  await expect(page.getByRole("dialog")).toBeVisible()
-  await save("Resume renewal")
-  assert.equal(state.requests.at(-1).action, "resume-renewal")
-  assert.equal(state.users[4].subscription.cancelAtPeriodEnd, false)
-  assert.equal(state.users[4].subscription.endsAt, endsAt)
   await expect(
-    page.getByRole("button", { name: "Cancel renewal", exact: true })
+    page.getByText("Expiry reminders", { exact: true })
   ).toBeVisible()
+  await expect(page.getByRole("button", { name: /renewal/i })).toHaveCount(0)
   await page.reload()
   await expect(
     page.getByRole("heading", { name: "Eva Example", exact: true })
@@ -1102,41 +1103,40 @@ test("a user profile opens directly and manages renewal without changing the acc
     path: join(screenshots, "admin-user-profile-desktop.png"),
     fullPage: true,
   })
-  await page.setViewportSize({ width: 390, height: 844 })
-  await expect
-    .poll(() =>
-      page.evaluate(
-        () => document.documentElement.scrollWidth <= window.innerWidth
-      )
-    )
-    .toBe(true)
-  await page.screenshot({
-    path: join(screenshots, "admin-user-profile-mobile.png"),
-    fullPage: true,
-  })
 })
 
-test("a free account profile lists its signed-in Macs without offering an unsupported administrative reset", async () => {
+test("an admin removes a named Mac from a free account without granting access", async () => {
   const user = state.users.find(({ id }) => id === "user_cara")
   user.devices = [
     {
       id: firstMac,
-      bindingRevision: 1,
-      assignmentRevision: 1,
+      sessionId: "free-session",
+      revision: 1,
       activatedAt: Date.now(),
       current: true,
+      deviceName: "Cara’s MacBook Air",
+      lastUsedAt: Date.now(),
     },
   ]
   await page.goto(`${origin}/admin?view=users&user=user_cara`)
-  const profile = page.getByRole("region", {
-    name: "User management",
-    exact: true,
-  })
-  await expect(profile.getByText(firstMac, { exact: true })).toBeVisible()
-  await expect(profile.getByText("1 of 2 slots in use.")).toBeVisible()
   await expect(
-    profile.getByRole("button", { name: `Reset Mac ${firstMac}`, exact: true })
-  ).toHaveCount(0)
+    page.getByText("Cara’s MacBook Air", { exact: true })
+  ).toBeVisible()
+  await page
+    .getByRole("button", { name: "Remove Cara’s MacBook Air", exact: true })
+    .click()
+  await page.getByLabel(/Reason for this change/).fill("Retired computer")
+  await save("Remove Mac")
+  await expect(
+    page.getByText("Removed Cara’s MacBook Air from account", { exact: true })
+  ).toBeVisible()
+  await expect(
+    page.getByText("Retired computer", { exact: true })
+  ).toBeVisible()
+  assert.equal(user.subscription, null)
+  assert.deepEqual(user.devices, [])
+  assert.equal(state.requests.at(-1).expectedSessionRevision, 1)
+  assert.equal("expectedRevision" in state.requests.at(-1), false)
 })
 
 test("opening a profile while search is debouncing preserves account details", async () => {
@@ -1151,7 +1151,10 @@ test("opening a profile while search is debouncing preserves account details", a
     page.getByText("Browser test history reason", { exact: true })
   ).toBeVisible()
   await expect(
-    page.getByRole("button", { name: `Reset Mac ${firstMac}`, exact: true })
+    page.getByRole("button", {
+      name: "Remove Alice’s MacBook Pro",
+      exact: true,
+    })
   ).toBeEnabled()
   await expect
     .poll(() => state.listQueries.some((query) => query.q === "Alice"))
@@ -1163,18 +1166,12 @@ test("opening a profile while search is debouncing preserves account details", a
 
 test("all workspace sections navigate and failed refreshes can recover", async () => {
   const nav = page.getByRole("navigation", { name: "Admin navigation" })
-  for (const name of [
-    "Overview",
-    "Subscriptions",
-    "Users",
-    "Waitlist",
-    "Operations",
-  ]) {
+  for (const name of ["Overview", "Accounts", "Waitlist", "Operations"]) {
     await nav.getByRole("button", { name: new RegExp(`^${name}`) }).click()
     await expect(page.getByRole("heading", { name, exact: true })).toBeVisible()
     assert.equal(new URL(page.url()).pathname, "/admin")
   }
-  await nav.getByRole("button", { name: "Subscriptions", exact: true }).click()
+  await nav.getByRole("button", { name: "Accounts", exact: true }).click()
   state.listFailure = true
   await page.getByRole("button", { name: "Refresh", exact: true }).click()
   await expect(page.getByRole("main").getByRole("alert")).toContainText(
@@ -1230,7 +1227,7 @@ test("workspace Refresh updates the visible waitlist and operations panels", asy
   await page.getByRole("button", { name: "Refresh", exact: true }).click()
   const requests = page.getByRole("region", { name: /Customer requests/ })
   await expect(
-    requests.getByText("Renewal · alice@example.test", { exact: true })
+    requests.getByText("Access request · alice@example.test", { exact: true })
   ).toBeVisible()
   await expect(
     requests.getByRole("button", { name: "Review request", exact: true })
@@ -1240,51 +1237,55 @@ test("workspace Refresh updates the visible waitlist and operations panels", asy
 })
 
 test("grants support 7-day trials, standard presets, custom durations, and exact expiry", async () => {
-  await openAction("Grant subscription", "cara@example.test")
+  await openAction("Grant access", "cara@example.test")
   const dialog = page.getByRole("dialog")
-  await expect(dialog.getByLabel("Subscription type")).toHaveValue("trial")
-  await expect(dialog.getByLabel("Subscription length")).toHaveValue("7")
+  await expect(dialog.getByLabel("Access type")).toHaveValue("trial")
+  await expect(dialog.getByLabel("Access length")).toHaveValue("7")
   await dialog.getByLabel(/Admin notes/).fill("Manually reviewed account")
   await dialog
     .getByLabel(/Reason for this change/)
     .fill("Manual trial approval")
   state.delayNext = 300
   await dialog
-    .getByRole("button", { name: "Save subscription", exact: true })
+    .getByRole("button", { name: "Grant access", exact: true })
     .click()
   await expect(dialog.getByRole("button", { name: "Saving…" })).toBeDisabled()
   await expect(
     dialog.getByRole("button", { name: "Cancel", exact: true })
   ).toBeDisabled()
   await expect(page.getByRole("dialog")).toHaveCount(0)
-  assert.equal(state.requests.at(-1).durationDays, 7)
+  assert.ok(
+    Math.abs(state.requests.at(-1).endsAt - Date.now() - 7 * day) < 3000
+  )
   assert.equal(state.requests.at(-1).expectedRevision, 0)
   assert.equal(state.requests.at(-1).reason, "Manual trial approval")
   assert.equal(state.requests.at(-1).notes, "Manually reviewed account")
   await expect(
     page.getByRole("button", { name: "Refresh", exact: true })
   ).toBeEnabled()
-  await openAction("Edit subscription", "cara@example.test")
-  await page.getByLabel("Subscription type").selectOption("regular")
-  await expect(page.getByLabel("Subscription length")).toHaveValue("30")
-  await page.getByLabel("Subscription length").selectOption("custom")
+  await openAction("Grant access", "cara@example.test")
+  await page.getByLabel("Access type").selectOption("regular")
+  await expect(page.getByLabel("Access length")).toHaveValue("30")
+  await page.getByLabel("Access length").selectOption("custom")
   await page.getByLabel("Number of days").fill("0")
   await expect(
-    page.getByRole("button", { name: "Save subscription", exact: true })
+    page.getByRole("button", { name: "Grant access", exact: true })
   ).toBeDisabled()
   await page.getByLabel("Number of days").fill("1.5")
   await expect(
-    page.getByRole("button", { name: "Save subscription", exact: true })
+    page.getByRole("button", { name: "Grant access", exact: true })
   ).toBeDisabled()
   await page.getByLabel("Number of days").fill("42")
-  await save("Save subscription")
-  assert.equal(state.requests.at(-1).durationDays, 42)
+  await save("Grant access")
+  assert.ok(
+    Math.abs(state.requests.at(-1).endsAt - Date.now() - 42 * day) < 3000
+  )
   assert.equal(state.requests.at(-1).type, "regular")
-  await openAction("Edit subscription", "cara@example.test")
+  await openAction("Grant access", "cara@example.test")
   await page.getByLabel("Choose expiry by").selectOption("date")
   await page.getByLabel("New expiry", { exact: false }).fill("2099-01-01T12:00")
   await expect(
-    page.getByRole("button", { name: "Save subscription", exact: true })
+    page.getByRole("button", { name: "Grant access", exact: true })
   ).toBeDisabled()
   const target = new Date(Date.now() + 120 * day)
   const local = new Intl.DateTimeFormat("sv-SE", {
@@ -1295,7 +1296,7 @@ test("grants support 7-day trials, standard presets, custom durations, and exact
     .format(target)
     .replace(" ", "T")
   await page.getByLabel("New expiry", { exact: false }).fill(local)
-  await save("Save subscription")
+  await save("Grant access")
   assert.equal(typeof state.requests.at(-1).endsAt, "number")
   assert.equal("durationDays" in state.requests.at(-1), false)
 })
@@ -1314,11 +1315,11 @@ test("details, notes, extension, revoke, restore, and Mac reset use guarded muta
   await save("Save notes")
   assert.equal(state.requests.at(-1).action, "update-notes")
   assert.equal(state.requests.at(-1).notes, "Updated admin note")
-  await openAction("Extend subscription")
+  await openAction("Extend access")
   const currentExpiry = state.users[0].subscription.endsAt
   const startsAt = state.users[0].subscription.startsAt
   await page.getByLabel("Add time").selectOption("14")
-  await save("Extend subscription")
+  await save("Extend access")
   assert.equal(state.users[0].subscription.endsAt, currentExpiry + 14 * day)
   assert.equal(state.users[0].subscription.startsAt, startsAt)
   await openAction("Revoke access")
@@ -1340,26 +1341,31 @@ test("details, notes, extension, revoke, restore, and Mac reset use guarded muta
   await save("Revoke access")
   assert.equal(state.users[0].subscription.status, "revoked")
   await openAction("Restore access")
-  await save("Restore subscription")
+  await save("Restore access")
   assert.equal(state.users[0].subscription.status, "active")
   await page
-    .getByRole("button", { name: `Reset Mac ${firstMac}`, exact: true })
+    .getByRole("button", { name: "Remove Alice’s MacBook Pro", exact: true })
     .click()
   await expect(
-    page.getByRole("dialog").getByText(firstMac, { exact: true })
+    page.getByRole("dialog").getByText(/Alice’s MacBook Pro/)
   ).toBeVisible()
-  await save("Reset Mac assignment")
+  await save("Remove Mac")
   assert.deepEqual(
-    state.users[0].subscription.devices.map((device) => device.id),
+    state.users[0].devices.map((device) => device.id),
     [secondMac]
   )
-  assert.equal(state.requests.at(-1).deviceId, firstMac)
-  assert.equal(state.requests.at(-1).action, "reset-device")
-  await page.getByRole("button", { name: "Back to users", exact: true }).click()
+  assert.equal(
+    state.requests.at(-1).sessionId,
+    "00000000-0000-4000-8000-000000000001"
+  )
+  assert.equal(state.requests.at(-1).action, "remove-device")
+  await page
+    .getByRole("button", { name: "Back to accounts", exact: true })
+    .click()
   await loadAll()
   await openAction("Restore access", "dan@example.test")
   state.users[3].subscription.endsAt = Date.now() - day
-  await save("Restore subscription")
+  await save("Restore access")
   await expect(
     page
       .locator("tbody tr")
@@ -1377,12 +1383,12 @@ test("exact extensions preserve revoked state and expired restores explain the o
   ).toBeEnabled()
   await openAction("Restore access", "dan@example.test")
   await expect(
-    page.getByText(/access will stay expired until you extend it/)
+    page.getByText(/Expired access must also be extended/)
   ).toBeVisible()
   await page.getByRole("button", { name: "Cancel", exact: true }).click()
-  await openAction("Extend subscription", "dan@example.test")
+  await openAction("Extend access", "dan@example.test")
   await expect(
-    page.getByText(/Access stays revoked; restore it separately/)
+    page.getByText(/Revoked access must be restored separately/)
   ).toBeVisible()
   await page.getByLabel("Choose expiry by").selectOption("date")
   const target = new Date(Date.now() + 30 * day)
@@ -1394,7 +1400,7 @@ test("exact extensions preserve revoked state and expired restores explain the o
     .format(target)
     .replace(" ", "T")
   await page.getByLabel("New expiry", { exact: false }).fill(local)
-  await save("Extend subscription")
+  await save("Extend access")
   assert.equal(state.requests.at(-1).action, "extend")
   assert.equal(typeof state.requests.at(-1).endsAt, "number")
   assert.equal(state.users[3].subscription.status, "revoked")
@@ -1402,15 +1408,13 @@ test("exact extensions preserve revoked state and expired restores explain the o
 
 test("conflicts, server failures, and session expiry never report a successful change", async () => {
   state.failNext = 409
-  await openAction("Extend subscription")
-  await page
-    .getByRole("button", { name: "Extend subscription", exact: true })
-    .click()
+  await openAction("Extend access")
+  await page.getByRole("button", { name: "Extend access", exact: true }).click()
   await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
     "changed while you were editing"
   )
   await expect(
-    page.getByRole("button", { name: "Extend subscription", exact: true })
+    page.getByRole("button", { name: "Extend access", exact: true })
   ).toBeDisabled()
   await page
     .getByRole("button", { name: "Refresh account data", exact: true })
@@ -1420,20 +1424,16 @@ test("conflicts, server failures, and session expiry never report a successful c
     page.getByRole("button", { name: "Refresh", exact: true })
   ).toBeEnabled()
   state.failNext = 503
-  await openAction("Extend subscription")
-  await page
-    .getByRole("button", { name: "Extend subscription", exact: true })
-    .click()
+  await openAction("Extend access")
+  await page.getByRole("button", { name: "Extend access", exact: true }).click()
   await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
     "Test action unavailable"
   )
   await expect(
-    page.getByRole("button", { name: "Extend subscription", exact: true })
+    page.getByRole("button", { name: "Extend access", exact: true })
   ).toBeEnabled()
   state.failNext = 401
-  await page
-    .getByRole("button", { name: "Extend subscription", exact: true })
-    .click()
+  await page.getByRole("button", { name: "Extend access", exact: true }).click()
   await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
     "session expired"
   )
@@ -1441,7 +1441,7 @@ test("conflicts, server failures, and session expiry never report a successful c
     page.getByRole("dialog").getByRole("link", { name: "Sign in" })
   ).toHaveAttribute("target", "_blank")
   await expect(
-    page.getByRole("button", { name: "Extend subscription", exact: true })
+    page.getByRole("button", { name: "Extend access", exact: true })
   ).toBeDisabled()
 })
 
@@ -1459,7 +1459,7 @@ test("mobile layout and modal keyboard focus remain usable", async () => {
     path: join(screenshots, "subscriptions-mobile.png"),
     fullPage: true,
   })
-  await openAction("Grant subscription", "cara@example.test")
+  await openAction("Grant access", "cara@example.test")
   const dialog = page.getByRole("dialog")
   await expect(dialog).toBeVisible()
   await expect(
@@ -1487,13 +1487,13 @@ test("mobile layout and modal keyboard focus remain usable", async () => {
 test("the customer portal displays only customer data and submits renewal requests", async () => {
   await page.goto(`${origin}/account`)
   await expect(
-    page.getByRole("heading", { name: "Plan & connected Macs" })
+    page.getByRole("heading", { name: "Access & connected Macs" })
   ).toBeVisible()
-  await expect(page.getByText("Free trial", { exact: true })).toBeVisible()
+  await expect(page.getByText("Trial access", { exact: true })).toBeVisible()
   await expect(page.getByText("2 / 2", { exact: true })).toBeVisible()
   await expect(page.getByText(/Pilot account/)).toHaveCount(0)
   await page
-    .getByRole("button", { name: "Request renewal", exact: true })
+    .getByRole("button", { name: "Request extension", exact: true })
     .click()
   await expect(page.getByRole("dialog")).toBeVisible()
   await page
@@ -1504,14 +1504,14 @@ test("the customer portal displays only customer data and submits renewal reques
     .click()
   await expect(page.getByRole("dialog")).toHaveCount(0)
   await expect(
-    page.getByRole("button", { name: "Renewal requested", exact: true })
+    page.getByRole("button", { name: "Request awaiting review", exact: true })
   ).toBeDisabled()
   assert.equal(state.customerMutations.at(-1).action, "request-renewal")
   assert.equal(state.users[0].subscription.revision, 1)
   assert.equal(await page.evaluate(() => window.injected), undefined)
   assert.equal(state.accountRequests.length, 1)
   assert.equal(state.accountRequests[0].action, "renewal")
-  assert.equal(state.users[0].subscription.devices.length, 2)
+  assert.equal(state.users[0].devices.length, 2)
   state.accountRequests.find((item) => item.action === "renewal").adminNote =
     "Secret admin context"
   state.accountRequests.find((item) => item.action === "renewal").status =
@@ -1519,7 +1519,7 @@ test("the customer portal displays only customer data and submits renewal reques
   await page.getByRole("button", { name: "Refresh", exact: true }).click()
   await expect(page.getByText("Completed", { exact: true })).toBeVisible()
   await expect(
-    page.getByRole("button", { name: "Request renewal", exact: true })
+    page.getByRole("button", { name: "Request extension", exact: true })
   ).toBeEnabled()
   await expect(
     page.getByText("Secret admin context", { exact: false })
@@ -1531,7 +1531,7 @@ test("the customer portal displays only customer data and submits renewal reques
   await page.setViewportSize({ width: 390, height: 844 })
   await page.reload()
   await expect(
-    page.getByRole("button", { name: "Request renewal", exact: true })
+    page.getByRole("button", { name: "Request extension", exact: true })
   ).toBeVisible()
   await expect(page.locator("header")).toHaveCount(1)
   await expect
@@ -1549,16 +1549,14 @@ test("the customer portal displays only customer data and submits renewal reques
 
 test("connected computers show their names and last use in removal confirmation", async () => {
   const account = customerAccount()
-  account.devices = state.users[0].subscription.devices.map(
-    (device, index) => ({
-      id: device.id,
-      activatedAt: device.activatedAt,
-      sessionId: null,
-      revision: account.subscription.revision,
-      deviceName: index === 0 ? "Studio MacBook Pro" : null,
-      lastUsedAt: index === 0 ? Date.now() - 3_600_000 : null,
-    })
-  )
+  account.devices = state.users[0].devices.map((device, index) => ({
+    id: device.id,
+    activatedAt: device.activatedAt,
+    sessionId: device.sessionId,
+    revision: device.revision,
+    deviceName: index === 0 ? "Studio MacBook Pro" : null,
+    lastUsedAt: index === 0 ? Date.now() - 3_600_000 : null,
+  }))
   await page.route("**/api/account/subscription", (route) =>
     route.fulfill({ json: account })
   )
@@ -1588,8 +1586,9 @@ test("connected computers show their names and last use in removal confirmation"
 test("customer Mac removal requires confirmation and removes only the selected Mac immediately", async () => {
   await page.goto(`${origin}/account`)
   const subscriptionBefore = structuredClone(state.users[0].subscription)
+  const devicesBefore = structuredClone(state.users[0].devices)
   const firstRemove = page.getByRole("button", {
-    name: "Remove Computer 1",
+    name: "Remove Alice’s MacBook Pro",
     exact: true,
   })
   await expect(firstRemove).toBeEnabled()
@@ -1599,7 +1598,10 @@ test("customer Mac removal requires confirmation and removes only the selected M
   await firstRemove.click()
   const dialog = page.getByRole("dialog")
   await expect(
-    dialog.getByRole("heading", { name: "Remove Computer 1?", exact: true })
+    dialog.getByRole("heading", {
+      name: "Remove Alice’s MacBook Pro?",
+      exact: true,
+    })
   ).toBeVisible()
   await expect(dialog.getByText(firstMac, { exact: true })).toBeVisible()
   await page.screenshot({
@@ -1619,41 +1621,41 @@ test("customer Mac removal requires confirmation and removes only the selected M
   await expect(page.getByText(firstMac, { exact: true })).toHaveCount(0)
   await expect(page.getByText(secondMac, { exact: true })).toHaveCount(1)
   assert.deepEqual(state.customerMutations, [
-    { action: "remove-device", deviceId: firstMac, expectedRevision: 1 },
+    {
+      action: "remove-device",
+      deviceId: firstMac,
+      sessionId: "00000000-0000-4000-8000-000000000001",
+      expectedSessionRevision: 1,
+    },
   ])
   assert.equal(state.accountRequests.length, 0)
-  assert.equal(state.users[0].subscription.devices.length, 1)
-  assert.deepEqual(
-    state.users[0].subscription.devices[0],
-    subscriptionBefore.devices[1]
-  )
+  assert.equal(state.users[0].devices.length, 1)
+  assert.deepEqual(state.users[0].devices[0], devicesBefore[1])
   for (const key of [
     "type",
     "status",
     "startsAt",
     "endsAt",
-    "bindingRevision",
-    "cancelAtPeriodEnd",
-    "canceledAt",
+    "remindersEnabled",
   ])
     assert.equal(state.users[0].subscription[key], subscriptionBefore[key], key)
-  assert.equal(state.users[0].subscription.revision, 2)
-  await expect(firstRemove).toBeEnabled()
+  assert.equal(state.users[0].subscription.revision, 1)
+  await expect(firstRemove).toHaveCount(0)
 })
 
 test("customer Mac removal conflicts require fresh account data and a new confirmation", async () => {
   await page.goto(`${origin}/account`)
   await page
-    .getByRole("button", { name: "Remove Computer 1", exact: true })
+    .getByRole("button", { name: "Remove Alice’s MacBook Pro", exact: true })
     .click()
-  state.users[0].subscription.revision++
+  state.users[0].devices[0].revision++
   const dialog = page.getByRole("dialog")
   await dialog.getByRole("button", { name: "Remove Mac", exact: true }).click()
-  await expect(dialog.getByRole("alert")).toContainText("Revision conflict")
+  await expect(dialog.getByRole("alert")).toContainText("This Mac changed")
   await expect(
     dialog.getByRole("button", { name: "Remove Mac", exact: true })
   ).toBeDisabled()
-  assert.equal(state.users[0].subscription.devices.length, 2)
+  assert.equal(state.users[0].devices.length, 2)
   assert.equal(state.accountRequests.length, 0)
   await dialog
     .getByRole("button", { name: "Refresh account", exact: true })
@@ -1661,23 +1663,24 @@ test("customer Mac removal conflicts require fresh account data and a new confir
   await expect(dialog).toHaveCount(0)
   assert.equal(state.customerMutations.length, 1)
   await page
-    .getByRole("button", { name: "Remove Computer 1", exact: true })
+    .getByRole("button", { name: "Remove Alice’s MacBook Pro", exact: true })
     .click()
   await dialog.getByRole("button", { name: "Remove Mac", exact: true }).click()
   await expect(dialog).toHaveCount(0)
   assert.deepEqual(
-    state.users[0].subscription.devices.map((device) => device.id),
+    state.users[0].devices.map((device) => device.id),
     [secondMac]
   )
-  assert.equal(state.customerMutations.at(-1).expectedRevision, 2)
+  assert.equal(state.customerMutations.at(-1).expectedSessionRevision, 2)
   assert.equal(state.accountRequests.length, 0)
 })
 
 test("customer Mac removal preserves devices when the session expires", async () => {
   await page.goto(`${origin}/account`)
   const subscriptionBefore = structuredClone(state.users[0].subscription)
+  const devicesBefore = structuredClone(state.users[0].devices)
   await page
-    .getByRole("button", { name: "Remove Computer 2", exact: true })
+    .getByRole("button", { name: "Remove Alice’s iMac", exact: true })
     .click()
   state.customerFailNext = 401
   const dialog = page.getByRole("dialog")
@@ -1690,14 +1693,18 @@ test("customer Mac removal preserves devices when the session expires", async ()
     dialog.getByRole("link", { name: "Sign in", exact: true })
   ).toHaveAttribute("target", "_blank")
   assert.deepEqual(state.users[0].subscription, subscriptionBefore)
+  assert.deepEqual(state.users[0].devices, devicesBefore)
   assert.equal(state.accountRequests.length, 0)
   await page.keyboard.press("Escape")
   await expect(dialog).toHaveCount(0)
   await expect(
-    page.getByRole("button", { name: "Remove Computer 1", exact: true })
+    page.getByRole("button", {
+      name: "Remove Alice’s MacBook Pro",
+      exact: true,
+    })
   ).toBeDisabled()
   await expect(
-    page.getByRole("button", { name: "Remove Computer 2", exact: true })
+    page.getByRole("button", { name: "Remove Alice’s iMac", exact: true })
   ).toBeDisabled()
 })
 
@@ -1718,7 +1725,7 @@ test("an existing Mac removal request does not block direct customer removal", a
   })
   await page.goto(`${origin}/account`)
   const remove = page.getByRole("button", {
-    name: "Remove Computer 1",
+    name: "Remove Alice’s MacBook Pro",
     exact: true,
   })
   await expect(remove).toBeEnabled()
@@ -1729,89 +1736,83 @@ test("an existing Mac removal request does not block direct customer removal", a
     .click()
   await expect(page.getByRole("dialog")).toHaveCount(0)
   assert.deepEqual(
-    state.users[0].subscription.devices.map((device) => device.id),
+    state.users[0].devices.map((device) => device.id),
     [secondMac]
   )
   assert.equal(state.accountRequests.length, 1)
   assert.equal(state.accountRequests[0].revision, 1)
 })
 
-test("customers can cancel and resume renewal without losing paid-through access", async () => {
+test("reminder preferences never change access or block extension requests", async () => {
   await page.goto(`${origin}/account`)
   const endsAt = state.users[0].subscription.endsAt
   await page
-    .getByRole("button", { name: "Cancel renewal", exact: true })
+    .getByRole("button", { name: "Turn off reminders", exact: true })
     .click()
-  const dialog = page.getByRole("dialog")
   await expect(
-    dialog.getByRole("heading", { name: "Cancel your renewal?" })
+    page.getByRole("button", { name: "Turn on reminders", exact: true })
   ).toBeVisible()
-  await expect(dialog.getByRole("button", { name: "Go back" })).toBeFocused()
-  await dialog.getByRole("button", { name: "Confirm cancellation" }).click()
-  await expect(dialog).toHaveCount(0)
-  await expect(
-    page.getByText("Renewal canceled", { exact: true })
-  ).toBeVisible()
-  await expect(
-    page.getByRole("button", { name: "Request renewal", exact: true })
-  ).toBeDisabled()
-  assert.equal(state.users[0].subscription.cancelAtPeriodEnd, true)
+  assert.equal(state.users[0].subscription.remindersEnabled, false)
   assert.equal(state.users[0].subscription.endsAt, endsAt)
-  assert.equal(state.users[0].subscription.status, "active")
+  await expect(
+    page.getByRole("button", { name: "Request extension", exact: true })
+  ).toBeEnabled()
   assert.equal(state.accountRequests.length, 0)
-  assert.equal(state.customerMutations.at(-1).expectedRevision, 1)
   await page
-    .getByRole("button", { name: "Resume renewal", exact: true })
+    .getByRole("button", { name: "Turn on reminders", exact: true })
     .click()
-  await expect(
-    dialog.getByRole("heading", { name: "Resume your renewal?" })
-  ).toBeVisible()
-  await dialog
-    .getByRole("button", { name: "Confirm renewal preference" })
-    .click()
-  await expect(dialog).toHaveCount(0)
-  await expect(
-    page.getByRole("button", { name: "Cancel renewal", exact: true })
-  ).toBeVisible()
-  assert.equal(state.users[0].subscription.cancelAtPeriodEnd, false)
-  assert.equal(state.users[0].subscription.endsAt, endsAt)
+  assert.equal(state.users[0].subscription.remindersEnabled, true)
   assert.equal(state.customerMutations.at(-1).expectedRevision, 2)
 })
 
-test("customer renewal conflicts require a refreshed account and a new confirmation", async () => {
+test("stale reminder preferences refresh without changing access", async () => {
   await page.goto(`${origin}/account`)
-  await page
-    .getByRole("button", { name: "Cancel renewal", exact: true })
-    .click()
+  const endsAt = state.users[0].subscription.endsAt
+  await expect(
+    page.getByRole("button", { name: "Turn off reminders", exact: true })
+  ).toBeEnabled()
   state.users[0].subscription.revision++
   await page
-    .getByRole("button", { name: "Confirm cancellation", exact: true })
+    .getByRole("button", { name: "Turn off reminders", exact: true })
     .click()
-  const dialog = page.getByRole("dialog")
-  await expect(dialog.getByRole("alert")).toContainText("Revision conflict")
+  await expect(page.getByRole("main").getByRole("alert")).toContainText(
+    "Revision conflict"
+  )
+  assert.equal(state.users[0].subscription.remindersEnabled, true)
+  await page
+    .getByRole("button", { name: "Turn off reminders", exact: true })
+    .click()
   await expect(
-    dialog.getByRole("button", { name: "Confirm cancellation", exact: true })
-  ).toBeDisabled()
-  assert.equal(state.users[0].subscription.cancelAtPeriodEnd, false)
-  await dialog
-    .getByRole("button", { name: "Refresh account", exact: true })
-    .click()
-  await expect(dialog).toHaveCount(0)
+    page.getByRole("button", { name: "Turn on reminders", exact: true })
+  ).toBeVisible()
+  assert.equal(state.users[0].subscription.endsAt, endsAt)
+})
+
+test("free accounts request access and keep their named Macs", async () => {
+  state.users[0].subscription = null
+  await page.goto(`${origin}/account`)
+  await expect(
+    page.getByRole("button", { name: "Request access", exact: true })
+  ).toBeEnabled()
+  await expect(
+    page.getByText("Alice’s MacBook Pro", { exact: true })
+  ).toBeVisible()
+  await expect(page.getByRole("button", { name: /reminders/i })).toHaveCount(0)
   await page
-    .getByRole("button", { name: "Cancel renewal", exact: true })
+    .getByRole("button", { name: "Request access", exact: true })
     .click()
   await page
-    .getByRole("button", { name: "Confirm cancellation", exact: true })
+    .getByRole("button", { name: "Submit request", exact: true })
     .click()
-  await expect(dialog).toHaveCount(0)
-  assert.equal(state.users[0].subscription.cancelAtPeriodEnd, true)
-  assert.equal(state.customerMutations.at(-1).expectedRevision, 2)
+  await expect(page.getByRole("dialog")).toHaveCount(0)
+  assert.equal(state.users[0].subscription, null)
+  assert.equal(state.accountRequests[0].status, "pending")
 })
 
 test("customer request forms preserve keyboard focus and handle rate and session errors", async () => {
   await page.goto(`${origin}/account`)
   await page
-    .getByRole("button", { name: "Request renewal", exact: true })
+    .getByRole("button", { name: "Request extension", exact: true })
     .click()
   const dialog = page.getByRole("dialog")
   await expect(
@@ -1847,7 +1848,7 @@ test("customer request forms preserve keyboard focus and handle rate and session
   await expect(dialog).toHaveCount(0)
 })
 
-test("the admin request queue reviews requests without mutating subscription access", async () => {
+test("request acknowledgement preserves access and approval extends access atomically", async () => {
   state.accountRequests = [
     {
       id: "request_00000000-0000-4000-8000-000000000001",
@@ -1892,12 +1893,11 @@ test("the admin request queue reviews requests without mutating subscription acc
     .getByRole("button", { name: /^Operations/ })
     .click()
   await page
-    .getByRole("button", { name: "Review request", exact: true })
+    .getByRole("button", { name: "Approve and extend", exact: true })
     .click()
-  await page
-    .getByLabel("Review outcome", { exact: true })
-    .selectOption("resolve")
-  await page.getByRole("button", { name: "Save review", exact: true }).click()
+  await page.getByLabel(/Admin review note/).fill("Follow up with customer")
+  await save("Approve and extend")
+  assert.equal(state.users[0].subscription.revision, 2)
   await expect(
     page.getByText("No customer requests in this view.", { exact: true })
   ).toBeVisible()
@@ -2157,7 +2157,7 @@ test("non-JSON unauthorized responses disable customer and reminder mutations un
   ).toBeDisabled()
   await page.goto(`${origin}/account`)
   await page
-    .getByRole("button", { name: "Request renewal", exact: true })
+    .getByRole("button", { name: "Request extension", exact: true })
     .click()
   await page.route("**/api/account/subscription", (route) =>
     route.fulfill({

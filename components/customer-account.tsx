@@ -17,11 +17,7 @@ import {
   RefreshCw,
   ShieldCheck,
 } from "lucide-react"
-import type {
-  CustomerAccount,
-  CustomerRequest,
-  CustomerSubscription,
-} from "@/lib/account-requests"
+import type { CustomerAccount, CustomerRequest } from "@/lib/account-requests"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -43,9 +39,8 @@ type SelectedMac = {
   id: string
   label: string
   revision: number
-  sessionId?: string | null
+  sessionId: string
 }
-type RenewalAction = "cancel-renewal" | "resume-renewal"
 class AccountError extends Error {
   constructor(
     message: string,
@@ -124,6 +119,7 @@ function SignInLink() {
   )
 }
 function RequestDialog({
+  title,
   busy,
   sessionExpired,
   error,
@@ -132,6 +128,7 @@ function RequestDialog({
   onClose,
   onSubmit,
 }: {
+  title: string
   busy: boolean
   sessionExpired: boolean
   error: string
@@ -159,11 +156,9 @@ function RequestDialog({
             <div className={styles.modalIcon}>
               <CreditCard />
             </div>
-            <DialogTitle className={styles.modalTitle}>
-              Request renewal
-            </DialogTitle>
+            <DialogTitle className={styles.modalTitle}>{title}</DialogTitle>
             <DialogDescription className={styles.modalDescription}>
-              Requires administrator approval. No payment or subscription change
+              Requires administrator approval. No payment or access change
               occurs when you submit.
             </DialogDescription>
           </DialogHeader>
@@ -228,13 +223,10 @@ export function CustomerAccountPage() {
   const [sessionExpired, setSessionExpired] = useState(false)
   const [notice, setNotice] = useState("")
   const [form, setForm] = useState<RequestForm | null>(null)
-  const [renewalAction, setRenewalAction] = useState<RenewalAction | null>(null)
-  const [renewalConflict, setRenewalConflict] = useState(false)
   const [selectedMac, setSelectedMac] = useState<SelectedMac | null>(null)
   const [removalConflict, setRemovalConflict] = useState(false)
   const [message, setMessage] = useState("")
   const [formError, setFormError] = useState("")
-  const renewalCancel = useRef<HTMLButtonElement>(null)
   const removalCancel = useRef<HTMLButtonElement>(null)
   const request = useRef<AbortController | null>(null)
   const mounted = useRef(false)
@@ -247,7 +239,9 @@ export function CustomerAccountPage() {
       if (
         !data?.user?.email ||
         !Array.isArray(data.requests) ||
-        (data.subscription && !Array.isArray(data.subscription.devices))
+        !Array.isArray(data.devices) ||
+        !data.access ||
+        !data.reminders
       )
         throw new Error("Unable to read your account. Please try again.")
       if (!mounted.current || controller.signal.aborted) return
@@ -283,7 +277,7 @@ export function CustomerAccountPage() {
     }
   }, [load])
   useEffect(() => {
-    if (form || renewalAction || selectedMac || busy || sessionExpired) return
+    if (form || selectedMac || busy || sessionExpired) return
     const poll = () => {
       if (document.visibilityState === "visible") void load()
     }
@@ -293,13 +287,12 @@ export function CustomerAccountPage() {
       window.clearInterval(timer)
       document.removeEventListener("visibilitychange", poll)
     }
-  }, [load, form, renewalAction, selectedMac, busy, sessionExpired])
+  }, [load, form, selectedMac, busy, sessionExpired])
   function prepareDialog() {
     request.current?.abort()
     request.current = null
     setLoading(false)
     setFormError("")
-    setRenewalConflict(false)
     setRemovalConflict(false)
     setNotice("")
   }
@@ -348,36 +341,20 @@ export function CustomerAccountPage() {
     setBusy(true)
     setFormError("")
     try {
-      const result = await api<{
-        subscription: CustomerSubscription | null
-        devices?: CustomerAccount["devices"]
-      }>({
+      const result = await api<{ devices: CustomerAccount["devices"] }>({
         action: "remove-device",
         deviceId: selectedMac.id,
-        expectedRevision: selectedMac.revision,
-        ...(selectedMac.sessionId
-          ? {
-              sessionId: selectedMac.sessionId,
-              expectedSessionRevision: selectedMac.revision,
-            }
-          : {}),
+        sessionId: selectedMac.sessionId,
+        expectedSessionRevision: selectedMac.revision,
       })
       if (!mounted.current) return
       if (
-        !Array.isArray(result.devices ?? result.subscription?.devices) ||
-        (result.devices ?? result.subscription?.devices ?? []).some(
-          (device) => device.id === selectedMac.id
-        )
+        !Array.isArray(result.devices) ||
+        result.devices.some((device) => device.id === selectedMac.id)
       )
         throw new Error("Unable to confirm Mac removal. Refresh your account.")
       setAccount((current) =>
-        current
-          ? {
-              ...current,
-              subscription: result.subscription,
-              devices: result.devices,
-            }
-          : current
+        current ? { ...current, devices: result.devices } : current
       )
       setSelectedMac(null)
       setNotice("Mac removed.")
@@ -395,57 +372,46 @@ export function CustomerAccountPage() {
       if (mounted.current) setBusy(false)
     }
   }
-  async function updateRenewal() {
-    if (
-      !renewalAction ||
-      !account?.subscription ||
-      busy ||
-      sessionExpired ||
-      renewalConflict
-    )
-      return
+  async function updateReminders() {
+    if (!account || busy || sessionExpired) return
     setBusy(true)
-    setFormError("")
+    setError("")
     try {
-      const result = await api<{ subscription: CustomerSubscription }>({
-        action: renewalAction,
-        expectedRevision: account.subscription.revision,
+      const result = await api<{ reminders: CustomerAccount["reminders"] }>({
+        action: "set-reminders",
+        enabled: !account.reminders.enabled,
+        expectedRevision: account.reminders.revision,
       })
       if (!mounted.current) return
+      if (
+        !result.reminders ||
+        typeof result.reminders.enabled !== "boolean" ||
+        !Number.isSafeInteger(result.reminders.revision)
+      )
+        throw new Error(
+          "Unable to confirm reminder settings. Refresh your account."
+        )
       setAccount((current) =>
-        current ? { ...current, subscription: result.subscription } : current
+        current ? { ...current, reminders: result.reminders } : current
       )
       setNotice(
-        renewalAction === "cancel-renewal"
-          ? "Renewal canceled. Local project access continues until your subscription ends. You can still log in and join collaboration afterward."
-          : "Renewal preference restored. Your administrator will still need to approve and extend access."
+        result.reminders.enabled
+          ? "Expiry reminders enabled."
+          : "Expiry reminders disabled."
       )
-      setRenewalAction(null)
-      setLoading(true)
-      await load()
     } catch (cause) {
-      if (
-        mounted.current &&
-        cause instanceof AccountError &&
-        cause.status === 409
+      if (cause instanceof AccountError && cause.status === 401)
+        setSessionExpired(true)
+      if (cause instanceof AccountError && cause.status === 409) await load()
+      setError(
+        cause instanceof Error ? cause.message : "Unable to update reminders."
       )
-        setRenewalConflict(true)
-      mutationError(cause, "Unable to update your renewal preference.")
     } finally {
       if (mounted.current) setBusy(false)
     }
   }
-  const subscription = account?.subscription
-  const devices =
-    account?.devices ??
-    subscription?.devices.map((device) => ({
-      ...device,
-      deviceName: null,
-      lastUsedAt: null,
-      sessionId: null,
-      revision: subscription.revision,
-    })) ??
-    []
+  const access = account?.access
+  const devices = account?.devices ?? []
   const openRequests =
     account?.requests.filter((request) =>
       ["pending", "acknowledged"].includes(request.status)
@@ -453,15 +419,15 @@ export function CustomerAccountPage() {
   const renewalPending = openRequests.some(
     (request) => request.action === "renewal"
   )
-  const active = subscription?.status === "active"
-  const canceled = subscription?.cancelAtPeriodEnd
+  const active = access?.status === "active"
   const status = active
     ? "Active"
-    : subscription?.status === "revoked"
-      ? "Subscription revoked"
-      : subscription
+    : access?.status === "revoked"
+      ? "Access revoked"
+      : access?.status === "expired"
         ? "Expired"
-        : "No subscription"
+        : "Free account"
+  const requestLabel = access?.source ? "Request extension" : "Request access"
   return (
     <DashboardFrame
       mode="individual"
@@ -475,7 +441,7 @@ export function CustomerAccountPage() {
           icon: <LayoutDashboard />,
           isActive: true,
         },
-        { title: "Subscription", url: "#plan", icon: <CreditCard /> },
+        { title: "Access", url: "#plan", icon: <CreditCard /> },
         { title: "Connected Macs", url: "#devices", icon: <Monitor /> },
         {
           title: "Request history",
@@ -498,7 +464,7 @@ export function CustomerAccountPage() {
       <div className={styles.main} id="overview">
         <div className={styles.heading}>
           <div>
-            <h1>Plan &amp; connected Macs</h1>
+            <h1>Access &amp; connected Macs</h1>
             {account && (
               <p className={styles.mobileEmail}>{account.user.email}</p>
             )}
@@ -554,7 +520,7 @@ export function CustomerAccountPage() {
               <div className={styles.metric}>
                 <span>
                   <ShieldCheck />
-                  Subscription
+                  Access
                 </span>
                 <strong>{status}</strong>
               </div>
@@ -565,7 +531,7 @@ export function CustomerAccountPage() {
                 </span>
                 <strong>
                   {devices.length}
-                  <em> / {subscription?.deviceLimit ?? 2} Macs</em>
+                  <em> / {2} Macs</em>
                 </strong>
               </div>
               <div className={styles.metric}>
@@ -586,7 +552,7 @@ export function CustomerAccountPage() {
               >
                 <CardHeader className={styles.cardHeader}>
                   <CardTitle>
-                    <h2 id="plan-title">Your subscription</h2>
+                    <h2 id="plan-title">Your access</h2>
                   </CardTitle>
                   <Badge
                     variant="secondary"
@@ -603,100 +569,75 @@ export function CustomerAccountPage() {
                     </span>
                     <div>
                       <p className={styles.plan}>
-                        {subscription
-                          ? subscription.type === "trial"
-                            ? "Free trial"
-                            : "Standard subscription"
-                          : "No plan assigned"}
+                        {access?.tier === "trial"
+                          ? "Trial access"
+                          : access?.tier === "standard"
+                            ? "Standard access"
+                            : "Free account"}
                       </p>
                     </div>
                   </div>
-                  {subscription ? (
+                  {access?.source ? (
                     <dl className={styles.planDetails}>
                       <div>
                         <dt>Access started</dt>
                         <dd>
-                          <DateTime value={subscription.startsAt} short />
+                          <DateTime value={access.startsAt!} short />
                         </dd>
                       </div>
                       <div>
                         <dt>
-                          {subscription.status === "expired"
+                          {access.status === "expired"
                             ? "Access expired"
                             : "Access until"}
                         </dt>
                         <dd>
-                          <DateTime value={subscription.endsAt} short />
+                          <DateTime value={access.endsAt!} short />
                         </dd>
                       </div>
                     </dl>
                   ) : (
                     <p className={styles.planHint}>
                       You can log in to the Mac app and join collaboration. An
-                      administrator must assign a subscription to open local
-                      projects or host collaboration.
+                      administrator must grant access to open local projects or
+                      host collaboration.
                     </p>
-                  )}
-                  {active && (
-                    <div
-                      className={
-                        canceled ? styles.renewalCanceled : styles.renewalInfo
-                      }
-                    >
-                      <CalendarDays size={17} />
-                      <div>
-                        <strong>
-                          {canceled ? "Renewal canceled" : "Manual renewal"}
-                        </strong>
-                        <p>
-                          {canceled ? (
-                            <>
-                              Your access remains active until{" "}
-                              <DateTime value={subscription!.endsAt} short />.
-                              Resume renewal before requesting an extension.
-                            </>
-                          ) : (
-                            "Renewal requests require administrator approval."
-                          )}
-                        </p>
-                      </div>
-                    </div>
                   )}
                   <div className={styles.planActions}>
                     <Button
                       className={styles.button}
                       onClick={() => open({ action: "request-renewal" })}
-                      disabled={
-                        busy ||
-                        sessionExpired ||
-                        renewalPending ||
-                        Boolean(active && canceled)
-                      }
-                      title={
-                        active && canceled
-                          ? "Resume renewal before requesting an extension."
-                          : undefined
-                      }
+                      disabled={busy || sessionExpired || renewalPending}
                     >
                       {renewalPending ? <Check /> : <ArrowRight />}
-                      {renewalPending ? "Renewal requested" : "Request renewal"}
+                      {renewalPending
+                        ? "Request awaiting review"
+                        : requestLabel}
                     </Button>
-                    {active && (
-                      <Button
-                        variant="ghost"
-                        className={styles.button}
-                        disabled={busy || sessionExpired}
-                        onClick={() => {
-                          prepareDialog()
-                          setRenewalAction(
-                            canceled ? "resume-renewal" : "cancel-renewal"
-                          )
-                        }}
-                      >
-                        {canceled ? "Resume renewal" : "Cancel renewal"}
-                      </Button>
-                    )}
                   </div>
+                  {account.reminders.revision > 0 && (
+                    <div className={styles.renewalInfo}>
+                      <CalendarDays size={17} />
+                      <div>
+                        <strong>Expiry reminders</strong>
+                        <p>
+                          Receive a reminder before trial access ends. This
+                          preference does not extend access.
+                        </p>
+                        <Button
+                          variant="outline"
+                          className={styles.button}
+                          disabled={busy || sessionExpired}
+                          onClick={() => void updateReminders()}
+                          aria-pressed={account.reminders.enabled}
+                        >
+                          {account.reminders.enabled
+                            ? "Turn off reminders"
+                            : "Turn on reminders"}
+                        </Button>
+                      </div>
+                    </div>
+                  )}
                   <p className={styles.billingNote}>
                     <ShieldCheck size={13} />
                     No automatic billing or payments here.
@@ -713,7 +654,7 @@ export function CustomerAccountPage() {
                     <h2 id="macs-title">Connected Macs</h2>
                   </CardTitle>
                   <Badge variant="outline" className={styles.count}>
-                    {devices.length} / {subscription?.deviceLimit ?? 2}
+                    {devices.length} / {2}
                   </Badge>
                 </CardHeader>
                 <CardContent className={styles.deviceContent}>
@@ -757,14 +698,8 @@ export function CustomerAccountPage() {
                                 setSelectedMac({
                                   id: device.id,
                                   label,
-                                  revision:
-                                    "revision" in device
-                                      ? (device.revision as number)
-                                      : subscription!.revision,
-                                  sessionId:
-                                    "sessionId" in device
-                                      ? (device.sessionId as string | null)
-                                      : undefined,
+                                  revision: device.revision,
+                                  sessionId: device.sessionId,
                                 })
                               }}
                               disabled={busy || sessionExpired || loading}
@@ -818,7 +753,7 @@ export function CustomerAccountPage() {
                           <div className={styles.requestHeading}>
                             <strong>
                               {request.action === "renewal"
-                                ? "Subscription renewal"
+                                ? "Access extension"
                                 : "Mac removal"}
                             </strong>
                             <Badge
@@ -871,6 +806,7 @@ export function CustomerAccountPage() {
       </div>
       {form && (
         <RequestDialog
+          title={requestLabel}
           busy={busy}
           sessionExpired={sessionExpired}
           error={formError}
@@ -950,100 +886,6 @@ export function CustomerAccountPage() {
                 onClick={() => void removeMac()}
               >
                 {busy ? "Removing…" : "Remove Mac"}
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
-      )}
-      {renewalAction && subscription && (
-        <Dialog
-          open
-          onOpenChange={(open) => {
-            if (!open && !busy) setRenewalAction(null)
-          }}
-          disablePointerDismissal={busy}
-        >
-          <DialogContent
-            className={styles.modal}
-            showCloseButton={false}
-            initialFocus={renewalCancel}
-          >
-            <DialogHeader className={styles.modalHeading}>
-              <div className={styles.modalIcon}>
-                <CalendarDays />
-              </div>
-              <DialogTitle className={styles.modalTitle}>
-                {renewalAction === "cancel-renewal"
-                  ? "Cancel your renewal?"
-                  : "Resume your renewal?"}
-              </DialogTitle>
-              <DialogDescription className={styles.modalDescription}>
-                {renewalAction === "cancel-renewal" ? (
-                  <>
-                    Your current subscription stays active until{" "}
-                    <DateTime value={subscription.endsAt} />. This tells the
-                    administrator you do not want to renew. It will not remove
-                    your Macs or end access early.
-                  </>
-                ) : (
-                  <>
-                    This restores your renewal preference. Submit a renewal
-                    request when you want an administrator to extend access.
-                    Your current end date remains{" "}
-                    <DateTime value={subscription.endsAt} />. No payment is
-                    collected.
-                  </>
-                )}
-              </DialogDescription>
-            </DialogHeader>
-            {formError && (
-              <p role="alert" className={styles.error}>
-                {formError}
-                {sessionExpired && (
-                  <>
-                    {" "}
-                    <SignInLink />
-                  </>
-                )}
-              </p>
-            )}
-            <DialogFooter className={styles.modalActions}>
-              <Button
-                ref={renewalCancel}
-                variant="outline"
-                className={styles.button}
-                disabled={busy}
-                onClick={() => setRenewalAction(null)}
-              >
-                Go back
-              </Button>
-              {renewalConflict && (
-                <Button
-                  className={styles.button}
-                  disabled={busy}
-                  onClick={() => {
-                    setRenewalAction(null)
-                    setLoading(true)
-                    void load()
-                  }}
-                >
-                  <RefreshCw />
-                  Refresh account
-                </Button>
-              )}
-              <Button
-                variant={
-                  renewalAction === "cancel-renewal" ? "destructive" : "default"
-                }
-                className={styles.button}
-                disabled={busy || sessionExpired || renewalConflict}
-                onClick={() => void updateRenewal()}
-              >
-                {busy
-                  ? "Saving…"
-                  : renewalAction === "cancel-renewal"
-                    ? "Confirm cancellation"
-                    : "Confirm renewal preference"}
               </Button>
             </DialogFooter>
           </DialogContent>

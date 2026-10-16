@@ -4,7 +4,7 @@ import { after, before, test } from "node:test"
 import { getPlatformProxy, unstable_splitSqlQuery } from "wrangler"
 import {
   changeSubscription,
-  changeSubscriptionRenewal,
+  changeSubscriptionReminders,
   getSubscriptionOverview,
   getSubscription,
   listSubscriptionAudit,
@@ -117,6 +117,7 @@ before(async () => {
   await migrate("0010_subscription_renewal_preferences.sql")
   await migrate("0011_desktop_account_sessions.sql")
   await migrate("0012_desktop_device_metadata.sql")
+  await migrate("0013_manual_access_cleanup.sql")
 })
 
 after(async () => {
@@ -594,14 +595,6 @@ test("overview includes all subscriptions and classifies expiration boundaries i
     undefined,
     now
   )
-  const deviceId = "c".repeat(64)
-  await database.batch([
-    database
-      .prepare(
-        "INSERT INTO account_devices (device_id,user_id,public_key,binding_revision,activated_at,active) VALUES (?,'user_overview_standard','private-device-key',1,?,1)"
-      )
-      .bind(deviceId, now),
-  ])
   const result = await getSubscriptionOverview(database, now)
   for (const [field, added] of Object.entries({
     totalSubscriptions: 4,
@@ -611,114 +604,64 @@ test("overview includes all subscriptions and classifies expiration boundaries i
     expired: 1,
     revoked: 1,
     expiringSoon: 1,
-    assignedMacs: 1,
   }))
     assert.equal(result[field], before[field] + added, field)
-  assert.equal(result.asOf, now)
-  assert.equal(result.expiringWithinDays, 7)
-  const subscription = await getSubscription(
-    database,
-    "user_overview_standard",
-    now
-  )
-  assert.deepEqual(subscription.devices, [
-    {
-      id: deviceId,
-      bindingRevision: 1,
-      assignmentRevision: 1,
-      activatedAt: now,
-    },
+  assert.equal(result.assignedMacs, before.assignedMacs)
+  const grant = await getSubscription(database, "user_overview_standard", now)
+  for (const field of [
+    "devices",
+    "bindingRevision",
+    "deviceLimit",
+    "cancelAtPeriodEnd",
+    "canceledAt",
   ])
-  assert.equal(
-    JSON.stringify(subscription).includes("private-device-key"),
-    false
-  )
+    assert.equal(field in grant, false)
 })
 
-test("canceling renewal preserves access and Mac assignments, guards concurrent changes and expires normally", async () => {
-  const userId = "user_renewal_preference"
-  const original = await set(userId, { type: "regular", endsAt: now + day })
-  const outcomes = await Promise.allSettled([
-    changeSubscriptionRenewal(
-      database,
-      userId,
-      "cancel-renewal",
-      1,
-      actor,
-      now + 1,
-      "Customer request"
-    ),
-    changeSubscriptionRenewal(
-      database,
-      userId,
-      "cancel-renewal",
-      1,
-      actor,
-      now + 1,
-      "Customer request"
-    ),
-  ])
+test("reminder preferences use grant revisions without changing access and remain editable after expiry", async () => {
+  const userId = "user_reminder_preference"
+  const original = await set(userId, { endsAt: now + day })
+  const outcomes = await Promise.allSettled(
+    Array.from({ length: 2 }, () =>
+      changeSubscriptionReminders(
+        database,
+        userId,
+        false,
+        1,
+        actor,
+        now + 1,
+        "Customer request"
+      )
+    )
+  )
   assert.equal(
-    outcomes.filter(({ status }) => status === "fulfilled").length,
+    outcomes.filter((result) => result.status === "fulfilled").length,
     1
   )
   assert.ok(
-    outcomes.find(({ status }) => status === "rejected").reason instanceof
+    outcomes.find((result) => result.status === "rejected").reason instanceof
       SubscriptionConflictError
   )
-  const canceled = await getSubscription(database, userId, now + 2)
-  assert.deepEqual(canceled, {
+  const disabled = await getSubscription(database, userId, now + 2)
+  assert.deepEqual(disabled, {
     ...original,
-    cancelAtPeriodEnd: true,
-    canceledAt: now + 1,
+    remindersEnabled: false,
     revision: 2,
     updatedAt: now + 1,
   })
-  const overview = await getSubscriptionOverview(database, now + 2)
-  assert.ok(overview.canceling >= 1)
-  assert.equal(
-    (await getSubscription(database, userId, original.endsAt)).status,
-    "expired"
-  )
-  await assert.rejects(
-    changeSubscriptionRenewal(
-      database,
-      userId,
-      "resume-renewal",
-      2,
-      actor,
-      original.endsAt
-    ),
-    TypeError
-  )
-  await assert.rejects(
-    changeSubscriptionRenewal(
-      database,
-      userId,
-      "resume-renewal",
-      1,
-      actor,
-      now + 3
-    ),
-    SubscriptionConflictError
-  )
-  const resumed = await changeSubscriptionRenewal(
+  const enabled = await changeSubscriptionReminders(
     database,
     userId,
-    "resume-renewal",
+    true,
     2,
     actor,
-    now + 3
+    original.endsAt
   )
-  assert.equal(resumed.cancelAtPeriodEnd, false)
-  assert.equal(resumed.canceledAt, null)
-  assert.equal(resumed.endsAt, original.endsAt)
-  assert.equal(resumed.bindingRevision, original.bindingRevision)
-  assert.deepEqual(resumed.devices, original.devices)
-  const audit = await listSubscriptionAudit(database, userId)
+  assert.equal(enabled.status, "expired")
+  assert.equal(enabled.endsAt, original.endsAt)
+  assert.equal(enabled.remindersEnabled, true)
   assert.deepEqual(
-    audit.map(({ action }) => action),
-    ["resume-renewal", "cancel-renewal", "set"]
+    (await listSubscriptionAudit(database, userId)).map((row) => row.action),
+    ["set-reminders", "set-reminders", "set"]
   )
-  assert.equal(audit[1].reason, "Customer request")
 })

@@ -10,8 +10,13 @@ import {
   validDeviceProof,
 } from "./license-crypto.ts"
 import { allowLicenseAttempt } from "./license-rate-limit.ts"
-import { getSubscription } from "./subscription-store.ts"
-import { getWorkOSUser } from "./workos-users.ts"
+import { getSubscription, subscriptionReason } from "./subscription-store.ts"
+import { resolveAccountAccess } from "./account-access.ts"
+import type {
+  AccountDevice,
+  AccountDeviceHistory,
+} from "./subscription-types.ts"
+import { getWorkOSUser, WORKOS_USER_ID } from "./workos-users.ts"
 import { validDeviceName } from "./account-device-metadata.ts"
 
 export interface DesktopSession {
@@ -35,27 +40,58 @@ export function getDesktopSession(database: D1Database, id: string) {
     .bind(id)
     .first<DesktopSession>()
 }
-export async function listAccountDevices(database: D1Database, userId: string) {
+/** Keep directory lookups below D1's bound-parameter limit, including filtered scans. */
+export async function listAccountDevicesForUsers(
+  database: D1Database,
+  userIds: string[]
+): Promise<Map<string, AccountDevice[]>> {
+  const uniqueIds = [...new Set(userIds)]
+  if (
+    uniqueIds.some(
+      (userId) => typeof userId !== "string" || !WORKOS_USER_ID.test(userId)
+    )
+  )
+    throw new TypeError("Invalid WorkOS user.")
+  const devices = new Map<string, AccountDevice[]>(
+    uniqueIds.map((userId) => [userId, []])
+  )
+  for (let offset = 0; offset < uniqueIds.length; offset += 90) {
+    const batch = uniqueIds.slice(offset, offset + 90)
+    const rows = await database
+      .prepare(
+        `SELECT user_id AS userId, device_id AS id, created_at AS activatedAt,
+      id AS sessionId, revision, device_name AS deviceName, last_used_at AS lastUsedAt
+      FROM desktop_sessions WHERE active = 1 AND user_id IN (${batch.map(() => "?").join(", ")})
+      ORDER BY user_id, created_at, id`
+      )
+      .bind(...batch)
+      .all<AccountDevice & { userId: string }>()
+    for (const { userId, ...device } of rows.results)
+      devices.get(userId)!.push(device)
+  }
+  return devices
+}
+
+export async function listAccountDevices(
+  database: D1Database,
+  userId: string
+): Promise<AccountDevice[]> {
+  return (await listAccountDevicesForUsers(database, [userId])).get(userId)!
+}
+
+export async function listAccountDeviceHistory(
+  database: D1Database,
+  userId: string
+): Promise<AccountDeviceHistory[]> {
   const rows = await database
     .prepare(
-      `SELECT device_id AS id, created_at AS activatedAt, id AS sessionId, revision, device_name AS deviceName, last_used_at AS lastUsedAt
-    FROM desktop_sessions WHERE user_id = ? AND active = 1
-    UNION ALL SELECT d.device_id AS id, d.activated_at AS activatedAt, NULL AS sessionId, s.revision AS revision, NULL AS deviceName, NULL AS lastUsedAt
-    FROM account_devices d JOIN subscriptions s ON s.user_id = d.user_id
-    WHERE d.user_id = ? AND d.active = 1 AND d.binding_revision = s.binding_revision
-    AND NOT EXISTS (SELECT 1 FROM desktop_sessions ds WHERE ds.device_id = d.device_id AND ds.active = 1)
-    ORDER BY activatedAt, id`
+      `SELECT device_id AS id, created_at AS activatedAt,
+    id AS sessionId, revision, device_name AS deviceName, last_used_at AS lastUsedAt, active AS current
+    FROM desktop_sessions WHERE user_id = ? ORDER BY created_at DESC, id DESC`
     )
-    .bind(userId, userId)
-    .all<{
-      id: string
-      activatedAt: number
-      sessionId: string | null
-      revision: number
-      deviceName: string | null
-      lastUsedAt: number | null
-    }>()
-  return rows.results
+    .bind(userId)
+    .all<AccountDevice & { current: number }>()
+  return rows.results.map((row) => ({ ...row, current: row.current === 1 }))
 }
 
 /** A browser approval creates its session atomically; polling can only deliver it. */
@@ -65,31 +101,25 @@ export async function approveDesktopSession(
   userId: string,
   email: string,
   now = Date.now(),
-  replacement?: { deviceId: string; sessionId: string | null; revision: number }
+  replacement?: { deviceId: string; sessionId: string; revision: number }
 ) {
   const id = randomUUID()
+  // The inert binding value satisfies the retained historical pairing CHECK.
+  // Modern authorization depends exclusively on session_id and session revisions.
   const results = await database.batch([
     database
       .prepare(
-        `UPDATE account_pairings SET status = 'approved', user_id = ?, approved_binding_revision = 1,
-      session_id = ? WHERE code_hash = ? AND account_version = 1 AND status = 'pending'
+        `UPDATE account_pairings SET status = 'approved', user_id = ?, approved_binding_revision = 1, session_id = ?
+      WHERE code_hash = ? AND account_version = 1 AND status = 'pending'
       AND expires_at > MAX(?, CAST(unixepoch('subsec') * 1000 AS INTEGER))
       ${
         replacement
-          ? `AND device_id != ? AND ${
-              replacement.sessionId
-                ? "EXISTS (SELECT 1 FROM desktop_sessions selected WHERE selected.id = ? AND selected.device_id = ? AND selected.user_id = ? AND selected.active = 1 AND selected.revision = ?)"
-                : `EXISTS (SELECT 1 FROM account_devices selected JOIN subscriptions owner ON owner.user_id = selected.user_id
-          WHERE selected.device_id = ? AND selected.user_id = ? AND selected.active = 1 AND selected.binding_revision = owner.binding_revision
-          AND owner.revision = ? AND NOT EXISTS (SELECT 1 FROM desktop_sessions ds WHERE ds.device_id = selected.device_id AND ds.active = 1))`
-            }`
+          ? `AND device_id != ? AND EXISTS (SELECT 1 FROM desktop_sessions selected
+        WHERE selected.id = ? AND selected.device_id = ? AND selected.user_id = ? AND selected.active = 1 AND selected.revision = ?)`
           : ""
       }
-      AND (SELECT COUNT(*) FROM (SELECT device_id FROM desktop_sessions WHERE user_id = ? AND active = 1
-        UNION SELECT d.device_id FROM account_devices d JOIN subscriptions s ON s.user_id = d.user_id
-          WHERE d.user_id = ? AND d.active = 1 AND d.binding_revision = s.binding_revision
-          AND NOT EXISTS (SELECT 1 FROM desktop_sessions current WHERE current.device_id = d.device_id AND current.active = 1)) used
-          WHERE used.device_id != account_pairings.device_id ${replacement ? "AND used.device_id != ?" : ""}) < 2 RETURNING token_hash`
+      AND (SELECT COUNT(*) FROM desktop_sessions used WHERE used.user_id = ? AND used.active = 1
+        AND used.device_id != account_pairings.device_id ${replacement ? "AND used.device_id != ?" : ""}) < 2 RETURNING token_hash`
       )
       .bind(
         userId,
@@ -99,17 +129,16 @@ export async function approveDesktopSession(
         ...(replacement
           ? [
               replacement.deviceId,
-              ...(replacement.sessionId ? [replacement.sessionId] : []),
+              replacement.sessionId,
               replacement.deviceId,
               userId,
               replacement.revision,
             ]
           : []),
         userId,
-        userId,
         ...(replacement ? [replacement.deviceId] : [])
       ),
-    ...(replacement?.sessionId
+    ...(replacement
       ? desktopRevocationStatements(
           database,
           replacement.sessionId,
@@ -119,52 +148,18 @@ export async function approveDesktopSession(
           id
         )
       : []),
-    ...(replacement && !replacement.sessionId
-      ? [
-          database
-            .prepare(
-              `UPDATE account_devices SET active = 0, assignment_revision = assignment_revision + 1
-      WHERE device_id = ? AND user_id = ? AND active = 1 AND EXISTS (SELECT 1 FROM account_pairings WHERE session_id = ? AND status = 'approved')`
-            )
-            .bind(replacement.deviceId, userId, id),
-        ]
-      : []),
     database
       .prepare(
         `UPDATE desktop_sessions SET active = 0, revision = revision + 1, updated_at = ?
-      WHERE active = 1 AND device_id = (SELECT device_id FROM account_pairings WHERE session_id = ?)
-      AND EXISTS (SELECT 1 FROM account_pairings WHERE session_id = ? AND status = 'approved')`
+      WHERE active = 1 AND device_id = (SELECT device_id FROM account_pairings WHERE session_id = ? AND status = 'approved')`
       )
-      .bind(now, id, id),
-    // Browser login explicitly selects a new account for this physical device.
-    // Retire its previous legacy assignment so it cannot retain a hidden seat
-    // or reappear when the new account logs out.
-    database
-      .prepare(
-        `UPDATE subscriptions SET revision = revision + 1, updated_at = ?
-      WHERE user_id != ? AND EXISTS (SELECT 1 FROM account_devices d WHERE d.user_id = subscriptions.user_id
-        AND d.device_id = (SELECT device_id FROM account_pairings WHERE session_id = ? AND status = 'approved')
-        AND d.active = 1 AND d.binding_revision = subscriptions.binding_revision)`
-      )
-      .bind(now, userId, id),
-    database
-      .prepare(
-        `UPDATE account_devices SET active = 0, assignment_revision = assignment_revision + 1
-      WHERE user_id != ? AND active = 1 AND device_id = (SELECT device_id FROM account_pairings WHERE session_id = ? AND status = 'approved')`
-      )
-      .bind(userId, id),
+      .bind(now, id),
     database
       .prepare(
         `INSERT INTO desktop_sessions (id, device_id, user_id, email, public_key, created_at, updated_at, device_name, last_used_at)
       SELECT session_id, device_id, user_id, ?, public_key, ?, ?, device_name, ? FROM account_pairings WHERE session_id = ? AND status = 'approved'`
       )
       .bind(email, now, now, now, id),
-    database
-      .prepare(
-        `UPDATE subscriptions SET revision = revision + 1, updated_at = ?
-      WHERE user_id = ? AND EXISTS (SELECT 1 FROM desktop_sessions WHERE id = ? AND active = 1)`
-      )
-      .bind(now, userId, id),
   ])
   return results[0].results.length === 1
 }
@@ -181,6 +176,59 @@ export async function revokeDesktopSession(
     desktopRevocationStatements(database, id, userId, expectedRevision, now)
   )
   return results[0].results[0] as unknown as DesktopSession | undefined
+}
+
+export class AccountDeviceConflictError extends Error {
+  constructor() {
+    super("This computer changed. Refresh and try again.")
+  }
+}
+
+export async function removeAccountDevice(
+  database: D1Database,
+  userId: string,
+  sessionId: string,
+  expectedRevision: number,
+  actor: string,
+  now = Date.now(),
+  reason?: string
+) {
+  if (
+    !/^user_[A-Za-z0-9_]{1,120}$/.test(userId) ||
+    !sessionPattern.test(sessionId) ||
+    !Number.isSafeInteger(expectedRevision) ||
+    expectedRevision < 1 ||
+    typeof actor !== "string" ||
+    !actor.trim() ||
+    actor.length > 320
+  )
+    throw new TypeError("Choose a current computer.")
+  const normalizedReason = subscriptionReason(reason)
+  const revocationId = randomUUID()
+  const results = await database.batch([
+    database
+      .prepare(
+        `UPDATE desktop_sessions SET active = 0, revision = revision + 1, updated_at = ?, revocation_id = ?
+      WHERE id = ? AND user_id = ? AND active = 1 AND revision = ? RETURNING id`
+      )
+      .bind(now, revocationId, sessionId, userId, expectedRevision),
+    database
+      .prepare(
+        `INSERT INTO account_device_audit (id,user_id,session_id,action,actor,created_at,reason)
+      SELECT ?,user_id,id,'remove-device',?,?,? FROM desktop_sessions WHERE id = ? AND revocation_id = ? AND changes() = 1`
+      )
+      .bind(
+        randomUUID(),
+        actor,
+        now,
+        normalizedReason,
+        sessionId,
+        revocationId
+      ),
+    ...desktopRevocationCleanup(database, revocationId, now, { sessionId }),
+  ])
+  if (!results[0].results.length) throw new AccountDeviceConflictError()
+  return listAccountDevices(database, userId)
 }
 
 /** Read the pairing's current session inside the same transaction as cancellation. */
@@ -257,20 +305,6 @@ function desktopRevocationCleanup(
       (SELECT device_id, user_id FROM desktop_sessions WHERE id = ${sessionId} AND revocation_id = ?)`
       )
       .bind(sourceValue, revocationId),
-    database
-      .prepare(
-        `UPDATE account_devices SET active = 0, assignment_revision = assignment_revision + 1
-      WHERE active = 1 AND (device_id, user_id) IN
-      (SELECT device_id, user_id FROM desktop_sessions WHERE id = ${sessionId} AND revocation_id = ?)
-      AND NOT EXISTS (SELECT 1 FROM desktop_sessions newer WHERE newer.device_id = account_devices.device_id AND newer.active = 1)`
-      )
-      .bind(sourceValue, revocationId),
-    database
-      .prepare(
-        `UPDATE subscriptions SET revision = revision + 1, updated_at = ?
-      WHERE user_id = (SELECT user_id FROM desktop_sessions WHERE id = ${sessionId} AND revocation_id = ?)`
-      )
-      .bind(now, sourceValue, revocationId),
   ]
 }
 
@@ -307,9 +341,8 @@ export async function desktopSessionResponse(
   }
   const receipt =
     row.active === 1 &&
-    subscription?.status === "active" &&
-    subscription.startsAt <= now &&
-    subscription.endsAt > now
+    subscription !== null &&
+    resolveAccountAccess(subscription, now).canHost
       ? signedReceipt(
           signer,
           {

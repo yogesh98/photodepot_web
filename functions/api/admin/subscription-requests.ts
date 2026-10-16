@@ -18,6 +18,7 @@ import {
   listAdminRequests,
   listRequestAudit,
   reviewAccountRequest,
+  approveAccountRequest,
 } from "../../../lib/account-requests.ts"
 
 export async function handleAdminSubscriptionRequests(
@@ -105,6 +106,33 @@ export async function handleAdminSubscriptionRequests(
     if (!body || typeof body !== "object" || Array.isArray(body))
       return withAdminSession(json({ error: "Invalid review." }, 400), auth)
     const supplied = body as Record<string, unknown>
+    if (supplied.action === "approve") {
+      const item = await getAccountRequest(env.DB, supplied.requestId as string)
+      if (!item)
+        return withAdminSession(
+          json({ error: "Request not found." }, 404),
+          auth
+        )
+      if (!(await getWorkOSUser(env, item.userId)))
+        return withAdminSession(
+          json({ error: "This user no longer exists in WorkOS." }, 404),
+          auth
+        )
+      const result = await approveAccountRequest(
+        env.DB,
+        {
+          id: supplied.requestId as string,
+          expectedRevision: supplied.expectedRevision as number,
+          expectedSubscriptionRevision:
+            supplied.expectedSubscriptionRevision as number,
+          type: supplied.type as "trial" | "regular",
+          endsAt: supplied.endsAt as number,
+          note: supplied.note as string | undefined,
+        },
+        auth.email
+      )
+      return withAdminSession(json(result), auth)
+    }
     const result = await reviewAccountRequest(
       env.DB,
       {
