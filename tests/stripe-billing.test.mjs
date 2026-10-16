@@ -180,11 +180,13 @@ function checkoutDeps({ connected = true } = {}) {
           active: true,
           livemode: false,
           type: "recurring",
+          billing_scheme: "per_unit",
           unit_amount: id === "price_monthly" ? 2000 : 20000,
           currency: "usd",
           recurring: {
             interval: id === "price_monthly" ? "month" : "year",
             interval_count: 1,
+            usage_type: "licensed",
           },
           tax_behavior: "exclusive",
           product: {
@@ -280,6 +282,8 @@ function portalConfiguration(changes = {}) {
       subscription_update: {
         enabled: true,
         default_allowed_updates: ["price"],
+        proration_behavior: "create_prorations",
+        trial_update_behavior: "continue_trial",
         products: [
           {
             product: "prod_fixture",
@@ -387,6 +391,48 @@ test("existing billing management survives missing billing client setup even wit
     (await createBillingPortal(env, identity, deps)).provider,
     "stripe"
   )
+})
+
+test("retiring or misconfiguring purchase settings cannot lock existing customers out of cancellation", async () => {
+  customer()
+  const deps = checkoutDeps({ connected: false })
+  deps.stripe.subscriptions.list = async () => ({
+    data: [subscription()],
+    has_more: false,
+  })
+  for (const changes of [
+    { STRIPE_PRICE_MONTHLY: undefined, STRIPE_PRICE_ANNUAL: undefined },
+    { STRIPE_PRICE_MONTHLY: "retired-price" },
+    { STRIPE_PRICE_ANNUAL: env.STRIPE_PRICE_MONTHLY },
+    { PHOTODEPOT_STRIPE_AUTOMATIC_TAX: "invalid" },
+    { PHOTODEPOT_STRIPE_TRIAL_DAYS: "invalid" },
+    { WORKOS_API_KEY: undefined },
+    { WORKOS_CLIENT_ID: undefined },
+  ]) {
+    const changed = { ...env, ...changes }
+    const summary = await billingSummary(changed, identity.userId, {
+      stripe: deps.stripe,
+    })
+    assert.equal(summary.enabled, true)
+    assert.equal(summary.portalEnabled, true)
+    assert.equal(summary.subscription.status, "active")
+    assert.deepEqual(summary.intervals, [])
+    assert.equal(summary.trialDays, null)
+    assert.equal(
+      (await createBillingPortal(changed, identity, deps)).provider,
+      "stripe"
+    )
+    assert.equal(
+      (await createBillingSubscriptionFlow(changed, identity, "cancel", deps))
+        .provider,
+      "stripe"
+    )
+    await assert.rejects(
+      createBillingCheckout(changed, identity, "monthly", deps),
+      /not configured/
+    )
+  }
+  assert.deepEqual(deps.created.sessions, [])
 })
 
 test("checkout uses fixed configured prices, tax, flexible billing and reusable idempotent sessions", async () => {
@@ -503,6 +549,99 @@ test("customer API side effects can retry after a persistence failure using the 
     deps.created.customers[0].opts.idempotencyKey,
     deps.created.customers[1].opts.idempotencyKey
   )
+})
+
+test("customer recovery replays the original email when the account email changes after a failed write", async () => {
+  const deps = checkoutDeps()
+  const create = deps.stripe.customers.create
+  let originalRequest
+  deps.stripe.customers.create = async (params, options) => {
+    if (originalRequest) assert.deepEqual({ params, options }, originalRequest)
+    else originalRequest = structuredClone({ params, options })
+    return create(params, options)
+  }
+  sqlite.exec(
+    `CREATE TRIGGER fail_customer_save BEFORE UPDATE OF stripe_customer_id ON stripe_customers BEGIN SELECT RAISE(ABORT,'temporary write failure'); END`
+  )
+  await assert.rejects(
+    createBillingCheckout(env, identity, "monthly", deps),
+    /temporary write failure/
+  )
+  sqlite.exec("DROP TRIGGER fail_customer_save")
+  await createBillingCheckout(
+    env,
+    { ...identity, email: "new-address@example.test" },
+    "monthly",
+    deps
+  )
+  assert.equal(deps.created.customers.length, 2)
+  assert.equal(deps.created.customers[1].params.email, identity.email)
+  assert.equal(deps.created.sessions.length, 1)
+})
+
+test("Checkout recovery replays the original body after settings change and a response cannot be saved", async () => {
+  env.PHOTODEPOT_STRIPE_TRIAL_DAYS = "7"
+  const deps = checkoutDeps()
+  const create = deps.stripe.checkout.sessions.create
+  let originalRequest, originalSession
+  let requests = 0
+  deps.stripe.checkout.sessions.create = async (params, options) => {
+    requests++
+    if (originalRequest) {
+      // Stripe rejects a changed body for an existing idempotency key.
+      assert.deepEqual({ params, options }, originalRequest)
+      return originalSession
+    }
+    originalRequest = structuredClone({ params, options })
+    originalSession = await create(params, options)
+    return originalSession
+  }
+  sqlite.exec(
+    `CREATE TRIGGER fail_checkout_save BEFORE UPDATE OF checkout_session_id ON stripe_customers WHEN NEW.checkout_session_id IS NOT NULL BEGIN SELECT RAISE(ABORT,'temporary write failure'); END`
+  )
+  await assert.rejects(
+    createBillingCheckout(env, identity, "monthly", deps),
+    /temporary write failure/
+  )
+  sqlite.exec("DROP TRIGGER fail_checkout_save")
+  env.PHOTODEPOT_STRIPE_ORIGIN = "https://new.photodepot.app"
+  env.PHOTODEPOT_STRIPE_AUTOMATIC_TAX = "false"
+  env.PHOTODEPOT_STRIPE_TRIAL_DAYS = "14"
+  assert.equal(
+    (await createBillingCheckout(env, identity, "monthly", deps)).provider,
+    "stripe"
+  )
+  assert.equal(requests, 2)
+  assert.equal(deps.created.sessions.length, 1)
+  const saved = sqlite.prepare("SELECT * FROM stripe_customers").get()
+  assert.equal(saved.checkout_generation, 1)
+  assert.equal(saved.checkout_session_id, originalSession.id)
+  assert.deepEqual(
+    JSON.parse(saved.checkout_request_json),
+    originalRequest.params
+  )
+})
+
+test("legacy unresolved provider requests without saved inputs fail before repeating a side effect", async () => {
+  const deps = checkoutDeps()
+  sqlite
+    .prepare("UPDATE stripe_customers SET customer_create_started_at=?")
+    .run(Date.now())
+  await assert.rejects(
+    createBillingCheckout(env, identity, "monthly", deps),
+    /needs reconciliation/
+  )
+  assert.deepEqual(deps.created.customers, [])
+  sqlite
+    .prepare(
+      `UPDATE stripe_customers SET stripe_customer_id='cus_fixture', checkout_started_at=?, checkout_price_id='price_monthly'`
+    )
+    .run(Date.now())
+  await assert.rejects(
+    createBillingCheckout(env, identity, "monthly", deps),
+    /needs reconciliation/
+  )
+  assert.deepEqual(deps.created.sessions, [])
 })
 
 test("a completed canceled subscription can be repurchased without another trial, using current Stripe history", async () => {
@@ -640,6 +779,40 @@ test("yearly upgrade targets the existing monthly item and requires hosted Strip
   assert.equal(current.items.data[0].price.id, "price_monthly")
   assert.deepEqual(current.discounts, ["di_existing"])
   assert.equal(deps.created.sessions.length, 0)
+})
+
+test("yearly upgrades require unused-time credits and preserve a current free trial", async () => {
+  customer()
+  const deps = checkoutDeps({ connected: false })
+  let current = subscription()
+  deps.stripe.subscriptions.list = async () => ({
+    data: [current],
+    has_more: false,
+  })
+  const configuration = portalConfiguration()
+  deps.stripe.billingPortal.configurations.retrieve = async () => configuration
+  for (const value of [undefined, "none"]) {
+    configuration.features.subscription_update.proration_behavior = value
+    await assert.rejects(
+      createBillingSubscriptionFlow(env, identity, "upgrade", deps),
+      /Yearly plan settings/
+    )
+  }
+  configuration.features.subscription_update.proration_behavior =
+    "create_prorations"
+  current = subscription({ status: "trialing", trial_end: now + 7 * 86400 })
+  for (const value of [undefined, "end_trial"]) {
+    configuration.features.subscription_update.trial_update_behavior = value
+    await assert.rejects(
+      createBillingSubscriptionFlow(env, identity, "upgrade", deps),
+      /Yearly plan settings/
+    )
+  }
+  assert.deepEqual(deps.created.portals, [])
+  configuration.features.subscription_update.trial_update_behavior =
+    "continue_trial"
+  await createBillingSubscriptionFlow(env, identity, "upgrade", deps)
+  assert.equal(deps.created.portals.length, 1)
 })
 
 test("a subscription on a retired price can still cancel while upgrades remain restricted", async () => {
@@ -847,7 +1020,7 @@ test("a targeted flow holds the billing lease until its hosted session is create
   assert.equal(deps.created.portals.length, 1)
 })
 
-test("targeted flows reject mismatched session customers, modes, configurations and unsafe URLs", async () => {
+test("all Portal flows reject mismatched session customers, modes, configurations and unsafe URLs", async () => {
   customer()
   const deps = checkoutDeps({ connected: false })
   deps.stripe.subscriptions.list = async () => ({
@@ -871,6 +1044,7 @@ test("targeted flows reject mismatched session customers, modes, configurations 
     await assert.rejects(
       createBillingSubscriptionFlow(env, identity, "cancel", deps)
     )
+    await assert.rejects(createBillingPortal(env, identity, deps))
   }
 })
 
@@ -966,11 +1140,13 @@ test("account billing uses the authenticated identity and rejects foreign origin
         active: true,
         livemode: false,
         type: "recurring",
+        billing_scheme: "per_unit",
         unit_amount: id === "price_monthly" ? 2000 : 20000,
         currency: "usd",
         recurring: {
           interval: id === "price_monthly" ? "month" : "year",
           interval_count: 1,
+          usage_type: "licensed",
         },
         tax_behavior: "exclusive",
         product: { id: "prod_fixture", active: true, tax_code: "txcd_fixture" },
@@ -1218,6 +1394,16 @@ test("invalid or mismatched configured prices cannot be advertised or purchased"
     { unit_amount: -1 },
     { livemode: true },
     { recurring: { interval: "week", interval_count: 1 } },
+    {
+      recurring: {
+        interval: "month",
+        interval_count: 1,
+        usage_type: "metered",
+      },
+    },
+    { billing_scheme: "tiered" },
+    { transform_quantity: { divide_by: 10, round: "down" } },
+    { custom_unit_amount: { minimum: 0 } },
   ]) {
     deps.stripe.prices.retrieve = async (id) => ({
       ...(await retrieve(id)),

@@ -79,6 +79,21 @@ export function billingConfiguration(
   } catch {
     return fail()
   }
+  const portalConfiguration = env.STRIPE_PORTAL_CONFIGURATION_ID
+  if (portalConfiguration && !/^bpc_[A-Za-z0-9]+$/.test(portalConfiguration))
+    return fail()
+  // Managing an existing subscription must not depend on a purchase catalog,
+  // trial policy or the independent entitlement provider being configured.
+  if (existingBilling)
+    return {
+      secret,
+      live,
+      origin,
+      prices: {},
+      automaticTax: false,
+      trialDays: null,
+      portalConfiguration,
+    }
   const prices: BillingConfig["prices"] = {}
   for (const [interval, value] of [
     ["monthly", env.STRIPE_PRICE_MONTHLY],
@@ -103,9 +118,6 @@ export function billingConfiguration(
       trialDays < 1 ||
       trialDays > 730)
   )
-    return fail()
-  const portalConfiguration = env.STRIPE_PORTAL_CONFIGURATION_ID
-  if (portalConfiguration && !/^bpc_[A-Za-z0-9]+$/.test(portalConfiguration))
     return fail()
   if (!env.WORKOS_API_KEY || !env.WORKOS_CLIENT_ID) return fail()
   if (
@@ -148,6 +160,10 @@ async function configuredPrice(
     !price.active ||
     price.livemode !== config.live ||
     price.type !== "recurring" ||
+    price.billing_scheme !== "per_unit" ||
+    price.recurring?.usage_type !== "licensed" ||
+    price.transform_quantity != null ||
+    price.custom_unit_amount != null ||
     price.recurring?.interval !== (interval === "monthly" ? "month" : "year") ||
     price.recurring?.interval_count !== 1 ||
     !Number.isSafeInteger(price.unit_amount) ||
@@ -206,11 +222,9 @@ export async function billingSummary(
   if (!config) return disabled
   const customer = await getBillingCustomer(env.DB, userId)
   let connected = false
-  let billingConfigured = false
   let accessUnavailable = false
   try {
     const context = workosBillingConfiguration(env).context
-    billingConfigured = true
     connected = await hasWorkOSBillingSession(env.DB, userId, context)
     if (connected)
       await getWorkOSEntitlement(env, userId, {
@@ -223,16 +237,22 @@ export async function billingSummary(
     accessUnavailable = true
   }
   const stripe = options.stripe ?? createBillingStripe(config)
-  const configuredIntervals =
-    env.PHOTODEPOT_STRIPE_ENABLED === "true" && billingConfigured
-      ? (Object.keys(config.prices) as BillingInterval[])
-      : []
+  let purchaseConfig: BillingConfig | null = null
+  try {
+    workosBillingConfiguration(env)
+    purchaseConfig = billingConfiguration(env)
+  } catch {
+    // Invalid purchase settings close purchases, not billing management.
+  }
+  const configuredIntervals = Object.keys(
+    purchaseConfig?.prices ?? {}
+  ) as BillingInterval[]
   // Purchase options may be retired or unavailable independently of existing
   // subscriptions. Keep their management state available and offer only prices
   // that pass the same validation used by Checkout and upgrades.
   const priceResults = await Promise.allSettled(
     configuredIntervals.map(async (interval) => {
-      const price = await configuredPrice(config, stripe, interval)
+      const price = await configuredPrice(purchaseConfig!, stripe, interval)
       return [
         interval,
         { amount: price.unit_amount!, currency: price.currency },
@@ -265,7 +285,7 @@ export async function billingSummary(
       objectId(subscription.customer) !== customer!.stripe_customer_id)
   )
     throw new BillingUnavailableError("Billing customer mismatch.")
-  const manualTrial = config.trialDays
+  const manualTrial = purchaseConfig?.trialDays
     ? await hasUsedManualTrial(env.DB, userId)
     : false
   const item =
@@ -312,7 +332,7 @@ export async function billingSummary(
       manualTrial ||
       subscriptions?.data.some((sub) => Boolean(sub.trial_start))
         ? null
-        : config.trialDays,
+        : (purchaseConfig?.trialDays ?? null),
     accessConnected: connected,
     accessUnavailable,
     managedBy: "workos" as const,
@@ -420,13 +440,19 @@ async function ensureCustomer(
       throw new BillingUnavailableError(
         "Customer setup needs reconciliation. Please contact support."
       )
+    if (row.customer_create_started_at && !row.customer_create_email)
+      throw new BillingUnavailableError(
+        "Customer setup needs reconciliation. Please contact support."
+      )
+    const customerEmail = row.customer_create_email ?? identity.email
     if (!row.customer_create_started_at)
       await updateBillingCustomer(env.DB, identity.userId, token, {
         customer_create_started_at: Date.now(),
+        customer_create_email: customerEmail,
       })
     const customer = await stripe.customers.create(
       {
-        email: identity.email,
+        email: customerEmail,
         metadata: {
           photodepot_user_id: identity.userId,
           workos_organization_id: organization.id,
@@ -570,7 +596,55 @@ export async function createBillingCheckout(
           !(await hasUsedManualTrial(env.DB, identity.userId))
         ? config.trialDays
         : null
-    if (!pending)
+    let params: Stripe.Checkout.SessionCreateParams = {
+      mode: "subscription",
+      customer: customerId,
+      client_reference_id: identity.userId,
+      line_items: [{ price: priceId, quantity: 1 }],
+      success_url: `${config.origin}/account?billing=success`,
+      cancel_url: `${config.origin}/account?billing=canceled`,
+      automatic_tax: { enabled: config.automaticTax },
+      billing_address_collection: "required",
+      tax_id_collection: { enabled: true },
+      customer_update: { address: "auto", name: "auto" },
+      allow_promotion_codes: true,
+      payment_method_collection: "if_required",
+      metadata: { photodepot_user_id: identity.userId },
+      subscription_data: {
+        billing_mode: { type: "flexible" },
+        metadata: { photodepot_user_id: identity.userId },
+        ...(trialDays
+          ? {
+              trial_period_days: trialDays,
+              trial_settings: {
+                end_behavior: { missing_payment_method: "cancel" as const },
+              },
+            }
+          : {}),
+      },
+    }
+    if (pending) {
+      // A response or D1 write can fail after Stripe has created the session.
+      // Replaying the saved body is required even if settings changed since.
+      try {
+        const saved = JSON.parse(row.checkout_request_json ?? "null")
+        if (
+          !saved ||
+          saved.mode !== "subscription" ||
+          saved.customer !== customerId ||
+          saved.client_reference_id !== identity.userId ||
+          saved.line_items?.length !== 1 ||
+          saved.line_items[0].price !== row.checkout_price_id ||
+          saved.line_items[0].quantity !== 1
+        )
+          throw new Error("Missing Checkout snapshot")
+        params = saved
+      } catch {
+        throw new BillingUnavailableError(
+          "Checkout setup needs reconciliation. Please contact support."
+        )
+      }
+    } else {
       await updateBillingCustomer(env.DB, identity.userId, token, {
         checkout_session_id: null,
         checkout_expires_at: null,
@@ -578,39 +652,12 @@ export async function createBillingCheckout(
         checkout_price_id: priceId,
         checkout_generation: generation,
         checkout_trial_days: trialDays,
+        checkout_request_json: JSON.stringify(params),
       })
-    const session = await stripe.checkout.sessions.create(
-      {
-        mode: "subscription",
-        customer: customerId,
-        client_reference_id: identity.userId,
-        line_items: [{ price: priceId, quantity: 1 }],
-        success_url: `${config.origin}/account?billing=success`,
-        cancel_url: `${config.origin}/account?billing=canceled`,
-        automatic_tax: { enabled: config.automaticTax },
-        billing_address_collection: "required",
-        tax_id_collection: { enabled: true },
-        customer_update: { address: "auto", name: "auto" },
-        allow_promotion_codes: true,
-        payment_method_collection: "if_required",
-        metadata: { photodepot_user_id: identity.userId },
-        subscription_data: {
-          billing_mode: { type: "flexible" },
-          metadata: { photodepot_user_id: identity.userId },
-          ...(trialDays
-            ? {
-                trial_period_days: trialDays,
-                trial_settings: {
-                  end_behavior: { missing_payment_method: "cancel" as const },
-                },
-              }
-            : {}),
-        },
-      },
-      {
-        idempotencyKey: `photodepot-checkout-${row.customer_create_token}-${generation}`,
-      }
-    )
+    }
+    const session = await stripe.checkout.sessions.create(params, {
+      idempotencyKey: `photodepot-checkout-${row.customer_create_token}-${generation}`,
+    })
     if (
       session.livemode !== config.live ||
       objectId(session.customer) !== customerId
@@ -653,6 +700,12 @@ export async function createBillingPortal(
       configuration: config.portalConfiguration,
       return_url: `${config.origin}/account?billing=return`,
     })
+    if (
+      session.customer !== row.stripe_customer_id ||
+      session.livemode !== config.live ||
+      objectId(session.configuration) !== config.portalConfiguration
+    )
+      throw new BillingUnavailableError("Billing session mismatch.")
     return {
       url: safeStripeUrl(session.url, "portal"),
       provider: "stripe" as const,
@@ -766,6 +819,11 @@ export async function createBillingSubscriptionFlow(
         annual.currency !== item.price.currency ||
         !updates.enabled ||
         !updates.default_allowed_updates.includes("price") ||
+        !["create_prorations", "always_invoice"].includes(
+          updates.proration_behavior
+        ) ||
+        (subscription.status === "trialing" &&
+          updates.trial_update_behavior !== "continue_trial") ||
         !updates.products?.some(
           (product) =>
             product.product === productId && product.prices.includes(annual.id)

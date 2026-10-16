@@ -48,7 +48,8 @@ same environment. Use separate databases, keys and Prices for test and live mode
    account owner's browser authorization; setting a local flag cannot create it.
 3. In Stripe test mode, create the product and recurring monthly and annual
    Prices: USD20/month and USD200/year (two months free compared with monthly).
-   Use the same product and explicit tax behavior for both. Attach a Stripe
+   Use the same product and explicit tax behavior for both, with fixed per-unit
+   licensed pricing and no quantity transformation. Attach a Stripe
    Entitlements feature with lookup key `photodepot-standard` to the product,
    or set `PHOTODEPOT_WORKOS_ENTITLEMENT` to the chosen key. WorkOS propagates this
    feature into tokens. Adding features to existing subscriptions may take effect
@@ -56,11 +57,22 @@ same environment. Use separate databases, keys and Prices for test and live mode
 4. Create a test-mode Customer Portal configuration. Enable payment updates,
    invoices and period-end cancellation. Enable price updates and restrict them to
    the Standard product's monthly and annual Prices, with quantity changes
-   disabled. Stripe calculates prorations and presents them for confirmation.
+   disabled. Set `features.subscription_update.proration_behavior` to
+   `create_prorations` or `always_invoice` so yearly changes credit unused monthly
+   time, and `features.subscription_update.trial_update_behavior=continue_trial`
+   to preserve a current free trial when switching plans. Stripe's defaults omit
+   proration and end trials immediately; targeted yearly upgrades reject those
+   defaults. Stripe presents the resulting invoice for confirmation.
    Set `STRIPE_PORTAL_CONFIGURATION_ID`.
-5. Apply migrations through `0016_workos_entitlements.sql`. Earlier Stripe ledger
+5. Apply migrations through `0017_stripe_request_snapshots.sql`. Earlier Stripe ledger
    tables are retained for history/upgrade compatibility and are not used by
    runtime authorization. No Stripe webhook endpoint or signing secret is needed.
+   Migration 0017 saves the original customer email and Checkout request before
+   contacting Stripe, so retries after a network or database failure reuse the
+   exact parameters required by Stripe's idempotency keys. Existing unresolved
+   requests without these inputs, or requests older than 23 hours, require support
+   reconciliation; do not clear their state or create another customer/session
+   until the original Stripe operation has been located and resolved.
 6. Configure the server-only settings from `.dev.vars.example`:
    `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `WORKOS_BILLING_CLIENT_ID`, `WORKOS_COOKIE_PASSWORD`,
    `WORKOS_REDIRECT_URI`, `STRIPE_SECRET_KEY`, `STRIPE_PRICE_MONTHLY` and/or
@@ -86,6 +98,8 @@ same environment. Use separate databases, keys and Prices for test and live mode
    distinct `WORKOS_BILLING_CLIENT_ID` before enabling new purchases with
    `PHOTODEPOT_STRIPE_ENABLED=true`, after the test-mode setup is ready. Existing
    billing management and cancellation remain available during this setup.
+   Retired Prices and invalid purchase-only settings disable new purchases without
+   preventing existing customers from viewing billing or canceling.
 
 Never commit keys, encrypted session credentials, refresh tokens or cookie secrets.
 `WORKOS_COOKIE_PASSWORD` seals the server-owned tokens with purpose/client/user/org

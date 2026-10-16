@@ -245,6 +245,11 @@ GET/HEAD downloads, byte ranges, unavailable storage and invalid requests;
 D1 waitlist persistence and duplicates; license administration and verification;
 and static asset leakage prevention.
 
+GitHub Actions runs type checks, lint, server regressions, both production builds,
+and the billing, dashboard, sign-in and logout browser suites for pull requests.
+The workflow uses Node 24 LTS, isolated local storage and mocked providers; it
+does not require production credentials or perform deployments.
+
 The dashboard and customer account browser tests run against the built site and
 isolated mock APIs. They cover subscription pricing and interval choices,
 Checkout and Portal redirects, discounts, cancellation, access confirmation,
@@ -403,7 +408,7 @@ that deadline is not a billing renewal date. Failed provider checks cannot exten
 it. Historical manual grants never authorize access. Subscription discounts do
 not bypass WorkOS entitlement checks.
 
-Apply migration 0016 with the earlier migrations before running this backend.
+Apply migration 0017 with the earlier migrations before running this backend.
 The old Stripe ledger tables remain historical only; no runtime authorization
 reads them and no custom Stripe subscription webhook is required. The add-on must
 be connected to a standard Stripe account, using test mode for development;

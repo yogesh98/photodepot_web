@@ -683,6 +683,38 @@ test("checkout returns confirm paid access automatically before claiming activat
   await expect(upgrade("Monthly")).toHaveCount(0)
 })
 
+test("delayed activation stops claiming progress and offers a retry that can restore access", async () => {
+  await page.clock.install()
+  setSubscription({}, false)
+  await page.goto(`${origin}/account?billing=success`)
+  await expect(subscription()).toContainText("Activating your subscription…")
+  const retry = page.getByRole("button", { name: "Try again", exact: true })
+  for (let attempt = 0; attempt < 15 && !(await retry.count()); attempt++) {
+    const reads = state.reads
+    await page.clock.fastForward(5000)
+    await expect.poll(() => state.reads).toBeGreaterThan(reads)
+    await expect(subscription().locator("[aria-busy]")).toHaveAttribute(
+      "aria-busy",
+      "false"
+    )
+  }
+  await expect(subscription()).not.toContainText(
+    "Activating your subscription…"
+  )
+  await expect(subscription()).toContainText(
+    "Subscription access is taking longer than expected."
+  )
+  await expect(cancel("Monthly")).toBeEnabled()
+  await expect(retry).toBeEnabled()
+  setSubscription()
+  await retry.click()
+  await expect(subscription()).toContainText("Your subscription is active.")
+  await expect(subscription()).not.toContainText("taking longer than expected")
+  await expect(retry).toHaveCount(0)
+  assert.equal(state.readQueries.at(-1).refresh, "true")
+  assert.deepEqual(state.posts, [])
+})
+
 test("unavailable access checks leave cancellation available and retry can confirm access", async () => {
   setSubscription({}, false)
   state.accessUnavailable = true

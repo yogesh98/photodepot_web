@@ -42,7 +42,8 @@ STRIPE_PRICE_MONTHLY=""
 STRIPE_PRICE_ANNUAL=""
 # Restrict this portal configuration to Photodepot's supported product and prices.
 STRIPE_PORTAL_CONFIGURATION_ID=""
-# Optional card-on-file trial; unset means no new Stripe trial.
+# Optional cardless trial; cancels at trial end if no payment method is added.
+# Unset means no new Stripe trial.
 PHOTODEPOT_STRIPE_TRIAL_DAYS=""
 # Configure head office, product tax code and registrations before enabling billing.
 # Only set false after explicitly deciding not to calculate tax through Stripe Tax.

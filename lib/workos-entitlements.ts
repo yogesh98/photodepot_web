@@ -456,19 +456,31 @@ export async function getWorkOSEntitlement(
         refreshToken: refreshed.refreshToken,
       }
       // Rotation has already happened at WorkOS. Preserve the new credential
-      // even if JWKS retrieval or snapshot persistence subsequently fails.
+      // even if JWKS retrieval or snapshot persistence subsequently fails, and
+      // retire the old proof in the same transaction. Otherwise the next read
+      // could authorize from the old positive cache after the new token withdrew
+      // access but verification or proof persistence was interrupted.
       const rotated = await sealData(tokens, {
         password: config.password,
         ttl: 0,
       })
       const rotatedAt = clock()
-      const saved = await env.DB.prepare(
-        `UPDATE workos_billing_sessions SET encrypted_tokens = ?, updated_at = ?
-        WHERE user_id = ? AND operation_token = ? AND reauth_needed = 0 AND lease_until > ?`
-      )
-        .bind(rotated, rotatedAt, userId, token, rotatedAt)
-        .run()
-      if (saved.meta.changes !== 1)
+      // The operation token fences out a replacement worker. If our lease only
+      // elapsed while this request was delayed, salvage its rotated credential;
+      // the later proof commit still requires a live lease to authorize access.
+      const saved = await env.DB.batch([
+        env.DB.prepare(
+          `UPDATE workos_billing_sessions SET encrypted_tokens = ?, updated_at = ?
+        WHERE user_id = ? AND operation_token = ? AND reauth_needed = 0`
+        ).bind(rotated, rotatedAt, userId, token),
+        env.DB.prepare(
+          `UPDATE workos_entitlements SET expires_at = ?, revision = revision + 1
+        WHERE user_id = ? AND expires_at > ? AND EXISTS
+          (SELECT 1 FROM workos_billing_sessions WHERE user_id = ? AND operation_token = ?
+            AND reauth_needed = 0)`
+        ).bind(rotatedAt, userId, rotatedAt, userId, token),
+      ])
+      if (saved[0].meta.changes !== 1)
         throw new WorkOSEntitlementUnavailableError(
           "Billing access lease expired."
         )

@@ -303,11 +303,13 @@ beforeEach(async () => {
           active: true,
           livemode: false,
           type: "recurring",
+          billing_scheme: "per_unit",
           unit_amount: 2000,
           currency: "usd",
           recurring: {
             interval: id === "price_monthly" ? "month" : "year",
             interval_count: 1,
+            usage_type: "licensed",
           },
           tax_behavior: "exclusive",
           product: {
@@ -975,7 +977,7 @@ test("force refresh observes revocation of a feature before the previous JWT exp
   tokenResponse = authentication(jwt({ entitlements: [] }))
   const denied = await getWorkOSEntitlement(env, userId, { forceRefresh: true })
   assert.equal(denied.enabled, false)
-  assert.equal(denied.revision, 2)
+  assert.equal(denied.revision, 3)
 })
 
 test("invalid_grant invalidates cached entitlement and requires a new dedicated authorization", async () => {
@@ -1190,6 +1192,7 @@ test("a per-account lease serializes force refreshes", async () => {
 test("successful token rotation survives a later proof persistence failure without issuing new access", async () => {
   await store()
   const before = sqlite.prepare("SELECT * FROM workos_entitlements").get()
+  tokenResponse = authentication(jwt({ entitlements: [] }))
   sqlite.exec(
     "CREATE TRIGGER fail_proof BEFORE INSERT ON workos_entitlements BEGIN SELECT RAISE(ABORT,'proof storage unavailable'); END"
   )
@@ -1198,15 +1201,45 @@ test("successful token rotation survives a later proof persistence failure witho
     /proof storage unavailable/
   )
   assert.equal((await storedTokens()).refreshToken, "refresh_backend_rotated")
-  assert.deepEqual(
-    sqlite.prepare("SELECT * FROM workos_entitlements").get(),
-    before
+  const retired = sqlite.prepare("SELECT * FROM workos_entitlements").get()
+  assert.ok(retired.expires_at <= Date.now())
+  assert.equal(retired.revision, before.revision + 1)
+  // An ordinary read must not bypass the interrupted write with the previous
+  // positive cache, including while the storage failure is still present.
+  await assert.rejects(
+    getAccountEntitlement(env, userId),
+    /proof storage unavailable/
   )
   assert.equal(
     sqlite.prepare("SELECT lease_until FROM workos_billing_sessions").get()
       .lease_until,
     0
   )
+  sqlite.exec("DROP TRIGGER fail_proof")
+  const recovered = await getAccountEntitlement(env, userId)
+  assert.equal(recovered.access.canHost, false)
+  assert.equal(recovered.managed.enabled, false)
+  assert.equal(authenticationCalls.length, 1)
+})
+
+test("a JWKS outage after token rotation cannot revive the previous positive snapshot", async () => {
+  await store()
+  tokenResponse = authentication(jwt({ entitlements: [] }))
+  await assert.rejects(
+    getWorkOSEntitlement(env, userId, {
+      forceRefresh: true,
+      async verifyAccessToken() {
+        throw new Error("JWKS temporarily unavailable")
+      },
+    }),
+    /JWKS temporarily unavailable/
+  )
+  assert.equal((await storedTokens()).refreshToken, "refresh_backend_rotated")
+  assert.equal(await hasWorkOSBillingSession(env.DB, userId), true)
+  const recovered = await getAccountEntitlement(env, userId)
+  assert.equal(recovered.access.canHost, false)
+  assert.equal(recovered.managed.enabled, false)
+  assert.equal(authenticationCalls.length, 1)
 })
 
 test("cached snapshots cannot authorize without their dedicated active session", async () => {
@@ -1245,9 +1278,14 @@ test("rotating the cookie encryption secret requests reconnection instead of tra
             active: true,
             livemode: false,
             type: "recurring",
+            billing_scheme: "per_unit",
             unit_amount: 2000,
             currency: "usd",
-            recurring: { interval: "month", interval_count: 1 },
+            recurring: {
+              interval: "month",
+              interval_count: 1,
+              usage_type: "licensed",
+            },
             tax_behavior: "exclusive",
             product: {
               id: "prod_fixture",
@@ -1395,6 +1433,79 @@ test("a lost refresh lease cannot invalidate a replacement session", async () =>
     sqlite.prepare("SELECT operation_token FROM workos_billing_sessions").get()
       .operation_token,
     "replacement_lease"
+  )
+})
+
+test("an elapsed lease preserves a rotated token without issuing access or requiring reconnection", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: epoch })
+  await store()
+  await assert.rejects(
+    getWorkOSEntitlement(env, userId, {
+      forceRefresh: true,
+      workos: {
+        userManagement: {
+          async authenticateWithRefreshToken() {
+            t.mock.timers.tick(30_001)
+            return {
+              accessToken: jwt({ entitlements: [] }),
+              refreshToken: "refresh_completed_after_lease",
+              user: { id: userId, emailVerified: true },
+            }
+          },
+        },
+      },
+    }),
+    /lease expired/
+  )
+  assert.equal(
+    (await storedTokens()).refreshToken,
+    "refresh_completed_after_lease"
+  )
+  assert.equal(await hasWorkOSBillingSession(env.DB, userId), true)
+  assert.ok(
+    sqlite.prepare("SELECT expires_at FROM workos_entitlements").get()
+      .expires_at <= Date.now()
+  )
+  const recovered = await getAccountEntitlement(env, userId)
+  assert.equal(recovered.access.canHost, false)
+  assert.equal(recovered.managed.enabled, false)
+  assert.equal(authenticationCalls.length, 0)
+})
+
+test("a completed refresh cannot overwrite credentials after another worker takes its lease", async () => {
+  await store()
+  const before = sqlite.prepare("SELECT * FROM workos_entitlements").get()
+  await assert.rejects(
+    getWorkOSEntitlement(env, userId, {
+      forceRefresh: true,
+      workos: {
+        userManagement: {
+          async authenticateWithRefreshToken() {
+            sqlite
+              .prepare(
+                "UPDATE workos_billing_sessions SET operation_token='replacement_worker',lease_until=?"
+              )
+              .run(Date.now() + 30_000)
+            return {
+              accessToken: jwt({ entitlements: [] }),
+              refreshToken: "refresh_stale_worker",
+              user: { id: userId, emailVerified: true },
+            }
+          },
+        },
+      },
+    }),
+    /lease expired/
+  )
+  assert.equal((await storedTokens()).refreshToken, "refresh_backend_initial")
+  assert.deepEqual(
+    sqlite.prepare("SELECT * FROM workos_entitlements").get(),
+    before
+  )
+  assert.equal(
+    sqlite.prepare("SELECT operation_token FROM workos_billing_sessions").get()
+      .operation_token,
+    "replacement_worker"
   )
 })
 

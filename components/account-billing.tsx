@@ -184,6 +184,7 @@ export function AccountBilling({
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState("")
   const [sessionExpired, setSessionExpired] = useState(false)
+  const [confirmationDelayed, setConfirmationDelayed] = useState(false)
   const [checkoutReturn, setCheckoutReturn] = useState<string | null>(null)
   const mounted = useRef(false)
   const request = useRef<AbortController | null>(null)
@@ -265,6 +266,7 @@ export function AccountBilling({
     }
   }, [load])
   useEffect(() => {
+    queueMicrotask(() => setConfirmationDelayed(false))
     if (!confirming || sessionExpired) return
     let attempts = 0
     const timer = window.setInterval(() => {
@@ -274,7 +276,10 @@ export function AccountBilling({
         document.visibilityState !== "visible"
       )
         return
-      if (++attempts >= 12) window.clearInterval(timer)
+      if (++attempts >= 12) {
+        window.clearInterval(timer)
+        setConfirmationDelayed(true)
+      }
       void load(true)
     }, 5_000)
     return () => window.clearInterval(timer)
@@ -434,7 +439,9 @@ export function AccountBilling({
                 {current && !free && renewal()}
                 {current && confirming && (
                   <p role="status" className={styles.note}>
-                    Activating your subscription…
+                    {confirmationDelayed
+                      ? "Subscription access is taking longer than expected. Try again in a moment."
+                      : "Activating your subscription…"}
                   </p>
                 )}
               </div>
@@ -544,7 +551,7 @@ export function AccountBilling({
           )}
         </div>
       )}
-      {(error || accessUnavailable) && (
+      {(error || accessUnavailable || (confirming && confirmationDelayed)) && (
         <Button
           className={styles.button}
           variant="outline"

@@ -10,11 +10,13 @@ export interface BillingCustomer {
   trial_used: number
   customer_create_token: string
   customer_create_started_at: number | null
+  customer_create_email: string | null
   checkout_session_id: string | null
   checkout_expires_at: number | null
   checkout_price_id: string | null
   checkout_started_at: number | null
   checkout_trial_days: number | null
+  checkout_request_json: string | null
   checkout_generation: number
   operation_token: string | null
   operation_lease_until: number
@@ -85,11 +87,13 @@ export async function updateBillingCustomer(
     "workos_organization_id",
     "trial_used",
     "customer_create_started_at",
+    "customer_create_email",
     "checkout_session_id",
     "checkout_expires_at",
     "checkout_price_id",
     "checkout_started_at",
     "checkout_trial_days",
+    "checkout_request_json",
     "checkout_generation",
   ] as const
   const keys = allowed.filter((key) => changes[key] !== undefined)
