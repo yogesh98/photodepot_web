@@ -21,3 +21,21 @@ RESEND_API_KEY=""
 PHOTODEPOT_EMAIL_FROM="Photodepot <hello@photodepot.app>"
 # Same random secret (32+ characters) in Pages and the scheduled reminder Worker.
 PHOTODEPOT_REMINDER_TOKEN=""
+
+# Stripe Billing + Tax. Leave disabled until sandbox setup and webhook checks pass.
+# These are Pages Functions secrets/settings, never NEXT_PUBLIC_ variables.
+PHOTODEPOT_STRIPE_ENABLED="false"
+PHOTODEPOT_STRIPE_MODE="test"
+PHOTODEPOT_STRIPE_ORIGIN="http://localhost:8788"
+STRIPE_SECRET_KEY=""
+STRIPE_WEBHOOK_SECRET=""
+# Recurring Stripe Prices; choose the amounts, currency and tax behavior in Stripe.
+STRIPE_PRICE_MONTHLY=""
+STRIPE_PRICE_ANNUAL=""
+# Restrict this portal configuration to Photodepot's supported product and prices.
+STRIPE_PORTAL_CONFIGURATION_ID=""
+# Optional card-on-file trial; unset means no new Stripe trial.
+PHOTODEPOT_STRIPE_TRIAL_DAYS=""
+# Configure head office, product tax code and registrations before enabling billing.
+# Only set false after explicitly deciding not to calculate tax through Stripe Tax.
+PHOTODEPOT_STRIPE_AUTOMATIC_TAX="true"

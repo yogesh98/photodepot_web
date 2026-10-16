@@ -12,10 +12,9 @@ import {
 } from "../../../lib/cloudflare.ts"
 import {
   changeSubscriptionReminders,
-  getSubscription,
   SubscriptionConflictError,
 } from "../../../lib/subscription-store.ts"
-import { resolveAccountAccess } from "../../../lib/account-access.ts"
+import { getAccountEntitlement } from "../../../lib/account-entitlement.ts"
 import {
   AccountDeviceConflictError,
   listAccountDevices,
@@ -77,7 +76,7 @@ export async function handleAccountSubscription(request: Request, env: Env) {
         )
         return respond(
           json({
-            access: resolveAccountAccess(grant),
+            access: (await getAccountEntitlement(env.DB, auth.userId)).access,
             reminders: {
               enabled: grant.remindersEnabled,
               revision: grant.revision,
@@ -111,11 +110,12 @@ export async function handleAccountSubscription(request: Request, env: Env) {
       })
       return respond(json(result, result.created ? 201 : 200))
     }
-    const grant = await getSubscription(env.DB, auth.userId)
+    const entitlement = await getAccountEntitlement(env.DB, auth.userId)
+    const grant = entitlement.manual
     return respond(
       json({
         user: { email: auth.email },
-        access: resolveAccountAccess(grant),
+        access: entitlement.access,
         reminders: {
           enabled: grant?.remindersEnabled ?? true,
           revision: grant?.revision ?? 0,

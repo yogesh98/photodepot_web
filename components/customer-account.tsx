@@ -1,6 +1,7 @@
 "use client"
 
 import { DashboardFrame } from "@/components/dashboard-frame"
+import { AccountBilling } from "@/components/account-billing"
 import { SidebarTrigger } from "@/components/ui/sidebar"
 import { Separator } from "@/components/ui/separator"
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
@@ -221,6 +222,10 @@ export function CustomerAccountPage() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
   const [sessionExpired, setSessionExpired] = useState(false)
+  const [billingSubscribed, setBillingSubscribed] = useState<boolean | null>(
+    null
+  )
+  const [billingRefreshVersion, setBillingRefreshVersion] = useState(0)
   const [notice, setNotice] = useState("")
   const [form, setForm] = useState<RequestForm | null>(null)
   const [selectedMac, setSelectedMac] = useState<SelectedMac | null>(null)
@@ -420,6 +425,7 @@ export function CustomerAccountPage() {
     (request) => request.action === "renewal"
   )
   const active = access?.status === "active"
+  const paidSubscription = access?.source === "stripe" || billingSubscribed
   const status = active
     ? "Active"
     : access?.status === "revoked"
@@ -475,6 +481,7 @@ export function CustomerAccountPage() {
             disabled={loading || busy}
             onClick={() => {
               setLoading(true)
+              setBillingRefreshVersion((version) => version + 1)
               void load()
             }}
           >
@@ -569,11 +576,15 @@ export function CustomerAccountPage() {
                     </span>
                     <div>
                       <p className={styles.plan}>
-                        {access?.tier === "trial"
-                          ? "Trial access"
-                          : access?.tier === "standard"
-                            ? "Standard access"
-                            : "Free account"}
+                        {access?.source === "stripe"
+                          ? access.tier === "trial"
+                            ? "Subscription trial"
+                            : "Subscription access"
+                          : access?.tier === "trial"
+                            ? "Trial access"
+                            : access?.tier === "standard"
+                              ? "Standard access"
+                              : "Free account"}
                       </p>
                     </div>
                   </div>
@@ -599,22 +610,29 @@ export function CustomerAccountPage() {
                   ) : (
                     <p className={styles.planHint}>
                       You can log in to the Mac app and join collaboration. An
-                      administrator must grant access to open local projects or
+                      active access period is required to open local projects or
                       host collaboration.
                     </p>
                   )}
-                  <div className={styles.planActions}>
-                    <Button
-                      className={styles.button}
-                      onClick={() => open({ action: "request-renewal" })}
-                      disabled={busy || sessionExpired || renewalPending}
-                    >
-                      {renewalPending ? <Check /> : <ArrowRight />}
-                      {renewalPending
-                        ? "Request awaiting review"
-                        : requestLabel}
-                    </Button>
-                  </div>
+                  {!paidSubscription && (
+                    <div className={styles.planActions}>
+                      <Button
+                        className={styles.button}
+                        onClick={() => open({ action: "request-renewal" })}
+                        disabled={
+                          busy ||
+                          sessionExpired ||
+                          renewalPending ||
+                          billingSubscribed === null
+                        }
+                      >
+                        {renewalPending ? <Check /> : <ArrowRight />}
+                        {renewalPending
+                          ? "Request awaiting review"
+                          : requestLabel}
+                      </Button>
+                    </div>
+                  )}
                   {account.reminders.revision > 0 && (
                     <div className={styles.renewalInfo}>
                       <CalendarDays size={17} />
@@ -638,10 +656,17 @@ export function CustomerAccountPage() {
                       </div>
                     </div>
                   )}
-                  <p className={styles.billingNote}>
-                    <ShieldCheck size={13} />
-                    No automatic billing or payments here.
-                  </p>
+                  {!paidSubscription && (
+                    <p className={styles.billingNote}>
+                      <ShieldCheck size={13} />
+                      Access requests require administrator approval.
+                    </p>
+                  )}
+                  <AccountBilling
+                    refreshVersion={billingRefreshVersion}
+                    disabled={busy || sessionExpired}
+                    onSubscriptionChange={setBillingSubscribed}
+                  />
                 </CardContent>
               </Card>
               <Card

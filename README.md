@@ -308,7 +308,9 @@ unchanged. Declining records the review without changing access. Existing reques
 and audit history remains available. Visible directory pages refresh
 every 30 seconds while no profile, dialog, or mutation is open. Revision checks
 reject stale writes. Expired sessions show a sign-in link and refresh recovery.
-No payment provider or charging flow is connected.
+These manual grants do not collect payment. Optional Stripe Billing and Tax
+flows are disabled until their server configuration is supplied; see
+[Stripe setup and verification](deploy/STRIPE.md).
 
 The UI reuses the desktop app's shadcn Base Mira / stone configuration and
 component source, including the `sidebar-07` block on both dashboards. Owners
@@ -378,21 +380,25 @@ does not revoke or extend access, reset Macs, or create/cancel a paid subscripti
 It does not prevent requesting an extension. Existing canceled manual terms are
 migrated to reminders disabled, preserving their original audit history.
 
-### Future billing boundary
+### Stripe billing boundary
 
 WorkOS owns identity, desktop sessions own device approval, and one server access
 resolver owns local-project/hosting entitlement. The existing `subscriptions` table
 stores manual grants rather than invoices or paid subscription state. The desktop
 receives the effective signed permission and deadline, without billing-provider data.
 
-Stripe checkout, billing management, invoices, paid cancellation, coupons, and
-promotion codes belong to the later billing integration. Use Stripe's hosted flows
-and native discounts rather than a second coupon engine. WorkOS's Stripe add-on
-requires a private personal organization for each paying customer's Stripe customer;
-keep those organizations separate from the administration organization, without
-team UI or seat sync. Existing manual accounts must explicitly opt into paid checkout.
-For a paying customer, **Extend** must postpone the next charge through Stripe and
-derive access from its confirmed result. A local expiry edit is never a billing extension.
+Optional Stripe Billing uses hosted subscription Checkout, Customer Portal,
+native promotion codes, and automatic Tax calculation. A private personal WorkOS
+organization links each Stripe customer separately from the administration
+organization, without team UI or seat sync. Existing manual accounts explicitly
+opt into Checkout. Separate billing records and a stable account entitlement
+projection preserve manual history and desktop receipt compatibility.
+
+Paid changes are confirmed through signed Stripe webhooks. Unpaid renewal terms
+do not extend access. A local expiry edit is never a billing extension; manual
+access-changing operations reject ongoing paid subscriptions. Manage paid terms
+through Stripe and use its confirmed result for access. See
+[the integration plan, configuration, and launch checks](deploy/STRIPE.md).
 
 ### Daily renewal queue and trial reminders
 

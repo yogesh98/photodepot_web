@@ -704,6 +704,14 @@ before(async () => {
         return waitlistApi(response, url)
       if (url.pathname === "/api/account/subscription")
         return await customerApi(request, response)
+      if (url.pathname === "/api/account/billing")
+        return respond(response, 200, {
+          enabled: false,
+          intervals: [],
+          subscription: null,
+          hasCustomer: false,
+          trialDays: null,
+        })
       if (url.pathname === "/api/account/dashboard-access") {
         state.dashboardAccessQueries.push(Object.fromEntries(url.searchParams))
         if (state.dashboardAccessDelay)

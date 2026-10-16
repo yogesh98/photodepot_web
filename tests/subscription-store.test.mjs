@@ -118,6 +118,8 @@ before(async () => {
   await migrate("0011_desktop_account_sessions.sql")
   await migrate("0012_desktop_device_metadata.sql")
   await migrate("0013_manual_access_cleanup.sql")
+  await migrate("0014_stripe_billing.sql")
+  await migrate("0015_account_entitlements.sql")
 })
 
 after(async () => {

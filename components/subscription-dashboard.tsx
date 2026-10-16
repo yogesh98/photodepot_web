@@ -129,6 +129,18 @@ async function api<T>(
 function userName(user: WorkOSUserSummary) {
   return [user.firstName, user.lastName].filter(Boolean).join(" ") || user.email
 }
+function billingManaged(user: WorkOSUserSummary) {
+  return user.billing
+    ? !["canceled", "incomplete_expired"].includes(user.billing.status)
+    : user.access.source === "stripe"
+}
+const manualAccessActions = new Set<DialogAction>([
+  "set",
+  "extend",
+  "revoke",
+  "restore",
+  "approve",
+])
 function status(user: WorkOSUserSummary): Status {
   return user.access.status === "active"
     ? "Active"
@@ -477,6 +489,12 @@ export function SubscriptionDashboard({
   }, [])
   const openDialog = useCallback(
     (user: WorkOSUserSummary, action: DialogAction, device?: AccountDevice) => {
+      if (billingManaged(user) && manualAccessActions.has(action)) {
+        setError(
+          "This subscription is managed in Stripe. Manual access changes are unavailable while it is current."
+        )
+        return
+      }
       if (action === "details") {
         showProfile(user)
         return
@@ -604,6 +622,7 @@ export function SubscriptionDashboard({
     const disabled =
       actionsDisabled ||
       (inDetails && (detailsLoading || !!dialogError || !details))
+    const managed = billingManaged(user)
     return (
       <div className={styles.rowActions}>
         {!inDetails && (
@@ -620,7 +639,7 @@ export function SubscriptionDashboard({
         <Button
           variant="outline"
           type="button"
-          disabled={disabled}
+          disabled={disabled || managed}
           onClick={() => openDialog(user, "set")}
           aria-label={`Grant access for ${user.email}`}
         >
@@ -631,7 +650,7 @@ export function SubscriptionDashboard({
             <Button
               variant="outline"
               type="button"
-              disabled={disabled}
+              disabled={disabled || managed}
               onClick={() => openDialog(user, "extend")}
               aria-label={`Extend access for ${user.email}`}
             >
@@ -640,7 +659,7 @@ export function SubscriptionDashboard({
             <Button
               variant="outline"
               type="button"
-              disabled={disabled}
+              disabled={disabled || managed}
               onClick={() =>
                 openDialog(
                   user,
@@ -676,6 +695,7 @@ export function SubscriptionDashboard({
             )}
           </>
         )}
+        {managed && <span>Subscription managed in Stripe</span>}
       </div>
     )
   }
@@ -823,6 +843,10 @@ export function SubscriptionDashboard({
                         const result = await api<AccountDetails>(
                           `?userId=${encodeURIComponent(request.userId)}&history=1`
                         )
+                        if (billingManaged(result.user))
+                          throw new Error(
+                            "This subscription is managed in Stripe. Review billing before approving a manual access extension."
+                          )
                         openDialog(result.user, "approve")
                         setDialog({
                           user: result.user,

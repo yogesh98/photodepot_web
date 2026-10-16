@@ -10,8 +10,8 @@ import {
   validDeviceProof,
 } from "./license-crypto.ts"
 import { allowLicenseAttempt } from "./license-rate-limit.ts"
-import { getSubscription, subscriptionReason } from "./subscription-store.ts"
-import { resolveAccountAccess } from "./account-access.ts"
+import { subscriptionReason } from "./subscription-store.ts"
+import { getAccountEntitlement } from "./account-entitlement.ts"
 import type {
   AccountDevice,
   AccountDeviceHistory,
@@ -314,8 +314,11 @@ export async function desktopSessionResponse(
   challenge: string,
   now = Date.now()
 ) {
-  const subscription =
-    row.active === 1 ? await getSubscription(env.DB, row.user_id, now) : null
+  const entitlement =
+    row.active === 1
+      ? await getAccountEntitlement(env.DB, row.user_id, now)
+      : null
+  const subscription = entitlement?.grant ?? null
   // A removal can race the subscription read; sign only the latest session.
   row = (await getDesktopSession(env.DB, row.id))!
   const signer = signingKey(env.PHOTODEPOT_LICENSE_SIGNING_PRIVATE_KEY)
@@ -340,9 +343,7 @@ export async function desktopSessionResponse(
     ),
   }
   const receipt =
-    row.active === 1 &&
-    subscription !== null &&
-    resolveAccountAccess(subscription, now).canHost
+    row.active === 1 && subscription !== null && entitlement?.access.canHost
       ? signedReceipt(
           signer,
           {

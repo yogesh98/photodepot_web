@@ -126,13 +126,16 @@ HMAC-keyed rate limits without storing raw IPs or request bodies. Protect D1 and
 device-key backups. Keep the signing key stable: rotation requires distributing a
 desktop trusting the replacement public key first.
 
-## Billing later
+## Stripe billing
 
-The access resolver is the integration boundary. Stripe will own paid terms,
+The access resolver is the integration boundary. Stripe owns paid terms,
 invoices, cancellation, coupons, promotion codes, and charge dates through hosted
 Checkout and billing management. WorkOS's Stripe add-on associates the customer
 with a private personal organization, separate from the administration organization.
 No team UI or seat sync is needed. Manual users enter billing only through explicit
 checkout. Extending paid time must postpone the next charge in Stripe and use its
 confirmed result for access; a local grant edit is not a billing extension. This
-foundation adds no provider tables, checkout endpoints, or coupon engine.
+integration keeps billing records separate from manual grants and uses native
+Stripe discounts. Billing is disabled by default. See
+[Stripe setup and verification](STRIPE.md) for configuration, Tax decisions,
+webhook setup and deferred sandbox checks.

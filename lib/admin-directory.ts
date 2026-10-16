@@ -1,7 +1,6 @@
 import type { Env } from "./cloudflare.ts"
-import { resolveAccountAccess } from "./account-access.ts"
 import { listAccountDevicesForUsers } from "./account-sessions.ts"
-import { listSubscriptions } from "./subscription-store.ts"
+import { listAccountEntitlements } from "./account-entitlement.ts"
 import type { WorkOSUserSummary } from "./subscription-types.ts"
 import { listWorkOSUsers, WORKOS_USER_ID } from "./workos-users.ts"
 
@@ -24,18 +23,19 @@ function matches(
   now: number
 ) {
   const subscription = user.subscription
-  const active = subscription?.status === "active"
+  const active = user.access.canUseLocal
   const filtered =
     filter === "all" ||
     (filter === "active" && active) ||
-    (filter === "trial" && active && subscription.type === "trial") ||
-    (filter === "standard" && active && subscription.type === "regular") ||
+    (filter === "trial" && active && user.access.tier === "trial") ||
+    (filter === "standard" && active && user.access.tier === "standard") ||
     (filter === "expiring" &&
       active &&
-      subscription.endsAt <= now + 7 * 86_400_000) ||
-    (filter === "expired" && subscription?.status === "expired") ||
-    (filter === "revoked" && subscription?.status === "revoked") ||
-    (filter === "unassigned" && !subscription)
+      user.access.endsAt !== null &&
+      user.access.endsAt <= now + 7 * 86_400_000) ||
+    (filter === "expired" && user.access.status === "expired") ||
+    (filter === "revoked" && user.access.status === "revoked") ||
+    (filter === "unassigned" && user.access.source === null)
   return (
     filtered &&
     (!search ||
@@ -72,8 +72,8 @@ export async function listAdminUsers(
   for (let scannedPages = 0; scannedPages < 10; scannedPages++) {
     const page = await listWorkOSUsers(env, cursor)
     const userIds = page.users.map((user) => user.id)
-    const [subscriptions, deviceLists] = await Promise.all([
-      listSubscriptions(env.DB, userIds, now),
+    const [entitlements, deviceLists] = await Promise.all([
+      listAccountEntitlements(env.DB, userIds, now),
       listAccountDevicesForUsers(env.DB, userIds),
     ])
     for (let index = 0; index < page.users.length; index++) {
@@ -85,8 +85,9 @@ export async function listAdminUsers(
         lastName: user.lastName,
         emailVerified: user.emailVerified,
         createdAt: Date.parse(user.createdAt),
-        subscription: subscriptions.get(user.id) ?? null,
-        access: resolveAccountAccess(subscriptions.get(user.id) ?? null, now),
+        subscription: entitlements.get(user.id)!.manual,
+        billing: entitlements.get(user.id)!.billing,
+        access: entitlements.get(user.id)!.access,
         devices: deviceLists.get(user.id) ?? [],
       }
       if (matches(summary, filter, search, now)) users.push(summary)

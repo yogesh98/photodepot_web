@@ -15,7 +15,6 @@ import { getWorkOSUser, WORKOS_USER_ID } from "../../../lib/workos-users.ts"
 import {
   changeSubscription,
   changeSubscriptionReminders,
-  getSubscription,
   getSubscriptionOverview,
   listSubscriptionAudit,
   setSubscription,
@@ -27,7 +26,7 @@ import {
   listAccountDeviceHistory,
   removeAccountDevice,
 } from "../../../lib/account-sessions.ts"
-import { resolveAccountAccess } from "../../../lib/account-access.ts"
+import { getAccountEntitlement } from "../../../lib/account-entitlement.ts"
 import { listAdminUsers } from "../../../lib/admin-directory.ts"
 import { listUserAdminRequests } from "../../../lib/account-requests.ts"
 
@@ -46,10 +45,10 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
         const userId = query.get("userId") ?? ""
         if (!WORKOS_USER_ID.test(userId))
           return json({ error: "Invalid user." }, 400)
-        const [user, subscription, devices, audit, requests, deviceAudit] =
+        const [user, entitlement, devices, audit, requests, deviceAudit] =
           await Promise.all([
             getWorkOSUser(env, userId),
-            getSubscription(env.DB, userId, now),
+            getAccountEntitlement(env.DB, userId, now),
             listAccountDeviceHistory(env.DB, userId),
             listSubscriptionAudit(env.DB, userId),
             listUserAdminRequests(env.DB, userId),
@@ -61,7 +60,7 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
           ])
         if (!user)
           return json({ error: "This user no longer exists in WorkOS." }, 404)
-        const access = resolveAccountAccess(subscription, now)
+        const { manual: subscription, access, billing } = entitlement
         return json({
           user: {
             id: user.id,
@@ -71,6 +70,7 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
             emailVerified: user.emailVerified,
             createdAt: Date.parse(user.createdAt),
             subscription,
+            billing,
             access,
             devices: devices
               .filter((device) => device.current)
@@ -80,6 +80,7 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
               }),
           },
           subscription,
+          billing,
           access,
           devices,
           audit,
@@ -91,7 +92,7 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
         listAdminUsers(env, query, now),
         getSubscriptionOverview(env.DB, now),
       ])
-      return json({ ...page, overview, billingMode: "manual" })
+      return json({ ...page, overview, billingMode: "manual-and-stripe" })
     }
     if (request.method !== "POST") {
       const response = json({ error: "Method not allowed." }, 405)
@@ -241,8 +242,9 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
         { reason, endsAt: body.endsAt as number | undefined }
       )
     }
+    const effective = await getAccountEntitlement(env.DB, user.id, now)
     return json(
-      { subscription, access: resolveAccountAccess(subscription, now) },
+      { subscription, access: effective.access, billing: effective.billing },
       body.action === "set" && revision === 0 ? 201 : 200
     )
   } catch (error) {

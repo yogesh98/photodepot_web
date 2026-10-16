@@ -5,7 +5,7 @@ export type SubscriptionStatus = "active" | "expired" | "revoked"
 export interface AccountAccess {
   tier: "free" | "trial" | "standard"
   status: "none" | SubscriptionStatus
-  source: "manual" | null
+  source: "manual" | "stripe" | null
   startsAt: number | null
   endsAt: number | null
   canUseLocal: boolean
@@ -38,6 +38,19 @@ export interface SubscriptionSummary {
   remindersEnabled: boolean
 }
 
+/** Server-confirmed billing state; dates use milliseconds like manual grants. */
+export interface BillingSubscriptionSummary {
+  id: string
+  userId: string
+  status: string
+  startsAt: number
+  endsAt: number
+  priceId: string
+  cancelAtPeriodEnd: boolean
+  revision: number
+  updatedAt: number
+}
+
 export interface SubscriptionOverview {
   totalSubscriptions: number
   active: number
@@ -62,6 +75,7 @@ export interface WorkOSUserSummary {
   emailVerified: boolean
   createdAt: number
   subscription: SubscriptionSummary | null
+  billing?: BillingSubscriptionSummary | null
   access: AccountAccess
   devices: AccountDevice[]
 }

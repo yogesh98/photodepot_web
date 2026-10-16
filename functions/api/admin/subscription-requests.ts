@@ -10,7 +10,11 @@ import {
   sameOrigin,
   type Env,
 } from "../../../lib/cloudflare.ts"
-import { listSubscriptions } from "../../../lib/subscription-store.ts"
+import {
+  listSubscriptions,
+  SubscriptionConflictError,
+} from "../../../lib/subscription-store.ts"
+import { listAccountEntitlements } from "../../../lib/account-entitlement.ts"
 import { getWorkOSUser } from "../../../lib/workos-users.ts"
 import {
   AccountRequestConflictError,
@@ -48,6 +52,10 @@ export async function handleAdminSubscriptionRequests(
         env.DB,
         queue.requests.map((item) => item.userId)
       )
+      const entitlements = await listAccountEntitlements(
+        env.DB,
+        queue.requests.map((item) => item.userId)
+      )
       const users = new Map()
       const userIds = [...new Set(queue.requests.map((item) => item.userId))]
       // Bound concurrent WorkOS lookups and share one result for each account.
@@ -78,6 +86,8 @@ export async function handleAdminSubscriptionRequests(
           requests: queue.requests.map((item) => ({
             ...item,
             subscription: subscriptions.get(item.userId) ?? null,
+            billing: entitlements.get(item.userId)?.billing ?? null,
+            access: entitlements.get(item.userId)!.access,
             user: users.get(item.userId) ?? null,
           })),
         }),
@@ -148,7 +158,8 @@ export async function handleAdminSubscriptionRequests(
     const status =
       error instanceof BodyError
         ? error.status
-        : error instanceof AccountRequestConflictError
+        : error instanceof AccountRequestConflictError ||
+            error instanceof SubscriptionConflictError
           ? 409
           : error instanceof TypeError
             ? 400

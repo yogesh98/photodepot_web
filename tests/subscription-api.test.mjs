@@ -288,6 +288,7 @@ test("listing WorkOS users is read-only and does not itself trigger signup trial
     emailVerified: true,
     createdAt: Date.parse(workosUsers[0].created_at),
     subscription: null,
+    billing: null,
     access: {
       tier: "free",
       status: "none",
@@ -598,7 +599,7 @@ test("dashboard overview counts the whole subscription database rather than the 
     asOf: now,
     expiringWithinDays: 7,
   })
-  assert.equal(page.billingMode, "manual")
+  assert.equal(page.billingMode, "manual-and-stripe")
   assert.equal("trialDays" in page, false)
 })
 
