@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { generateKeyPairSync, sign } from "node:crypto"
+import { createHash, generateKeyPairSync, sign, verify } from "node:crypto"
 import { readFile, readdir } from "node:fs/promises"
 import { DatabaseSync } from "node:sqlite"
 import { afterEach, beforeEach, test } from "node:test"
@@ -23,6 +23,13 @@ import { handleAccountSubscription } from "../functions/api/account/subscription
 import { handleAccountBilling } from "../functions/api/account/billing.ts"
 import { getAccountEntitlement } from "../lib/account-entitlement.ts"
 import { getSubscriptionOverview } from "../lib/subscription-store.ts"
+import { handleAccountPairing } from "../lib/account-pairing.ts"
+import {
+  approveDesktopSession,
+  desktopSessionResponse,
+  getDesktopSession,
+  handleDesktopSession,
+} from "../lib/account-sessions.ts"
 
 const origin = "https://photodepot.app"
 const clientId = "client_workos_entitlements_tests"
@@ -152,6 +159,132 @@ async function storedTokens() {
     )
     .get(userId)
   return row ? unsealData(row.encrypted_tokens, { password, ttl: 0 }) : null
+}
+async function expireBillingProof() {
+  const tokens = await storedTokens()
+  const encrypted = await sealData(
+    {
+      ...tokens,
+      accessToken: jwt({
+        iat: Math.floor(epoch / 1000) - 600,
+        exp: Math.floor(epoch / 1000) - 300,
+      }),
+    },
+    { password, ttl: 0 }
+  )
+  sqlite
+    .prepare("UPDATE workos_billing_sessions SET encrypted_tokens = ?")
+    .run(encrypted)
+  sqlite
+    .prepare("UPDATE workos_entitlements SET issued_at = ?, expires_at = ?")
+    .run(epoch - 600_000, epoch - 300_000)
+}
+async function approvedDesktop() {
+  const vendor = generateKeyPairSync("ed25519")
+  const device = generateKeyPairSync("ed25519")
+  const publicKey = device.publicKey.export({ format: "der", type: "spki" })
+  const deviceId = createHash("sha256").update(publicKey).digest("hex")
+  const challenge = "A".repeat(43)
+  env.PHOTODEPOT_LICENSE_SIGNING_PRIVATE_KEY = vendor.privateKey
+    .export({ format: "der", type: "pkcs8" })
+    .toString("base64")
+  const identity = { state: "verified" }
+  const providerFetch = globalThis.fetch
+  globalThis.fetch = (input, init) => {
+    if (
+      String(input) === `https://api.workos.com/user_management/users/${userId}`
+    ) {
+      if (identity.state === "missing" || identity.state === "unavailable")
+        return Promise.resolve(
+          Response.json(
+            { message: "User unavailable" },
+            { status: identity.state === "missing" ? 404 : 503 }
+          )
+        )
+      return Promise.resolve(
+        Response.json({
+          ...authentication().user,
+          email_verified: identity.state === "verified",
+        })
+      )
+    }
+    return providerFetch(input, init)
+  }
+  const post = (path, body, parts) =>
+    new Request(`${origin}${path}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "Photodepot-Account-Version": "1",
+      },
+      body: JSON.stringify({
+        deviceId,
+        challenge,
+        ...body,
+        deviceSignature: sign(
+          null,
+          Buffer.from(JSON.stringify(parts)),
+          device.privateKey
+        ).toString("base64url"),
+      }),
+    })
+  const start = await handleAccountPairing(
+    post(
+      "/api/account/pairing/start",
+      { devicePublicKey: publicKey.toString("base64url") },
+      [
+        "photodepot-account-pairing-v1",
+        "start",
+        deviceId,
+        publicKey.toString("base64url"),
+        challenge,
+      ]
+    ),
+    env,
+    "start"
+  )
+  assert.equal(start.status, 201)
+  const pairing = await start.json()
+  const code = new URL(pairing.approvalUrl).searchParams.get("code")
+  assert.equal(
+    await approveDesktopSession(
+      env.DB,
+      createHash("sha256").update(code).digest("hex"),
+      userId,
+      "billing@example.test"
+    ),
+    true
+  )
+  const sessionId = sqlite.prepare("SELECT id FROM desktop_sessions").get().id
+  return {
+    vendor,
+    identity,
+    sessionId,
+    poll: () =>
+      handleAccountPairing(
+        post("/api/account/pairing/poll", { pairingId: pairing.pairingId }, [
+          "photodepot-account-pairing-v1",
+          "poll",
+          pairing.pairingId,
+          deviceId,
+          challenge,
+        ]),
+        env,
+        "poll"
+      ),
+    verify: () =>
+      handleDesktopSession(
+        post("/api/account/session/verify", { sessionId }, [
+          "photodepot-account-session-v1",
+          "verify",
+          sessionId,
+          deviceId,
+          challenge,
+        ]),
+        env,
+        "verify"
+      ),
+  }
 }
 async function browserCookie() {
   return `__Host-photodepot-account=${await sealData(
@@ -1152,6 +1285,145 @@ test("a backend refresh outage preserves billing and device management without a
   const recoveredBody = await recovered.json()
   assert.equal(recoveredBody.accessUnavailable, false)
   assert.equal(recoveredBody.access.canUseLocal, true)
+})
+
+test("a billing refresh outage preserves approved desktop sign-in and signs unavailable access without extending paid proof", async () => {
+  await store()
+  const desktop = await approvedDesktop()
+  const healthy = await (await desktop.verify()).json()
+  assert.ok(healthy.receipt)
+  assert.equal(
+    JSON.parse(Buffer.from(healthy.session.payload, "base64url"))
+      .entitlementStatus,
+    undefined
+  )
+  await expireBillingProof()
+  const priorProof = sqlite.prepare("SELECT * FROM workos_entitlements").get()
+  authenticationFailure = new Error("billing refresh network unavailable")
+  for (const response of [await desktop.poll(), await desktop.verify()]) {
+    assert.equal(response.status, 200)
+    const body = await response.json()
+    assert.equal(body.receipt, undefined)
+    assert.equal(body.status ?? "approved", "approved")
+    const payload = JSON.parse(Buffer.from(body.session.payload, "base64url"))
+    assert.equal(payload.status, "active")
+    assert.equal(payload.entitlementStatus, "unavailable")
+    assert.equal(payload.sessionId, desktop.sessionId)
+    assert.equal(
+      verify(
+        null,
+        Buffer.from(body.session.payload, "base64url"),
+        desktop.vendor.publicKey,
+        Buffer.from(body.session.signature, "base64url")
+      ),
+      true
+    )
+    delete payload.entitlementStatus
+    assert.equal(
+      verify(
+        null,
+        Buffer.from(JSON.stringify(payload)),
+        desktop.vendor.publicKey,
+        Buffer.from(body.session.signature, "base64url")
+      ),
+      false
+    )
+  }
+  assert.deepEqual(
+    sqlite.prepare("SELECT * FROM workos_entitlements").get(),
+    priorProof
+  )
+  assert.equal((await storedTokens()).refreshToken, "refresh_backend_initial")
+})
+
+test("confirmed entitlement denial never carries the desktop outage marker or a paid receipt", async () => {
+  await store(jwt({ entitlements: [] }))
+  const desktop = await approvedDesktop()
+  for (const response of [await desktop.poll(), await desktop.verify()]) {
+    assert.equal(response.status, 200)
+    const body = await response.json()
+    const payload = JSON.parse(Buffer.from(body.session.payload, "base64url"))
+    assert.equal(payload.status, "active")
+    assert.equal(payload.entitlementStatus, undefined)
+    assert.equal(body.receipt, undefined)
+  }
+})
+
+test("desktop identity failures and revocation remain authoritative during billing outages", async () => {
+  await store()
+  await expireBillingProof()
+  authenticationFailure = new Error("billing refresh network unavailable")
+  const desktop = await approvedDesktop()
+  desktop.identity.state = "unavailable"
+  for (const response of [await desktop.poll(), await desktop.verify()]) {
+    assert.equal(response.status, 503)
+    assert.equal((await response.json()).session, undefined)
+  }
+  desktop.identity.state = "unverified"
+  assert.equal((await desktop.poll()).status, 403)
+  const revoked = await desktop.verify()
+  assert.equal(revoked.status, 200)
+  const body = await revoked.json()
+  const payload = JSON.parse(Buffer.from(body.session.payload, "base64url"))
+  assert.equal(payload.status, "revoked")
+  assert.equal(payload.entitlementStatus, undefined)
+  assert.equal(body.receipt, undefined)
+  assert.equal(authenticationCalls.length, 0)
+})
+
+test("device removal racing a failed billing refresh returns signed revocation without an outage marker", async () => {
+  await store()
+  await expireBillingProof()
+  const desktop = await approvedDesktop()
+  const providerFetch = globalThis.fetch
+  globalThis.fetch = (input, init) => {
+    if (
+      String(input) === "https://api.workos.com/user_management/authenticate"
+    ) {
+      sqlite
+        .prepare(
+          "UPDATE desktop_sessions SET active=0, revision=revision+1 WHERE id=?"
+        )
+        .run(desktop.sessionId)
+      throw new Error("billing refresh network unavailable")
+    }
+    return providerFetch(input, init)
+  }
+  const response = await desktop.verify()
+  assert.equal(response.status, 200)
+  const body = await response.json()
+  const payload = JSON.parse(Buffer.from(body.session.payload, "base64url"))
+  assert.equal(payload.status, "revoked")
+  assert.equal(payload.revision, 2)
+  assert.equal(payload.entitlementStatus, undefined)
+  assert.equal(body.receipt, undefined)
+})
+
+test("desktop entitlement fallback does not swallow session storage or signing failures", async () => {
+  await store()
+  await expireBillingProof()
+  authenticationFailure = new Error("billing refresh network unavailable")
+  const desktop = await approvedDesktop()
+  const row = await getDesktopSession(env.DB, desktop.sessionId)
+  const database = env.DB
+  env.DB = {
+    ...database,
+    prepare(query) {
+      if (query === "SELECT * FROM desktop_sessions WHERE id = ?")
+        throw new Error("session storage unavailable")
+      return database.prepare(query)
+    },
+  }
+  await assert.rejects(
+    desktopSessionResponse(env, row, "A".repeat(43)),
+    /session storage unavailable/
+  )
+  env.DB = database
+  delete env.PHOTODEPOT_LICENSE_SIGNING_PRIVATE_KEY
+  await assert.rejects(
+    desktopSessionResponse(env, row, "A".repeat(43)),
+    /License signing is not configured/
+  )
 })
 
 test("a per-account lease serializes force refreshes", async () => {

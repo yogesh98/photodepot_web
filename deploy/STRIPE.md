@@ -114,6 +114,33 @@ cannot serve as the new billing application's grant. Previously signed desktop
 receipts retain their original verification deadlines; reconnection requirements
 do not extend their offline allowance.
 
+### Desktop compatibility during entitlement outages
+
+Release the desktop update that understands the signed account-session field
+`entitlementStatus: "unavailable"` before deploying this backend change. The new
+desktop remains compatible with normal responses from the previous backend.
+During an entitlement lookup failure, the updated backend can still confirm the
+account and allow a newly signed-in Mac to join collaboration. It omits a new paid
+receipt and signs the unavailable marker inside the account proof.
+
+An updated Mac may retain only its previously saved paid receipt for the same
+account and device session, together with that receipt's original signed account
+proof. Account-only verification does not renew the paid receipt's deadline or
+reset its offline-start budget. A successful check that returns no receipt,
+logout, or device revocation still removes paid access.
+
+Older desktops reject the unfamiliar signed field and follow their existing
+verification-failure path: a previously signed-in Mac can use only its remaining
+offline allowance, and fresh sign-in cannot complete during the outage. Normal
+responses remain unchanged. Customers need the desktop update to receive the
+independent account-verification behavior; do not describe the backend deployment
+alone as fixing older clients.
+
+Before rolling a Mac back to an older desktop release, restore entitlement
+verification and let it save a normal response. Older clients cannot read the
+cached outage proof and its additional receipt-binding fields; a normal verified
+response removes that temporary state.
+
 ## Customer flow
 
 The Subscription section shows Free, Monthly, and Yearly. A free account selects

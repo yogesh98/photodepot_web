@@ -402,7 +402,14 @@ expired billing session can be reconnected from the account dashboard. Existing
 same-client billing sessions also require reconnection after this configuration
 change; previously signed desktop receipts retain their original bounded deadlines.
 
-The existing signed desktop protocol and stable receipt IDs remain compatible.
+Normal signed desktop responses and stable receipt IDs remain unchanged. During
+an entitlement lookup failure, a signed `entitlementStatus: "unavailable"` marker
+allows updated desktops to verify the account independently. Existing paid
+receipts keep their original signed session binding, deadline and offline-start
+budget; a new account receives no paid receipt. Release the compatible desktop
+before deploying this backend change. Older desktops reject the marker and retain
+only their existing offline allowance; see [rollout details](deploy/STRIPE.md#desktop-compatibility-during-entitlement-outages).
+
 A fresh WorkOS proof permits the existing 48-hour offline authorization allowance;
 that deadline is not a billing renewal date. Failed provider checks cannot extend
 it. Historical manual grants never authorize access. Subscription discounts do
