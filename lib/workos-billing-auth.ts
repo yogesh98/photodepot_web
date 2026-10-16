@@ -5,12 +5,14 @@ import { json, privateHeaders, type Env } from "./cloudflare.ts"
 import {
   accountConfigurationError,
   authenticateWorkOSAccount,
+  verifyWorkOSAccessToken,
   withAdminSession,
   type AdminAuth,
 } from "./license-admin-auth.ts"
 import {
   billingOrganization,
   storeWorkOSBillingSession,
+  WorkOSEntitlementUnavailableError,
 } from "./workos-entitlements.ts"
 
 const lifetime = 10 * 60
@@ -132,6 +134,8 @@ export async function handleWorkOSBillingAuthorize(request: Request, env: Env) {
         redirectUri: config.redirectUri,
         organizationId: organization.organizationId,
         screenHint: "sign-in",
+        // Silent AuthKit authorization can reuse the browser's token family.
+        maxAge: 0,
       })
     const state = `billing_${authorization.state}`
     const authorizationUrl = new URL(authorization.url)
@@ -225,7 +229,7 @@ export async function handleWorkOSBillingCallback(request: Request, env: Env) {
             },
             409
           )
-        const result =
+        let result =
           await config.workos.userManagement.authenticateWithCodeAndVerifier({
             code: query.get("code")!,
             codeVerifier: transaction.codeVerifier,
@@ -238,6 +242,39 @@ export async function handleWorkOSBillingCallback(request: Request, env: Env) {
             },
             401
           )
+        const initialClaims = await verifyWorkOSAccessToken(
+          result.accessToken,
+          config.clientId
+        )
+        if (initialClaims.sub !== auth.userId)
+          throw json(
+            {
+              error:
+                "Sign in with the same Photodepot account to connect billing.",
+            },
+            401
+          )
+        // A fresh login must own its token family before we rotate or scope it.
+        if (initialClaims.sid === auth.sessionId)
+          throw new WorkOSEntitlementUnavailableError(
+            "A separate billing sign-in is required."
+          )
+        // Social sign-in can return an unscoped session despite the org hint.
+        if (initialClaims.org_id !== transaction.organizationId) {
+          result =
+            await config.workos.userManagement.authenticateWithRefreshToken({
+              refreshToken: result.refreshToken,
+              organizationId: transaction.organizationId,
+            })
+          if (result.user.id !== auth.userId || !result.user.emailVerified)
+            throw json(
+              {
+                error:
+                  "Sign in with the same Photodepot account to connect billing.",
+              },
+              401
+            )
+        }
         await storeWorkOSBillingSession(env, {
           userId: auth.userId,
           organizationId: transaction.organizationId,

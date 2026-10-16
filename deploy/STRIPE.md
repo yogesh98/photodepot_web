@@ -82,6 +82,11 @@ and sends the signed-in customer through a separate WorkOS authorization. After
 returning to the account dashboard, they choose their subscription and continue to
 Stripe Checkout. The app refreshes WorkOS entitlements after Checkout/Portal return;
 regular polling uses the current short-lived proof until it needs refreshing.
+This separate authorization requires a fresh sign-in (`max_age=0`) so AuthKit
+does not reuse the browser's token family. If social sign-in returns an unscoped
+token, the callback explicitly selects the private billing organization using the
+new grant before saving it. The ordinary browser session is never rotated into
+the billing store.
 Stripe's own recovery and portal flows handle payment problems and cancellation.
 
 ## Verification before launch

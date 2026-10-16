@@ -170,6 +170,8 @@ async function authorize() {
   assert.equal(start.status, 303)
   const location = new URL(start.headers.get("location"))
   assert.equal(location.searchParams.get("organization_id"), organizationId)
+  // A silent AuthKit grant can reuse the browser SID and its rotating tokens.
+  assert.equal(location.searchParams.get("max_age"), "0")
   const transactionCookie = start.headers
     .getSetCookie()
     .find((value) => value.startsWith("__Host-photodepot-billing-auth="))
@@ -229,7 +231,11 @@ beforeEach(async () => {
     if (authenticationFailure instanceof Error) throw authenticationFailure
     if (authenticationFailure)
       return Response.json(authenticationFailure, { status: 400 })
-    return Response.json(tokenResponse)
+    return Response.json(
+      typeof tokenResponse === "function"
+        ? tokenResponse(authenticationCalls.at(-1))
+        : tokenResponse
+    )
   }
 })
 afterEach(() => {
@@ -729,4 +735,156 @@ test("empty cache context is never accepted as an authenticated production proof
     .run()
   assert.equal(await getWorkOSEntitlement(env, userId), null)
   assert.equal(await hasWorkOSBillingSession(env.DB, userId), false)
+})
+
+async function completeBillingAuthorization(pending) {
+  return handleAdminCallback(
+    request(
+      `/api/auth/callback?code=fresh_code&state=${pending.state}`,
+      `${pending.accountCookie}; ${pending.transactionCookie}`
+    ),
+    env
+  )
+}
+
+test("an initially unscoped independent sign-in explicitly refreshes into the private billing organization", async () => {
+  const pending = await authorize()
+  tokenResponse = (body) =>
+    body.grant_type === "authorization_code"
+      ? authentication(jwt({ org_id: undefined }), "refresh_fresh_unscoped")
+      : authentication(jwt(), "refresh_backend_scoped")
+  const response = await completeBillingAuthorization(pending)
+  assert.equal(response.status, 303)
+  assert.deepEqual(
+    authenticationCalls.map((call) => call.grant_type),
+    ["authorization_code", "refresh_token"]
+  )
+  assert.equal(authenticationCalls[1].refresh_token, "refresh_fresh_unscoped")
+  assert.equal(authenticationCalls[1].organization_id, organizationId)
+  const tokens = await storedTokens()
+  assert.equal(tokens.organizationId, organizationId)
+  assert.equal(tokens.refreshToken, "refresh_backend_scoped")
+  assert.equal((await getWorkOSEntitlement(env, userId)).enabled, true)
+})
+
+test("an unscoped grant sharing the browser session never rotates its refresh token or persists billing credentials", async () => {
+  const pending = await authorize()
+  tokenResponse = authentication(
+    jwt({ sid: browserSid, org_id: undefined }),
+    "refresh_must_never_rotate"
+  )
+  const response = await completeBillingAuthorization(pending)
+  assert.ok(response.status >= 400)
+  assert.deepEqual(
+    authenticationCalls.map((call) => call.grant_type),
+    ["authorization_code"]
+  )
+  assert.equal(await storedTokens(), null)
+  assert.equal(
+    sqlite.prepare("SELECT COUNT(*) AS n FROM workos_entitlements").get().n,
+    0
+  )
+})
+
+test("invalid initial JWTs and mismatched subjects are rejected before organization refresh", async () => {
+  const forged = jwt({ org_id: undefined }).split(".")
+  forged[2] = `${forged[2][0] === "A" ? "B" : "A"}${forged[2].slice(1)}`
+  for (const initialToken of [
+    jwt({ org_id: undefined, iss: "https://attacker.example" }),
+    jwt({ org_id: undefined, sub: "user_another" }),
+    forged.join("."),
+  ]) {
+    authenticationCalls = []
+    const pending = await authorize()
+    tokenResponse = authentication(initialToken, "refresh_must_never_rotate")
+    const response = await completeBillingAuthorization(pending)
+    assert.ok(response.status >= 400)
+    assert.deepEqual(
+      authenticationCalls.map((call) => call.grant_type),
+      ["authorization_code"]
+    )
+    assert.equal(await storedTokens(), null)
+    assert.equal(
+      sqlite.prepare("SELECT COUNT(*) AS n FROM workos_entitlements").get().n,
+      0
+    )
+  }
+})
+
+test("organization scoping rejects wrong final identity, organization, browser session and verification without replacing existing access", async () => {
+  await store(jwt(), "refresh_existing_backend")
+  const priorSession = sqlite
+    .prepare("SELECT * FROM workos_billing_sessions")
+    .get()
+  const priorProof = sqlite.prepare("SELECT * FROM workos_entitlements").get()
+  const cases = [
+    authentication(jwt({ sid: "session_fresh_pending", org_id: "org_wrong" })),
+    authentication(jwt({ sid: "session_fresh_pending", sub: "user_another" })),
+    authentication(jwt({ sid: browserSid })),
+    {
+      ...authentication(jwt({ sid: "session_fresh_pending" })),
+      user: { ...authentication().user, email_verified: false },
+    },
+    {
+      ...authentication(jwt({ sid: "session_fresh_pending" })),
+      user: { ...authentication().user, id: "user_another" },
+    },
+  ]
+  for (const finalResponse of cases) {
+    authenticationCalls = []
+    const pending = await authorize()
+    tokenResponse = (body) =>
+      body.grant_type === "authorization_code"
+        ? authentication(
+            jwt({ sid: "session_fresh_pending", org_id: undefined }),
+            "refresh_fresh_unscoped"
+          )
+        : finalResponse
+    const response = await completeBillingAuthorization(pending)
+    assert.ok(response.status >= 400)
+    assert.deepEqual(
+      authenticationCalls.map((call) => call.grant_type),
+      ["authorization_code", "refresh_token"]
+    )
+    assert.equal(authenticationCalls[1].refresh_token, "refresh_fresh_unscoped")
+    assert.deepEqual(
+      sqlite.prepare("SELECT * FROM workos_billing_sessions").get(),
+      priorSession
+    )
+    assert.deepEqual(
+      sqlite.prepare("SELECT * FROM workos_entitlements").get(),
+      priorProof
+    )
+  }
+})
+
+test("a transient organization-refresh failure preserves the prior backend session and entitlement", async () => {
+  await store(jwt(), "refresh_existing_backend")
+  const priorSession = sqlite
+    .prepare("SELECT * FROM workos_billing_sessions")
+    .get()
+  const priorProof = sqlite.prepare("SELECT * FROM workos_entitlements").get()
+  const pending = await authorize()
+  tokenResponse = (body) => {
+    if (body.grant_type === "authorization_code")
+      return authentication(
+        jwt({ sid: "session_fresh_pending", org_id: undefined }),
+        "refresh_fresh_unscoped"
+      )
+    throw new Error("Temporary provider outage")
+  }
+  const response = await completeBillingAuthorization(pending)
+  assert.equal(response.status, 503)
+  assert.deepEqual(
+    authenticationCalls.map((call) => call.grant_type),
+    ["authorization_code", "refresh_token"]
+  )
+  assert.deepEqual(
+    sqlite.prepare("SELECT * FROM workos_billing_sessions").get(),
+    priorSession
+  )
+  assert.deepEqual(
+    sqlite.prepare("SELECT * FROM workos_entitlements").get(),
+    priorProof
+  )
 })
