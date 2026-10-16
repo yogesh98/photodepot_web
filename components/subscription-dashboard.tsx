@@ -463,15 +463,16 @@ export function SubscriptionDashboard({
       `/admin${params.size ? `?${params}` : ""}`
     )
   }, [])
-  const showProfile = useCallback((user: WorkOSUserSummary) => {
-    setProfile(user)
-    setProfileId(user.id)
+  const showProfile = useCallback((user: WorkOSUserSummary | string) => {
+    const id = typeof user === "string" ? user : user.id
+    setProfile(typeof user === "string" ? null : user)
+    setProfileId(id)
     setView("accounts")
     setDialogError("")
     window.history.pushState(
       null,
       "",
-      `/admin?view=accounts&user=${encodeURIComponent(user.id)}`
+      `/admin?view=accounts&user=${encodeURIComponent(id)}`
     )
   }, [])
   const openDialog = useCallback(
@@ -815,11 +816,7 @@ export function SubscriptionDashboard({
                 <AdminSubscriptionRequests
                   refreshVersion={refreshVersion}
                   disabled={actionsDisabled}
-                  onReview={(id) => {
-                    setProfileId(id)
-                    setProfile(null)
-                    setView("accounts")
-                  }}
+                  onReview={showProfile}
                   onApprove={(request) => {
                     void (async () => {
                       try {
@@ -841,11 +838,7 @@ export function SubscriptionDashboard({
                 <AdminSubscriptionReminders
                   refreshVersion={refreshVersion}
                   disabled={actionsDisabled}
-                  onReview={(id) => {
-                    setProfileId(id)
-                    setProfile(null)
-                    setView("accounts")
-                  }}
+                  onReview={showProfile}
                 />
               </>
             )}
