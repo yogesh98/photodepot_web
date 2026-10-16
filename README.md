@@ -100,8 +100,8 @@ signs are literal; there is no Next.js-style variable expansion.
 Version 0.2.5 improves recovery after signed Mac removal while preserving remote
 playback. An online Mac saves and closes local work as soon as it receives the
 signed removal, then requires fresh account sign-in and browser approval to
-reconnect. Account sign-in, administrator-assigned subscriptions, and up to two
-connected Macs remain available. Both signed, notarized installers are published
+reconnect. Account sign-in and up to two connected Macs remain available. Current
+subscription setup is described below. Both signed, notarized installers are published
 together. This is the first updater-enabled release; install it manually from
 the DMG to receive future updates in the app.
 
@@ -245,11 +245,18 @@ GET/HEAD downloads, byte ranges, unavailable storage and invalid requests;
 D1 waitlist persistence and duplicates; license administration and verification;
 and static asset leakage prevention.
 
+GitHub Actions runs type checks, lint, server regressions, both production builds,
+and the billing, dashboard, sign-in and logout browser suites for pull requests.
+The workflow uses Node 24 LTS, isolated local storage and mocked providers; it
+does not require production credentials or perform deployments.
+
 The dashboard and customer account browser tests run against the built site and
-isolated mock APIs. They cover manual grants, extensions, notes, revocation,
-restoration, individual Mac resets, direct customer Mac removal, renewal requests, admin review, reminder
-delivery settings, server filtering, waitlist export, cancel/resume renewal, linkable user profiles, pagination, stale edits, session errors, and mobile keyboard
-access. Run them separately with an LTS Node.js release:
+isolated mock APIs. They cover subscription pricing and interval choices,
+Checkout and Portal redirects, discounts, cancellation, access confirmation,
+direct Mac removal, server filtering, waitlist export, linkable profiles,
+pagination, stale edits, session errors, and mobile keyboard access. API tests
+verify retired request/grant actions cannot change access. Run browser tests
+separately with an LTS Node.js release:
 
 ```sh
 pnpm exec playwright install chromium
@@ -271,9 +278,9 @@ media kit with `pnpm brand:generate` before copying updated exports here.
 Photography credits are in `public/photography/pexels/README.md`; the Inter font license is in
 `app/fonts/OFL.txt`.
 
-## Accounts and manual access
+## Accounts and subscriptions
 
-The Accounts directory is available at `/admin`. The previous `/admin/users`, `/admin/subscriptions`, and `/admin/licenses` URLs remain aliases. Creating an account or signing in permits joining collaboration; it does not grant local project or hosting access. An Owner must manually assign Trial or Standard access to each approved account. Signups never receive administration membership. Only the `owner` role in `WORKOS_ADMIN_ORGANIZATION_ID` can manage access. See [account setup and protocol](deploy/LICENSES.md).
+The Accounts directory is available at `/admin`. The previous `/admin/users`, `/admin/subscriptions`, and `/admin/licenses` URLs remain aliases. Signing in permits joining collaboration. Local projects and hosting require a Stripe subscription with the configured WorkOS entitlement. Free access uses the same subscription with a Stripe coupon or promotion code. Signups never receive administration membership. Only the `owner` role in `WORKOS_ADMIN_ORGANIZATION_ID` can use administration routes. See [account setup and protocol](deploy/LICENSES.md).
 
 Set `WORKOS_CLIENT_ID`, `WORKOS_ADMIN_ORGANIZATION_ID`,
 `WORKOS_REDIRECT_URI=https://photodepot.app/api/auth/callback`, and a random
@@ -284,31 +291,27 @@ Never include the key in browser assets or desktop builds. Apply D1
 migrations, including the account-access migration, before starting the updated backend. Existing grant dates, notes, and audit history are preserved. Old canceled-renewal preferences become disabled reminders; they are not billing cancellations. The existing
 `https://photodepot.app/api/account/webhook` endpoint still acknowledges signed
 WorkOS notifications when `WORKOS_WEBHOOK_SECRET` is configured, but it does not
-read or change subscriptions. A webhook is not required for manual access grants.
+read or change subscriptions. WorkOS's Stripe add-on supplies verified entitlements.
 
-The admin workspace has Overview, Accounts, Waitlist, and Operations
-views. Dashboard counts cover the complete database, including active trials,
-standard access, upcoming expirations, waitlist signups, open requests, and Mac
-sessions. Search and access filters run on the server across the WorkOS directory. Filtered
+The admin workspace has Overview, Accounts, and Waitlist views. It shows
+subscription access, waitlist signups, and Mac sessions. Search and access filters run on the server across the WorkOS directory. Filtered
 requests scan at most ten provider pages; a continuation remains available when
 more accounts need to be searched, even if the current result is empty.
 
 Each user has a linkable management view at `/admin?view=users&user=USER_ID`,
-with identity information, access dates, reminder preference, notes, named Macs,
-requests, and activity history. Admins can grant Trial or Standard access by
-duration or exact date, extend, revoke, restore, remove Macs independently of access,
-and record reasons and internal notes. Waitlist search includes name,
+with identity information, subscription access, named Macs, and retained activity
+history. Admins can remove Macs independently of subscriptions. Manage plans,
+discounts, cancellation, and free access in Stripe. Waitlist search includes name,
 email, and referral source, with signup dates, source counts, and a CSV export
 of exactly the loaded results. CSV cells are escaped against formula execution.
 
-Operations contains access requests and reminders. **Approve and extend** opens
-the access editor and saves the chosen grant, resolves the request, and records
-both audits in one transaction. Stale grant or request revisions leave both
-unchanged. Declining records the review without changing access. Existing request
-and audit history remains available. Visible directory pages refresh
+Access requests, manual grants/extensions, and manual trial reminders are retired.
+Old records remain stored for audit, but never authorize access. Retired mutation
+endpoints return 410. Visible directory pages refresh
 every 30 seconds while no profile, dialog, or mutation is open. Revision checks
 reject stale writes. Expired sessions show a sign-in link and refresh recovery.
-No payment provider or charging flow is connected.
+Stripe purchases are disabled until server configuration is supplied; see
+[Stripe setup and verification](deploy/STRIPE.md).
 
 The UI reuses the desktop app's shadcn Base Mira / stone configuration and
 component source, including the `sidebar-07` block on both dashboards. Owners
@@ -341,7 +344,7 @@ receipt expires. Subscription expiry removes local entitlement while preserving
 login and joining collaboration. Device identity and receipts use encrypted local
 storage, which can access macOS Keychain. The supported desktop uses one atomic
 authorization record and one shared offline/clock ledger. Legacy clients receive
-an update-required response; license-key users sign in and obtain Owner approval.
+an update-required response; license-key users sign in and subscribe.
 
 Every desktop approval requires an explicit Approve computer sign-in action naming
 the computer, including browser launches from the app and returns from hosted authentication.
@@ -351,13 +354,13 @@ POST; GET does not admit a device. Replacing a computer and admitting the new on
 share one guarded transaction. Cancellation also revokes a concurrently approved
 session in one transaction. Success uses the Photodepot logo and wordmark.
 
-### Customer account and requests
+### Customer account
 
-Users can sign in at `/account` to view their trial or standard access, expiry, and
-connected Macs. Account cookies are separate from admin cookies. Customers see
-only their own access, devices, and latest 50 requests; administrator notes, review
-notes, access audits, and device keys are excluded. Grant revisions guard concurrent
-preference changes. Connected Macs are independent of access, so both customers and
+Users sign in at `/account` with separate Subscription and Authorized devices
+sidebar tabs. Free, Monthly, and Yearly plans appear together, with Upgrade on higher
+options and Cancel on the current paid plan. Account cookies are separate from admin cookies.
+Customers see only their own access and devices; administrator notes, audits, and
+device keys are excluded. Connected Macs are independent of access, so customers and
 Owners can remove free-account sessions too.
 
 Users remove a connected Mac directly with a same-origin `remove-device` action,
@@ -367,43 +370,60 @@ other Mac and subscription remain unchanged. Stale edits require refreshing the
 account. Device operations use session revisions; they do not update grant
 revisions. Historical assignments remain stored but no longer authorize use.
 
-**Request access/extension** requires administrator review. Retries return the existing
-open request, with up to five new requests per rolling 24 hours. Acknowledged
-requests stay open until completed or declined. Requests never extend access or
-collect payment. Approval and the selected access grant are atomic; reviews use
-revision checks and retain a separate audit.
+Free-account upgrades continue to hosted Stripe Checkout. If identity confirmation
+is needed, the server preserves the chosen interval and resumes Checkout after
+sign-in. Promotion codes are entered in Stripe Checkout. A 100% discount can
+complete without a payment method when nothing is due. Stripe controls the
+discount's duration, limits, and future charges. **Manage billing** opens the hosted
+Stripe Customer Portal for payment methods, invoices, and renewal management,
+including during a cardless trial or after scheduling cancellation. Cancel opens
+the subscription's cancellation confirmation; Monthly-to-Yearly Upgrade opens
+Stripe's plan-change confirmation, including any tax and prorations. Neither
+button directly changes a subscription before the customer confirms in Stripe.
 
-Customers and Owners can enable or disable access reminders. This preference
-does not revoke or extend access, reset Macs, or create/cancel a paid subscription.
-It does not prevent requesting an extension. Existing canceled manual terms are
-migrated to reminders disabled, preserving their original audit history.
+### Stripe billing boundary
 
-### Future billing boundary
+WorkOS Stripe Entitlements owns paid feature access. The backend validates the
+organization-scoped entitlement claim for `PHOTODEPOT_WORKOS_ENTITLEMENT`; it does
+not reconcile Stripe invoices or maintain subscription state for authorization.
+Stripe still provides hosted Checkout, Customer Portal, promotion codes and Tax.
+Its live subscription dates are display-only.
 
-WorkOS owns identity, desktop sessions own device approval, and one server access
-resolver owns local-project/hosting entitlement. The existing `subscriptions` table
-stores manual grants rather than invoices or paid subscription state. The desktop
-receives the effective signed permission and deadline, without billing-provider data.
+Each billing account has a private WorkOS organization, active membership and
+Stripe customer link, separate from administration. Create a separate
+[WorkOS Application](https://workos.com/docs/authkit/applications) in the same
+environment and set its client ID as `WORKOS_BILLING_CLIENT_ID`, distinct from the
+browser/default `WORKOS_CLIENT_ID`. Register the existing `/api/auth/callback`
+redirect on both applications. The billing application's AuthKit PKCE flow
+authorizes one encrypted backend-owned WorkOS session for billing access.
+Browser login/logout and individual Mac removal remain independent. Tokens stay
+on the server, with serialized refresh and fail-closed expiry/revocation. An
+expired billing session can be reconnected from the account dashboard. Existing
+same-client billing sessions also require reconnection after this configuration
+change; previously signed desktop receipts retain their original bounded deadlines.
 
-Stripe checkout, billing management, invoices, paid cancellation, coupons, and
-promotion codes belong to the later billing integration. Use Stripe's hosted flows
-and native discounts rather than a second coupon engine. WorkOS's Stripe add-on
-requires a private personal organization for each paying customer's Stripe customer;
-keep those organizations separate from the administration organization, without
-team UI or seat sync. Existing manual accounts must explicitly opt into paid checkout.
-For a paying customer, **Extend** must postpone the next charge through Stripe and
-derive access from its confirmed result. A local expiry edit is never a billing extension.
+Normal signed desktop responses and stable receipt IDs remain unchanged. During
+an entitlement lookup failure, a signed `entitlementStatus: "unavailable"` marker
+allows updated desktops to verify the account independently. Existing paid
+receipts keep their original signed session binding, deadline and offline-start
+budget; a new account receives no paid receipt. Release the compatible desktop
+before deploying this backend change. Older desktops reject the marker and retain
+only their existing offline allowance; see [rollout details](deploy/STRIPE.md#desktop-compatibility-during-entitlement-outages).
 
-### Daily renewal queue and trial reminders
+A fresh WorkOS proof permits the existing 48-hour offline authorization allowance;
+that deadline is not a billing renewal date. Failed provider checks cannot extend
+it. Historical manual grants never authorize access. Subscription discounts do
+not bypass WorkOS entitlement checks.
 
-The admin dashboard lists active trials and standard subscriptions ending within
-seven days. Trial reminder messages are prepared once per trial term during the
-final 48 hours. The queue also shows delivery status, message history, and
-failed or uncertain attempts. Select **Check reminders now** to process due
-trials; this uses the same routine as the scheduled worker.
+Apply migration 0017 with the earlier migrations before running this backend.
+The old Stripe ledger tables remain historical only; no runtime authorization
+reads them and no custom Stripe subscription webhook is required. The add-on must
+be connected to a standard Stripe account, using test mode for development;
+WorkOS currently does not support Stripe Sandbox accounts. See
+[configuration and verification](deploy/STRIPE.md).
 
-Email delivery is disabled until a provider and sender are configured.
-The optional Resend adapter, worker setup, and hourly due-reminder
-checks are documented in
-[the reminder worker guide](workers/README.md). Standard plans appear in the
-renewal queue but do not receive the trial email.
+### Subscription messages
+
+Configure renewal, trial-ending, and payment-recovery messages in Stripe. The old
+manual reminder worker is retired and its endpoints return 410; historical
+delivery records remain stored. See [worker status](workers/README.md).

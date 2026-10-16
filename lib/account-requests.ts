@@ -4,6 +4,7 @@ import type {
   AccountAccess,
   AccountDevice,
   SubscriptionSummary,
+  WorkOSEntitlementSummary,
   WorkOSUserSummary,
 } from "./subscription-types.ts"
 import {
@@ -40,13 +41,14 @@ export interface AccountRequestAudit {
 export interface CustomerAccount {
   user: { email: string }
   access: AccountAccess
-  requests: CustomerRequest[]
+  accessUnavailable?: boolean
   devices: AccountDevice[]
-  reminders: { enabled: boolean; revision: number }
 }
 export interface AdminRequestQueue {
   requests: (AccountRequest & {
     subscription: SubscriptionSummary | null
+    managed?: WorkOSEntitlementSummary | null
+    access?: AccountAccess
     user: Omit<WorkOSUserSummary, "subscription" | "access" | "devices"> | null
   })[]
   openCount: number

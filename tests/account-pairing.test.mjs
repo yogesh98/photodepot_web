@@ -21,6 +21,7 @@ import {
 } from "../lib/account-sessions.ts"
 import { handleAccountSubscription } from "../functions/api/account/subscription.ts"
 import { handleLicenseRequest } from "../lib/license-api.ts"
+import { workosBillingConfiguration } from "../lib/workos-entitlements.ts"
 
 const origin = "https://photodepot.app"
 const clientId = "client_pairing_tests"
@@ -49,6 +50,7 @@ before(async () => {
   env = {
     ...platform.env,
     WORKOS_CLIENT_ID: clientId,
+    WORKOS_BILLING_CLIENT_ID: "client_billing_pairing_tests",
     WORKOS_ADMIN_ORGANIZATION_ID: "org_pairing_admin",
     WORKOS_COOKIE_PASSWORD: cookiePassword,
     WORKOS_REDIRECT_URI: `${origin}/api/auth/callback`,
@@ -368,34 +370,49 @@ test("account sessions allow collaboration without subscriptions and expose inde
   assert.equal((await listAccountDevices(env.DB, userId)).length, 1)
 })
 
-test("subscription expiry and revocation remove local entitlement while keeping the account session active", async () => {
-  const userId = "user_session_entitlement"
-  await assign(userId, "regular", Date.now() + 3600_000)
+test("subscription withdrawal removes local entitlement while keeping the account session active", async () => {
+  const userId = "user_session_entitlement",
+    now = Date.now()
+  await assign(userId, "regular", now + 30 * 86_400_000)
+  await env.DB.batch([
+    env.DB.prepare(
+      "INSERT INTO stripe_customers (user_id,stripe_customer_id,workos_organization_id,customer_create_token) VALUES (?,?,?,?)"
+    ).bind(
+      userId,
+      "cus_session_entitlement",
+      "org_session_entitlement",
+      "fixture"
+    ),
+    env.DB.prepare(
+      "INSERT INTO workos_billing_sessions (user_id,session_id,encrypted_tokens,updated_at) VALUES (?,?,?,?)"
+    ).bind(userId, "billing_session_entitlement", "unused", now),
+    env.DB.prepare(
+      "INSERT INTO workos_entitlements (user_id,organization_id,enabled,issued_at,expires_at,revision,context) VALUES (?,?,1,?,?,1,?)"
+    ).bind(
+      userId,
+      "org_session_entitlement",
+      now,
+      now + 300_000,
+      workosBillingConfiguration(env).context
+    ),
+  ])
   const loggedIn = await accountLogin(userId)
   assert.equal(decodeReceipt(loggedIn.result.receipt).status, "active")
   assert.equal(
     decodeReceipt(loggedIn.result.receipt).challenge,
     loggedIn.claims.challenge
   )
-  await env.DB.prepare("UPDATE subscriptions SET end_at = ? WHERE user_id = ?")
-    .bind(Date.now() - 1, userId)
+  await env.DB.prepare(
+    "UPDATE workos_entitlements SET enabled=0,revision=revision+1 WHERE user_id=?"
+  )
+    .bind(userId)
     .run()
-  for (const state of ["expired", "revoked"]) {
-    if (state === "revoked")
-      await env.DB.prepare(
-        "UPDATE subscriptions SET status = 'revoked' WHERE user_id = ?"
-      )
-        .bind(userId)
-        .run()
-    const response = await sessionRequest(
-      loggedIn.device,
-      loggedIn.claims.sessionId
-    )
-    assert.equal(response.status, 200)
-    const result = await response.json()
-    assert.equal(decodeReceipt(result.session).status, "active")
-    assert.equal("receipt" in result, false)
-  }
+  const result = await (
+    await sessionRequest(loggedIn.device, loggedIn.claims.sessionId)
+  ).json()
+  assert.equal(decodeReceipt(result.session).status, "active")
+  assert.equal("receipt" in result, false)
+  assert.equal((await getSubscription(env.DB, userId)).status, "active")
 })
 
 test("desktop logout revokes its exact session and old proofs or pairing cannot revive it after a fresh login", async () => {

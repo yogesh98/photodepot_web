@@ -81,6 +81,15 @@ function fixtures() {
       subscription: subscription("eva", "regular", "active", 60),
     },
   ]
+  for (const index of [0, 4])
+    users[index].managed = {
+      userId: users[index].id,
+      organizationId: `org_${users[index].id}`,
+      enabled: true,
+      issuedAt: now,
+      expiresAt: now + 300_000,
+      revision: 1,
+    }
   users[0].subscription.notes =
     "Pilot account <script>window.injected=true</script>"
   users[0].devices = [firstMac, secondMac].map((id, index) => ({
@@ -148,65 +157,44 @@ function fixtures() {
 }
 
 function overview() {
-  const subscriptions = state.users.flatMap((user) =>
-    user.subscription ? [user.subscription] : []
-  )
-  const now = Date.now()
-  const active = subscriptions.filter(
-    (subscription) =>
-      subscription.status !== "revoked" && subscription.endsAt > now
-  )
+  const entries = state.users.map(accountAccess),
+    active = entries.filter((item) => item.canHost)
   return {
-    totalSubscriptions: subscriptions.length,
-    active: active.length,
-    activeTrials: active.filter((subscription) => subscription.type === "trial")
+    totalSubscriptions: state.users.filter((user) => user.managed?.enabled)
       .length,
-    activeStandard: active.filter(
-      (subscription) => subscription.type === "regular"
-    ).length,
-    expired: subscriptions.filter(
-      (subscription) =>
-        subscription.status !== "revoked" && subscription.endsAt <= now
-    ).length,
-    revoked: subscriptions.filter(
-      (subscription) => subscription.status === "revoked"
-    ).length,
-    expiringSoon: active.filter(
-      (subscription) => subscription.endsAt <= now + 7 * day
-    ).length,
+    active: active.length,
+    activeTrials: 0,
+    activeStandard: active.length,
+    verificationNeeded:
+      state.users.filter((user) => user.managed?.enabled).length -
+      active.length,
+    expired: 0,
+    revoked: 0,
+    expiringSoon: 0,
     assignedMacs: state.users.reduce(
       (sum, user) => sum + user.devices.length,
       0
     ),
     waitlistTotal: state.waitlist.length,
     waitlistLast30Days: state.waitlist.filter(
-      (entry) => entry.createdAt >= now - 30 * day
+      (item) => item.createdAt >= Date.now() - 30 * day
     ).length,
-    openRequests: state.accountRequests.filter((item) =>
-      ["pending", "acknowledged"].includes(item.status)
-    ).length,
-    asOf: now,
+    openRequests: 0,
+    asOf: Date.now(),
     expiringWithinDays: 7,
   }
 }
-
 function accountAccess(user) {
-  const grant = user.subscription
-  const status = !grant
-    ? "none"
-    : grant.status === "revoked"
-      ? "revoked"
-      : grant.endsAt <= Date.now()
-        ? "expired"
-        : "active"
+  const managed = user.accessUnavailable ? null : user.managed,
+    valid = managed?.enabled && managed.expiresAt > Date.now()
   return {
-    tier: !grant ? "free" : grant.type === "trial" ? "trial" : "standard",
-    status,
-    source: grant ? "manual" : null,
-    startsAt: grant?.startsAt ?? null,
-    endsAt: grant?.endsAt ?? null,
-    canUseLocal: status === "active",
-    canHost: status === "active",
+    tier: valid ? "standard" : "free",
+    status: managed?.enabled ? (valid ? "active" : "expired") : "none",
+    source: managed?.enabled ? "workos" : null,
+    startsAt: managed?.enabled ? managed.issuedAt : null,
+    endsAt: managed?.enabled ? managed.issuedAt + 2 * day : null,
+    canUseLocal: !!valid,
+    canHost: !!valid,
   }
 }
 function publicUser(user) {
@@ -232,10 +220,8 @@ async function handleApi(request, response, url) {
       return respond(response, 200, {
         user: publicUser(user),
         access: accountAccess(user),
+        accessUnavailable: user.accessUnavailable ?? false,
         subscription: user.subscription,
-        requests: state.accountRequests.filter(
-          (item) => item.userId === user.id
-        ),
         deviceAudit: state.deviceAudits.filter(
           (entry) => entry.userId === user.id
         ),
@@ -258,10 +244,10 @@ async function handleApi(request, response, url) {
     state.listQueries.push(Object.fromEntries(url.searchParams))
     const query = (url.searchParams.get("q") || "").trim().toLowerCase()
     const filter = url.searchParams.get("filter") || "all"
-    const now = Date.now()
     const matching = state.users.filter((user) => {
       const sub = user.subscription
-      const active = sub && sub.status !== "revoked" && sub.endsAt > now
+      const access = accountAccess(user),
+        active = access.canHost
       if (
         query &&
         ![user.email, user.firstName, user.lastName, sub?.notes]
@@ -273,16 +259,11 @@ async function handleApi(request, response, url) {
         return false
       return (
         filter === "all" ||
-        (filter === "active" && active) ||
-        (filter === "trial" && active && sub.type === "trial") ||
-        (filter === "standard" && active && sub.type === "regular") ||
-        (filter === "expiring" && active && sub.endsAt <= now + 7 * day) ||
-        (filter === "expired" &&
-          sub &&
-          sub.status !== "revoked" &&
-          sub.endsAt <= now) ||
-        (filter === "revoked" && sub?.status === "revoked") ||
-        (filter === "unassigned" && !sub)
+        (!user.accessUnavailable &&
+          ((filter === "active" && active) ||
+            (filter === "standard" && active) ||
+            (filter === "expired" && access.status === "expired") ||
+            (filter === "unassigned" && access.source === null)))
       )
     })
     const cursor = url.searchParams.get("cursor")
@@ -295,7 +276,7 @@ async function handleApi(request, response, url) {
       nextCursor:
         start + users.length < matching.length ? users.at(-1).id : null,
       overview: overview(),
-      billingMode: "manual",
+      billingMode: "subscriptions",
     })
   }
   let raw = ""
@@ -344,39 +325,9 @@ async function handleApi(request, response, url) {
     })
     return respond(response, 200, { devices: user.devices })
   }
-  if (body.expectedRevision !== (user.subscription?.revision ?? 0))
-    return respond(response, 409, { error: "Revision conflict" })
-  const now = Date.now()
-  if (body.action === "set")
-    user.subscription = {
-      ...user.subscription,
-      id: user.subscription?.id || `subscription_${user.id}`,
-      userId: user.id,
-      type: body.type,
-      status: "active",
-      startsAt: now,
-      endsAt: body.endsAt || now + body.durationDays * day,
-      notes: body.notes,
-      remindersEnabled: user.subscription?.remindersEnabled ?? true,
-      revision: (user.subscription?.revision ?? 0) + 1,
-      updatedAt: now,
-    }
-  else {
-    const subscription = user.subscription
-    if (body.action === "extend")
-      subscription.endsAt =
-        body.endsAt ||
-        Math.max(now, subscription.endsAt) + body.durationDays * day
-    if (body.action === "revoke") subscription.status = "revoked"
-    if (body.action === "restore")
-      subscription.status = subscription.endsAt > now ? "active" : "expired"
-    if (body.action === "update-notes") subscription.notes = body.notes
-    if (body.action === "set-reminders")
-      subscription.remindersEnabled = body.enabled
-    subscription.revision++
-    subscription.updatedAt = now
-  }
-  respond(response, 200, { subscription: user.subscription })
+  return respond(response, 410, {
+    error: "Manual access administration retired",
+  })
 }
 
 async function bodyOf(request) {
@@ -384,30 +335,12 @@ async function bodyOf(request) {
   for await (const chunk of request) raw += chunk
   return JSON.parse(raw)
 }
-function customerRequest(item) {
-  return {
-    id: item.id,
-    action: item.action,
-    deviceId: item.deviceId,
-    message: item.message,
-    status: item.status,
-    createdAt: item.createdAt,
-    updatedAt: item.updatedAt,
-  }
-}
 function customerAccount() {
   const user = state.users[0]
   return {
     user: { email: user.email },
     access: accountAccess(user),
     devices: user.devices,
-    reminders: {
-      enabled: user.subscription?.remindersEnabled ?? true,
-      revision: user.subscription?.revision ?? 0,
-    },
-    requests: state.accountRequests
-      .filter((item) => item.userId === "user_alice")
-      .map(customerRequest),
   }
 }
 async function customerApi(request, response) {
@@ -438,221 +371,17 @@ async function customerApi(request, response) {
     user.devices = user.devices.filter((value) => value !== device)
     return respond(response, 200, { devices: user.devices })
   }
-  if (body.action === "set-reminders") {
-    const subscription = state.users[0].subscription
-    if (body.expectedRevision !== subscription.revision)
-      return respond(response, 409, { error: "Revision conflict" })
-    subscription.remindersEnabled = body.enabled
-    subscription.revision++
-    return respond(response, 200, { reminders: customerAccount().reminders })
-  }
-  if (body.action !== "request-renewal")
-    return respond(response, 400, { error: "Unsupported account action" })
-  const action = "renewal"
-  const existing = state.accountRequests.find(
-    (item) =>
-      item.userId === "user_alice" &&
-      item.action === action &&
-      item.deviceId === (body.deviceId ?? null) &&
-      ["pending", "acknowledged"].includes(item.status)
-  )
-  if (existing)
-    return respond(response, 200, {
-      request: customerRequest(existing),
-      created: false,
-    })
-  const item = {
-    id: `request_00000000-0000-4000-8000-${String(state.accountRequests.length + 1).padStart(12, "0")}`,
-    userId: "user_alice",
-    email: "alice@example.test",
-    action,
-    deviceId: body.deviceId ?? null,
-    message: body.message || "",
-    status: "pending",
-    revision: 1,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-    adminNote: "",
-    handledBy: "",
-  }
-  state.accountRequests.unshift(item)
-  respond(response, 201, { request: customerRequest(item), created: true })
-}
-async function requestsApi(request, response, url) {
-  if (request.method === "GET") {
-    if (url.searchParams.has("requestId")) {
-      const item = state.accountRequests.find(
-        (item) => item.id === url.searchParams.get("requestId")
-      )
-      const delay = state.requestHistoryDelay
-      const failure = state.requestHistoryFailure
-      state.requestHistoryDelay = 0
-      state.requestHistoryFailure = null
-      state.requestHistoryStarted.push(item.id)
-      if (delay) await new Promise((resolve) => setTimeout(resolve, delay))
-      state.requestHistoryResponses.push(item.id)
-      if (failure)
-        return respond(response, failure, {
-          error: "Test request history unavailable",
-        })
-      return respond(response, 200, {
-        request: item,
-        audit: [
-          {
-            id: "request_audit",
-            action: "created",
-            actor: item.email,
-            createdAt: item.createdAt,
-            note: "",
-          },
-        ],
-      })
-    }
-    return respond(response, 200, {
-      requests: state.accountRequests
-        .filter(
-          (item) =>
-            url.searchParams.get("includeClosed") === "1" ||
-            ["pending", "acknowledged"].includes(item.status)
-        )
-        .map((item) => ({
-          ...item,
-          user: (() => {
-            const user = state.users.find((user) => user.id === item.userId)
-            if (!user) return null
-            return Object.fromEntries(
-              Object.entries(user).filter(([key]) => key !== "subscription")
-            )
-          })(),
-          subscription:
-            state.users.find((user) => user.id === item.userId)?.subscription ??
-            null,
-        })),
-      openCount: state.accountRequests.filter((item) =>
-        ["pending", "acknowledged"].includes(item.status)
-      ).length,
-      limit: 100,
-    })
-  }
-  const body = await bodyOf(request)
-  state.reviewMutations.push(body)
-  if (state.reviewFailNext) {
-    const status = state.reviewFailNext
-    state.reviewFailNext = null
-    return respond(response, status, {
-      error:
-        "This request changed. Refresh the queue before reviewing it again.",
-    })
-  }
-  const item = state.accountRequests.find((item) => item.id === body.requestId)
-  if (item.revision !== body.expectedRevision)
-    return respond(response, 409, { error: "Request conflict" })
-  if (body.action === "approve") {
-    const user = state.users.find((user) => user.id === item.userId)
-    if (
-      (user.subscription?.revision ?? 0) !== body.expectedSubscriptionRevision
-    )
-      return respond(response, 409, { error: "Access changed" })
-    user.subscription = {
-      ...user.subscription,
-      id: user.subscription?.id ?? `subscription_${user.id}`,
-      userId: user.id,
-      type: body.type,
-      status: "active",
-      startsAt: Date.now(),
-      endsAt: body.endsAt,
-      revision: (user.subscription?.revision ?? 0) + 1,
-      notes: user.subscription?.notes ?? "",
-      remindersEnabled: user.subscription?.remindersEnabled ?? true,
-      updatedAt: Date.now(),
-    }
-  }
-  item.status =
-    body.action === "acknowledge"
-      ? "acknowledged"
-      : ["approve", "resolve"].includes(body.action)
-        ? "resolved"
-        : "rejected"
-  item.adminNote = body.note
-  item.handledBy = "owner@example.test"
-  item.updatedAt = Date.now()
-  item.revision++
-  respond(response, 200, { request: item })
-}
-async function remindersApi(request, response) {
-  if (state.reminderFailure)
-    return respond(response, state.reminderFailure, {
-      error: "Reminder session expired",
-    })
-  if (request.method === "POST") {
-    const body = await bodyOf(request)
-    assert.equal(body.action, "run")
-    if (state.reminderMode === "disabled")
-      return respond(response, 503, {
-        error: "Reminder delivery is not configured.",
-      })
-    state.reminderRuns++
-    state.reminderOutbox = [
-      {
-        id: "reminder_sent",
-        userId: "user_alice",
-        endsAt: state.users[0].subscription.endsAt,
-        status: "sent",
-        attempts: 1,
-        updatedAt: Date.now(),
-        subject: "Your Photodepot trial ends soon",
-        recipient: "alice@example.test",
-        text: "Your trial is expiring. Request renewal from your Photodepot account.",
-      },
-    ]
-  }
-  respond(response, 200, {
-    ...(request.method === "POST"
-      ? {
-          result: {
-            processed: 1,
-            sent: 1,
-            deferred: 0,
-            failed: 0,
-            cancelled: 0,
-            uncertain: 0,
-            remaining: false,
-          },
-        }
-      : {}),
-    mode: state.reminderMode,
-    upcoming: [
-      {
-        subscription: state.users[0].subscription,
-        user: {
-          id: state.users[0].id,
-          email: state.users[0].email,
-          firstName: state.users[0].firstName,
-          lastName: state.users[0].lastName,
-          emailVerified: state.users[0].emailVerified,
-          createdAt: state.users[0].createdAt,
-        },
-      },
-      ...(state.reminderDeletedUser
-        ? [
-            {
-              subscription: {
-                ...state.users[0].subscription,
-                id: "subscription_deleted",
-                userId: "user_deleted",
-              },
-              user: null,
-            },
-          ]
-        : []),
-    ],
-    outbox: state.reminderOutbox,
-    asOf: Date.now(),
-    remindWithinDays: 2,
-    queueWithinDays: 7,
-  })
+  return respond(response, 410, { error: "Requests and reminders retired" })
 }
 
+async function requestsApi(request, response) {
+  state.reviewMutations.push(request.method)
+  return respond(response, 410, { error: "Requests retired" })
+}
+async function remindersApi(request, response) {
+  state.reminderRuns++
+  return respond(response, 410, { error: "Reminders retired" })
+}
 function waitlistApi(response, url) {
   const query = (url.searchParams.get("q") || "").toLowerCase()
   const matches = state.waitlist.filter((entry) =>
@@ -704,6 +433,29 @@ before(async () => {
         return waitlistApi(response, url)
       if (url.pathname === "/api/account/subscription")
         return await customerApi(request, response)
+      if (url.pathname === "/api/account/billing")
+        return respond(response, 200, {
+          enabled: true,
+          intervals: ["monthly", "annual"],
+          prices: {
+            monthly: { amount: 2000, currency: "usd" },
+            annual: { amount: 20000, currency: "usd" },
+          },
+          subscription: accountAccess(state.users[0]).canHost
+            ? {
+                status: "active",
+                endsAt: Date.now() + 30 * day,
+                cancelAtPeriodEnd: false,
+                interval: "monthly",
+                amount: 2000,
+                currency: "usd",
+              }
+            : null,
+          hasCustomer: accountAccess(state.users[0]).canHost,
+          trialDays: null,
+          accessConnected: true,
+          managedBy: "workos",
+        })
       if (url.pathname === "/api/account/dashboard-access") {
         state.dashboardAccessQueries.push(Object.fromEntries(url.searchParams))
         if (state.dashboardAccessDelay)
@@ -781,12 +533,6 @@ afterEach(async () => {
   await context?.close()
 })
 
-async function openAction(action, email = "alice@example.test") {
-  await page
-    .getByRole("button", { name: `${action} for ${email}`, exact: true })
-    .click()
-  await expect(page.getByRole("dialog")).toBeVisible()
-}
 async function save(name) {
   await page
     .getByRole("dialog")
@@ -823,7 +569,7 @@ test("Owners can switch between their individual and admin dashboards", async ()
     .click()
   await expect(page).toHaveURL(`${origin}/account`)
   await expect(
-    page.getByRole("heading", { name: "Access & connected Macs" })
+    page.getByRole("heading", { name: "Subscription", exact: true, level: 1 })
   ).toBeVisible()
   await expect(switcher).toContainText("Individual dashboard")
   await switcher.click()
@@ -848,7 +594,7 @@ test("ordinary customers have no dashboard switcher or admin entry", async () =>
   state.dashboardAccess = false
   await page.goto(`${origin}/account`)
   await expect(
-    page.getByRole("heading", { name: "Access & connected Macs" })
+    page.getByRole("heading", { name: "Subscription", exact: true, level: 1 })
   ).toBeVisible()
   await expect
     .poll(() => state.dashboardAccessQueries.at(-1)?.dashboard)
@@ -864,8 +610,8 @@ test("ordinary customers have no dashboard switcher or admin entry", async () =>
     page.getByRole("navigation", { name: "Account navigation" })
   ).toBeVisible()
   await expect(
-    page.getByRole("button", { name: "Turn off reminders", exact: true })
-  ).toBeEnabled()
+    page.getByRole("button", { name: /request|reminders/i })
+  ).toHaveCount(0)
 })
 
 test("dashboard switching stays hidden while access loads or cannot be verified", async () => {
@@ -887,8 +633,8 @@ test("dashboard switching stays hidden while access loads or cannot be verified"
       page.getByText("Admin dashboard", { exact: true })
     ).toHaveCount(0)
     await expect(
-      page.getByRole("button", { name: "Request extension", exact: true })
-    ).toBeEnabled()
+      page.getByRole("button", { name: /request|reminders/i })
+    ).toHaveCount(0)
   }
 })
 
@@ -939,7 +685,7 @@ test("mobile sidebars open from the header and close after navigating", async ()
     page.getByRole("button", { name: "Switch dashboard", exact: true })
   ).toHaveCount(0)
   await accountNav
-    .getByRole("link", { name: "Connected Macs", exact: true })
+    .getByRole("link", { name: "Authorized devices", exact: true })
     .click()
   await expect(
     page.getByRole("dialog", { name: "Sidebar", exact: true })
@@ -998,19 +744,17 @@ test("server-side search, subscription segments, and pagination include the comp
   ).toHaveCount(0)
   assert.equal(state.listQueries.at(-1).q, "Dan")
   await page.getByRole("button", { name: "Clear filters" }).click()
-  await page.getByRole("tab", { name: "Revoked", exact: true }).click()
-  await expect(page.locator("tbody tr")).toHaveCount(1)
-  await expect(
-    page.getByRole("button", { name: "View dan@example.test", exact: true })
-  ).toBeVisible()
-  await page.getByRole("tab", { name: "Trials", exact: true }).click()
-  await expect(page.locator("tbody tr")).toHaveCount(1)
+  await page.getByRole("tab", { name: "Standard", exact: true }).click()
+  await expect(page.locator("tbody tr")).toHaveCount(2)
   await expect(
     page.getByRole("button", { name: "View alice@example.test", exact: true })
   ).toBeVisible()
-  await page.getByLabel("Expiry", { exact: true }).selectOption("expiring")
-  await expect.poll(() => state.listQueries.at(-1).filter).toBe("expiring")
-  await expect(page.locator("tbody tr")).toHaveCount(1)
+  await expect(
+    page.getByRole("tab", { name: "Trials", exact: true })
+  ).toHaveCount(0)
+  await expect(page.getByLabel("Expiry", { exact: true })).toHaveCount(0)
+  await page.getByRole("tab", { name: "Free accounts", exact: true }).click()
+  await expect(page.locator("tbody tr")).toHaveCount(3)
   await page.getByRole("button", { name: "Clear filters" }).click()
   await page.getByRole("searchbox").fill("Pilot account")
   await expect(page.locator("tbody tr")).toHaveCount(1)
@@ -1023,13 +767,65 @@ test("server-side search, subscription segments, and pagination include the comp
   })
 })
 
-test("the admin overview links live access counts to Accounts filters", async () => {
+test("unavailable access preserves admin account history and device removal", async () => {
+  state.users[0].accessUnavailable = true
+  await page.getByRole("button", { name: "Refresh", exact: true }).click()
+  const row = page.locator("tbody tr").filter({ hasText: "alice@example.test" })
+  await expect(row.getByText("Unknown", { exact: true })).toBeVisible()
+  await expect(row.getByText("Unavailable", { exact: true })).toBeVisible()
+  await expect(row.getByText("Free", { exact: true })).toHaveCount(0)
+  await expect(
+    row.getByText("Offline access deadline", { exact: true })
+  ).toHaveCount(0)
+  await expect(
+    page.getByRole("button", { name: "View bob@example.test", exact: true })
+  ).toBeVisible()
+  await row
+    .getByRole("button", { name: "View alice@example.test", exact: true })
+    .click()
+  const profile = page.getByRole("region", {
+    name: "User management",
+    exact: true,
+  })
+  await expect(
+    profile.getByText("Access unavailable", { exact: true })
+  ).toBeVisible()
+  await expect(profile.getByText("Free account", { exact: true })).toHaveCount(
+    0
+  )
+  await expect(
+    profile.getByText(/We couldn’t check subscription access/)
+  ).toBeVisible()
+  await expect(
+    profile.getByText("Browser test history reason", { exact: true })
+  ).toBeVisible()
+  await expect(
+    profile.getByText(state.users[0].subscription.notes, { exact: true })
+  ).toBeVisible()
+  await profile
+    .getByRole("button", { name: "Remove Alice’s MacBook Pro", exact: true })
+    .click()
+  await save("Remove Mac")
+  assert.equal(state.users[0].devices.length, 1)
+  assert.equal(state.requests.at(-1).action, "remove-device")
+  await expect(
+    profile.getByText("Access unavailable", { exact: true })
+  ).toBeVisible()
+  state.users[0].accessUnavailable = false
+  await page.getByRole("button", { name: "Refresh", exact: true }).click()
+  await expect(profile.getByText("Standard", { exact: true })).toBeVisible()
+  await expect(
+    profile.getByText("Access unavailable", { exact: true })
+  ).toHaveCount(0)
+})
+
+test("the admin overview links verified access counts to Accounts filters", async () => {
   await page.goto(`${origin}/admin`)
   await expect(
-    page.getByText("1 trial · 1 standard", { exact: true })
+    page.getByText("Current access checks", { exact: true })
   ).toBeVisible()
   await page
-    .getByRole("button", { name: "View active access", exact: true })
+    .getByRole("button", { name: "View verified access", exact: true })
     .click()
   await expect(page.locator("tbody tr")).toHaveCount(2)
   await expect(
@@ -1043,6 +839,27 @@ test("the admin overview links live access counts to Accounts filters", async ()
       )
     )
     .toBe(true)
+})
+
+test("the overview labels stale proof as needing verification and opens all accounts", async () => {
+  state.users[4].managed.expiresAt = Date.now() - 1
+  await page.goto(`${origin}/admin`)
+  await expect(
+    page.getByRole("img", {
+      name: "Verified access: 1, Needs verification: 1",
+      exact: true,
+    })
+  ).toBeVisible()
+  await expect(
+    page.getByText("Active subscriptions", { exact: true })
+  ).toHaveCount(0)
+  await expect(page.getByText("Expired", { exact: true })).toHaveCount(0)
+  await page.getByRole("button", { name: /^Needs verification/ }).click()
+  await expect(
+    page.getByRole("heading", { name: "Accounts", exact: true })
+  ).toBeVisible()
+  await expect(page.locator("tbody tr")).toHaveCount(3)
+  assert.equal(state.listQueries.at(-1).filter, "all")
 })
 
 test("waitlist signups have real source counts, server search, pagination, and a scoped export", async () => {
@@ -1085,7 +902,7 @@ test("waitlist signups have real source counts, server search, pagination, and a
     .toBe(true)
 })
 
-test("old profile links display access, reminders, and account history", async () => {
+test("old profile links preserve access and read-only account history", async () => {
   await page.goto(`${origin}/admin?view=users&user=user_eva`)
   await expect(
     page.getByRole("heading", { name: "Eva Example", exact: true })
@@ -1093,9 +910,9 @@ test("old profile links display access, reminders, and account history", async (
   await expect(
     page.getByText("Browser test history reason", { exact: true })
   ).toBeVisible()
-  await expect(
-    page.getByText("Expiry reminders", { exact: true })
-  ).toBeVisible()
+  await expect(page.getByText("Expiry reminders", { exact: true })).toHaveCount(
+    0
+  )
   await expect(page.getByRole("button", { name: /renewal/i })).toHaveCount(0)
   await page.reload()
   await expect(
@@ -1105,136 +922,6 @@ test("old profile links display access, reminders, and account history", async (
     path: join(screenshots, "admin-user-profile-desktop.png"),
     fullPage: true,
   })
-})
-
-test("Owners can disable and enable account reminders without changing access or Macs", async () => {
-  await page.goto(`${origin}/admin?view=accounts&user=user_alice`)
-  await expect(
-    page.getByRole("button", {
-      name: "Turn off reminders for alice@example.test",
-      exact: true,
-    })
-  ).toBeEnabled()
-  const user = state.users[0]
-  const { startsAt, endsAt, status, type } = user.subscription
-  const devices = structuredClone(user.devices)
-  await openAction("Turn off reminders")
-  await page
-    .getByLabel(/Reason for this change/)
-    .fill("Customer requested no emails")
-  await save("Turn off reminders")
-  await expect(
-    page.getByText("Expiry reminders disabled for alice@example.test.", {
-      exact: true,
-    })
-  ).toBeVisible()
-  await expect(
-    page.getByRole("button", {
-      name: "Turn on reminders for alice@example.test",
-      exact: true,
-    })
-  ).toBeEnabled()
-  assert.equal(user.subscription.remindersEnabled, false)
-  assert.deepEqual(state.requests.at(-1), {
-    action: "set-reminders",
-    userId: user.id,
-    reason: "Customer requested no emails",
-    expectedRevision: 1,
-    enabled: false,
-  })
-  await openAction("Turn on reminders")
-  await save("Turn on reminders")
-  await expect(
-    page.getByRole("button", {
-      name: "Turn off reminders for alice@example.test",
-      exact: true,
-    })
-  ).toBeEnabled()
-  assert.equal(user.subscription.remindersEnabled, true)
-  assert.equal(state.requests.at(-1).expectedRevision, 2)
-  assert.equal(state.requests.at(-1).enabled, true)
-  assert.deepEqual(
-    {
-      startsAt: user.subscription.startsAt,
-      endsAt: user.subscription.endsAt,
-      status: user.subscription.status,
-      type: user.subscription.type,
-    },
-    { startsAt, endsAt, status, type }
-  )
-  assert.deepEqual(user.devices, devices)
-  assert.equal(state.accountRequests.length, 0)
-})
-
-test("Owner reminder conflicts require refresh and failures preserve the preference", async () => {
-  await page.goto(`${origin}/admin?view=accounts&user=user_alice`)
-  await expect(
-    page.getByRole("button", {
-      name: "Turn off reminders for alice@example.test",
-      exact: true,
-    })
-  ).toBeEnabled()
-  state.users[0].subscription.revision++
-  await openAction("Turn off reminders")
-  await page
-    .getByRole("dialog")
-    .getByRole("button", {
-      name: "Turn off reminders",
-      exact: true,
-    })
-    .click()
-  await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
-    "changed while you were editing"
-  )
-  await expect(
-    page.getByRole("dialog").getByRole("button", {
-      name: "Turn off reminders",
-      exact: true,
-    })
-  ).toBeDisabled()
-  assert.equal(state.requests.at(-1).expectedRevision, 1)
-  assert.equal(state.users[0].subscription.remindersEnabled, true)
-  await page
-    .getByRole("button", {
-      name: "Refresh account data",
-      exact: true,
-    })
-    .click()
-  await expect(page.getByRole("dialog")).toHaveCount(0)
-  await expect(
-    page.getByRole("button", {
-      name: "Turn off reminders for alice@example.test",
-      exact: true,
-    })
-  ).toBeEnabled()
-  state.failNext = 503
-  await openAction("Turn off reminders")
-  const submit = page.getByRole("dialog").getByRole("button", {
-    name: "Turn off reminders",
-    exact: true,
-  })
-  await submit.click()
-  await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
-    "Test action unavailable"
-  )
-  await expect(submit).toBeEnabled()
-  assert.equal(state.requests.at(-1).expectedRevision, 2)
-  assert.equal(state.users[0].subscription.remindersEnabled, true)
-  state.failNext = 401
-  await submit.click()
-  await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
-    "session expired"
-  )
-  await expect(submit).toBeDisabled()
-  await expect(
-    page.getByRole("dialog").getByRole("link", { name: "Sign in" })
-  ).toHaveAttribute("target", "_blank")
-  assert.equal(state.users[0].subscription.remindersEnabled, true)
-  await expect(
-    page.getByText("Expiry reminders disabled for alice@example.test.", {
-      exact: true,
-    })
-  ).toHaveCount(0)
 })
 
 test("an admin removes a named Mac from a free account without granting access", async () => {
@@ -1299,7 +986,7 @@ test("opening a profile while search is debouncing preserves account details", a
 
 test("all workspace sections navigate and failed refreshes can recover", async () => {
   const nav = page.getByRole("navigation", { name: "Admin navigation" })
-  for (const name of ["Overview", "Accounts", "Waitlist", "Operations"]) {
+  for (const name of ["Overview", "Accounts", "Waitlist"]) {
     await nav.getByRole("button", { name: new RegExp(`^${name}`) }).click()
     await expect(page.getByRole("heading", { name, exact: true })).toBeVisible()
     assert.equal(new URL(page.url()).pathname, "/admin")
@@ -1318,7 +1005,7 @@ test("all workspace sections navigate and failed refreshes can recover", async (
   ).toBeVisible()
 })
 
-test("workspace Refresh updates the visible waitlist and operations panels", async () => {
+test("workspace Refresh updates the visible waitlist panel", async () => {
   const nav = page.getByRole("navigation", { name: "Admin navigation" })
   await nav.getByRole("button", { name: /^Waitlist/ }).click()
   await expect(page.getByText("2 of 3 matching signups")).toBeVisible()
@@ -1338,346 +1025,34 @@ test("workspace Refresh updates the visible waitlist and operations panels", asy
     page.getByText("new@example.test", { exact: true })
   ).toBeVisible()
   await expect(page.getByText("2 of 4 matching signups")).toBeVisible()
-  await nav.getByRole("button", { name: /^Operations/ }).click()
-  await expect(
-    page.getByText("No customer requests in this view.", { exact: true })
-  ).toBeVisible()
-  state.accountRequests.push({
-    id: "request_00000000-0000-4000-8000-000000000006",
-    userId: "user_alice",
-    email: "alice@example.test",
-    action: "renewal",
-    deviceId: null,
-    message: "Please extend my access",
-    status: "pending",
-    revision: 1,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-    adminNote: "",
-    handledBy: "",
-  })
-  state.reminderMode = "resend"
-  await page.getByRole("button", { name: "Refresh", exact: true }).click()
-  const requests = page.getByRole("region", { name: /Customer requests/ })
-  await expect(
-    requests.getByText("Access request · alice@example.test", { exact: true })
-  ).toBeVisible()
-  await expect(
-    requests.getByRole("button", { name: "Review request", exact: true })
-  ).toBeVisible()
-  await expect(page.getByText(/Reminder delivery is configured/)).toBeVisible()
-  assert.equal(state.requests.length, 0)
+  await expect(nav.getByRole("button", { name: /Operations/ })).toHaveCount(0)
+  assert.equal(state.reviewMutations.length, 0)
+  assert.equal(state.reminderRuns, 0)
 })
 
-test("grants support 7-day trials, standard presets, custom durations, and exact expiry", async () => {
-  await openAction("Grant access", "cara@example.test")
-  const dialog = page.getByRole("dialog")
-  await expect(dialog.getByLabel("Access type")).toHaveValue("trial")
-  await expect(dialog.getByLabel("Access length")).toHaveValue("7")
-  await dialog.getByLabel(/Admin notes/).fill("Manually reviewed account")
-  await dialog
-    .getByLabel(/Reason for this change/)
-    .fill("Manual trial approval")
-  state.delayNext = 300
-  await dialog
-    .getByRole("button", { name: "Grant access", exact: true })
-    .click()
-  await expect(dialog.getByRole("button", { name: "Saving…" })).toBeDisabled()
+test("WorkOS-managed accounts offer subscription details and no manual access controls", async () => {
+  await page.goto(`${origin}/admin?view=accounts&user=user_alice`)
   await expect(
-    dialog.getByRole("button", { name: "Cancel", exact: true })
-  ).toBeDisabled()
-  await expect(page.getByRole("dialog")).toHaveCount(0)
-  assert.ok(
-    Math.abs(state.requests.at(-1).endsAt - Date.now() - 7 * day) < 3000
-  )
-  assert.equal(state.requests.at(-1).expectedRevision, 0)
-  assert.equal(state.requests.at(-1).reason, "Manual trial approval")
-  assert.equal(state.requests.at(-1).notes, "Manually reviewed account")
-  await expect(
-    page.getByRole("button", { name: "Refresh", exact: true })
-  ).toBeEnabled()
-  await openAction("Grant access", "cara@example.test")
-  await page.getByLabel("Access type").selectOption("regular")
-  await expect(page.getByLabel("Access length")).toHaveValue("30")
-  await page.getByLabel("Access length").selectOption("custom")
-  await page.getByLabel("Number of days").fill("0")
-  await expect(
-    page.getByRole("button", { name: "Grant access", exact: true })
-  ).toBeDisabled()
-  await page.getByLabel("Number of days").fill("1.5")
-  await expect(
-    page.getByRole("button", { name: "Grant access", exact: true })
-  ).toBeDisabled()
-  await page.getByLabel("Number of days").fill("42")
-  await save("Grant access")
-  assert.ok(
-    Math.abs(state.requests.at(-1).endsAt - Date.now() - 42 * day) < 3000
-  )
-  assert.equal(state.requests.at(-1).type, "regular")
-  await openAction("Grant access", "cara@example.test")
-  await page.getByLabel("Choose expiry by").selectOption("date")
-  await page.getByLabel("New expiry", { exact: false }).fill("2099-01-01T12:00")
-  await expect(
-    page.getByRole("button", { name: "Grant access", exact: true })
-  ).toBeDisabled()
-  const target = new Date(Date.now() + 120 * day)
-  const local = new Intl.DateTimeFormat("sv-SE", {
-    timeZone: "America/New_York",
-    dateStyle: "short",
-    timeStyle: "short",
-  })
-    .format(target)
-    .replace(" ", "T")
-  await page.getByLabel("New expiry", { exact: false }).fill(local)
-  await save("Grant access")
-  assert.equal(typeof state.requests.at(-1).endsAt, "number")
-  assert.equal("durationDays" in state.requests.at(-1), false)
-})
-
-test("details, notes, extension, revoke, restore, and Mac reset use guarded mutations", async () => {
-  await page
-    .getByRole("button", { name: "View alice@example.test", exact: true })
-    .click()
-  await expect(
-    page.getByRole("heading", { name: "Activity history" })
+    page.getByText("WorkOS subscription access", { exact: true })
   ).toBeVisible()
-  await expect(page.getByText("Browser test history reason")).toBeVisible()
-  await expect(page.getByText(firstMac, { exact: true })).toBeVisible()
-  await page.getByRole("button", { name: "Edit notes", exact: true }).click()
-  await page.getByLabel(/Admin notes/).fill("Updated admin note")
-  await save("Save notes")
-  assert.equal(state.requests.at(-1).action, "update-notes")
-  assert.equal(state.requests.at(-1).notes, "Updated admin note")
-  await openAction("Extend access")
-  const currentExpiry = state.users[0].subscription.endsAt
-  const startsAt = state.users[0].subscription.startsAt
-  await page.getByLabel("Add time").selectOption("14")
-  await save("Extend access")
-  assert.equal(state.users[0].subscription.endsAt, currentExpiry + 14 * day)
-  assert.equal(state.users[0].subscription.startsAt, startsAt)
-  await openAction("Revoke access")
   await expect(
-    page
-      .getByRole("dialog")
-      .getByRole("button", { name: "Close account dialog" })
-  ).toBeFocused()
-  await page.keyboard.press("Escape")
-  await expect(page.getByRole("dialog")).toHaveCount(0)
+    page.getByText("Offline access valid until", { exact: true })
+  ).toBeVisible()
   await expect(
     page.getByRole("button", {
-      name: "Revoke access for alice@example.test",
-      exact: true,
+      name: /Grant access|Extend access|Restore access|Revoke access|reminders/i,
     })
-  ).toBeFocused()
-  await openAction("Revoke access")
-  await page.getByLabel(/Reason for this change/).fill("Access review")
-  await save("Revoke access")
-  assert.equal(state.users[0].subscription.status, "revoked")
-  await openAction("Restore access")
-  await save("Restore access")
-  assert.equal(state.users[0].subscription.status, "active")
-  await page
-    .getByRole("button", { name: "Remove Alice’s MacBook Pro", exact: true })
-    .click()
-  await expect(
-    page.getByRole("dialog").getByText(/Alice’s MacBook Pro/)
-  ).toBeVisible()
-  await save("Remove Mac")
-  assert.deepEqual(
-    state.users[0].devices.map((device) => device.id),
-    [secondMac]
-  )
-  assert.equal(
-    state.requests.at(-1).sessionId,
-    "00000000-0000-4000-8000-000000000001"
-  )
-  assert.equal(state.requests.at(-1).action, "remove-device")
-  await page
-    .getByRole("button", { name: "Back to accounts", exact: true })
-    .click()
-  await loadAll()
-  await openAction("Restore access", "dan@example.test")
-  state.users[3].subscription.endsAt = Date.now() - day
-  await save("Restore access")
-  await expect(
-    page
-      .locator("tbody tr")
-      .filter({ hasText: "dan@example.test" })
-      .getByText("Expired", { exact: true })
-  ).toBeVisible()
-})
-
-test("exact extensions preserve revoked state and expired restores explain the outcome", async () => {
-  await loadAll()
-  state.users[3].subscription.endsAt = Date.now() - day
-  await page.getByRole("button", { name: "Refresh", exact: true }).click()
-  await expect(
-    page.getByRole("button", { name: "Refresh", exact: true })
-  ).toBeEnabled()
-  await openAction("Restore access", "dan@example.test")
-  await expect(
-    page.getByText(/Expired access must also be extended/)
-  ).toBeVisible()
-  await page.getByRole("button", { name: "Cancel", exact: true }).click()
-  await openAction("Extend access", "dan@example.test")
-  await expect(
-    page.getByText(/Revoked access must be restored separately/)
-  ).toBeVisible()
-  await page.getByLabel("Choose expiry by").selectOption("date")
-  const target = new Date(Date.now() + 30 * day)
-  const local = new Intl.DateTimeFormat("sv-SE", {
-    timeZone: "America/New_York",
-    dateStyle: "short",
-    timeStyle: "short",
-  })
-    .format(target)
-    .replace(" ", "T")
-  await page.getByLabel("New expiry", { exact: false }).fill(local)
-  await save("Extend access")
-  assert.equal(state.requests.at(-1).action, "extend")
-  assert.equal(typeof state.requests.at(-1).endsAt, "number")
-  assert.equal(state.users[3].subscription.status, "revoked")
-})
-
-test("conflicts, server failures, and session expiry never report a successful change", async () => {
-  state.failNext = 409
-  await openAction("Extend access")
-  await page.getByRole("button", { name: "Extend access", exact: true }).click()
-  await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
-    "changed while you were editing"
-  )
-  await expect(
-    page.getByRole("button", { name: "Extend access", exact: true })
-  ).toBeDisabled()
-  await page
-    .getByRole("button", { name: "Refresh account data", exact: true })
-    .click()
-  await expect(page.getByRole("dialog")).toHaveCount(0)
-  await expect(
-    page.getByRole("button", { name: "Refresh", exact: true })
-  ).toBeEnabled()
-  state.failNext = 503
-  await openAction("Extend access")
-  await page.getByRole("button", { name: "Extend access", exact: true }).click()
-  await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
-    "Test action unavailable"
-  )
-  await expect(
-    page.getByRole("button", { name: "Extend access", exact: true })
-  ).toBeEnabled()
-  state.failNext = 401
-  await page.getByRole("button", { name: "Extend access", exact: true }).click()
-  await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
-    "session expired"
-  )
-  await expect(
-    page.getByRole("dialog").getByRole("link", { name: "Sign in" })
-  ).toHaveAttribute("target", "_blank")
-  await expect(
-    page.getByRole("button", { name: "Extend access", exact: true })
-  ).toBeDisabled()
-})
-
-test("mobile layout and modal keyboard focus remain usable", async () => {
-  await page.setViewportSize({ width: 390, height: 844 })
-  await expect
-    .poll(() =>
-      page.evaluate(
-        () => document.documentElement.scrollWidth <= window.innerWidth
-      )
-    )
-    .toBe(true)
-  await expect(page.getByRole("searchbox")).toBeVisible()
-  await page.screenshot({
-    path: join(screenshots, "subscriptions-mobile.png"),
-    fullPage: true,
-  })
-  await openAction("Grant access", "cara@example.test")
-  const dialog = page.getByRole("dialog")
-  await expect(dialog).toBeVisible()
-  await expect(
-    dialog.getByRole("button", { name: "Close account dialog", exact: true })
-  ).toBeFocused()
-  await page.keyboard.press("Shift+Tab")
-  await expect
-    .poll(() =>
-      dialog.evaluate((element) => element.contains(document.activeElement))
-    )
-    .toBe(true)
-  await page.keyboard.press("Tab")
-  await expect
-    .poll(() =>
-      dialog.evaluate((element) => element.contains(document.activeElement))
-    )
-    .toBe(true)
-  await page.screenshot({
-    path: join(screenshots, "subscription-grant-mobile.png"),
-  })
-  await page.keyboard.press("Escape")
-  await expect(dialog).toHaveCount(0)
-})
-
-test("the customer portal displays only customer data and submits renewal requests", async () => {
-  await page.goto(`${origin}/account`)
-  await expect(
-    page.getByRole("heading", { name: "Access & connected Macs" })
-  ).toBeVisible()
-  await expect(page.getByText("Trial access", { exact: true })).toBeVisible()
-  await expect(page.getByText("2 / 2", { exact: true })).toBeVisible()
-  await expect(page.getByText(/Pilot account/)).toHaveCount(0)
-  await page
-    .getByRole("button", { name: "Request extension", exact: true })
-    .click()
-  await expect(page.getByRole("dialog")).toBeVisible()
-  await page
-    .getByLabel(/Message to the administrator/)
-    .fill("Please renew <script>window.injected=true</script>")
-  await page
-    .getByRole("button", { name: "Submit request", exact: true })
-    .click()
-  await expect(page.getByRole("dialog")).toHaveCount(0)
-  await expect(
-    page.getByRole("button", { name: "Request awaiting review", exact: true })
-  ).toBeDisabled()
-  assert.equal(state.customerMutations.at(-1).action, "request-renewal")
-  assert.equal(state.users[0].subscription.revision, 1)
-  assert.equal(await page.evaluate(() => window.injected), undefined)
-  assert.equal(state.accountRequests.length, 1)
-  assert.equal(state.accountRequests[0].action, "renewal")
-  assert.equal(state.users[0].devices.length, 2)
-  state.accountRequests.find((item) => item.action === "renewal").adminNote =
-    "Secret admin context"
-  state.accountRequests.find((item) => item.action === "renewal").status =
-    "resolved"
-  await page.getByRole("button", { name: "Refresh", exact: true }).click()
-  await expect(page.getByText("Completed", { exact: true })).toBeVisible()
-  await expect(
-    page.getByRole("button", { name: "Request extension", exact: true })
-  ).toBeEnabled()
-  await expect(
-    page.getByText("Secret admin context", { exact: false })
   ).toHaveCount(0)
-  await page.screenshot({
-    path: join(screenshots, "customer-account-desktop.png"),
-    fullPage: true,
-  })
-  await page.setViewportSize({ width: 390, height: 844 })
-  await page.reload()
   await expect(
-    page.getByRole("button", { name: "Request extension", exact: true })
+    page.getByText("Historical admin notes", { exact: true })
   ).toBeVisible()
-  await expect(page.locator("header")).toHaveCount(1)
-  await expect
-    .poll(() =>
-      page.evaluate(
-        () => document.documentElement.scrollWidth <= window.innerWidth
-      )
-    )
-    .toBe(true)
-  await page.screenshot({
-    path: join(screenshots, "customer-account-mobile.png"),
-    fullPage: true,
-  })
+  await expect(page.getByText(/Pilot account/)).toBeVisible()
+  const nav = page.getByRole("navigation", { name: "Admin navigation" })
+  await expect(
+    nav.getByRole("button", { name: /Operations|Requests/ })
+  ).toHaveCount(0)
+  assert.equal(state.requests.length, 0)
+  assert.equal(state.reviewMutations.length, 0)
 })
 
 test("connected computers show their names and last use in removal confirmation", async () => {
@@ -1693,12 +1068,25 @@ test("connected computers show their names and last use in removal confirmation"
   await page.route("**/api/account/subscription", (route) =>
     route.fulfill({ json: account })
   )
-  await page.goto(`${origin}/account`)
+  await page.goto(`${origin}/account#devices`)
   await expect(
     page.getByText("Studio MacBook Pro", { exact: true })
   ).toBeVisible()
   await expect(page.getByText("Computer 2", { exact: true })).toBeVisible()
   await expect(page.getByText(/Last used/)).toHaveCount(1)
+  const authorized = page.getByRole("region", {
+    name: "Authorized devices",
+    exact: true,
+  })
+  await expect(
+    authorized
+      .locator("ol > li")
+      .filter({ hasText: "Computer 2" })
+      .getByText(/Authorized/)
+  ).toBeVisible()
+  await expect(
+    authorized.getByText("Mac identifier", { exact: true })
+  ).toHaveCount(0)
   await page
     .getByRole("button", { name: "Remove Studio MacBook Pro", exact: true })
     .click()
@@ -1717,7 +1105,7 @@ test("connected computers show their names and last use in removal confirmation"
 })
 
 test("customer Mac removal requires confirmation and removes only the selected Mac immediately", async () => {
-  await page.goto(`${origin}/account`)
+  await page.goto(`${origin}/account#devices`)
   const subscriptionBefore = structuredClone(state.users[0].subscription)
   const devicesBefore = structuredClone(state.users[0].devices)
   const firstRemove = page.getByRole("button", {
@@ -1750,9 +1138,16 @@ test("customer Mac removal requires confirmation and removes only the selected M
   await firstRemove.click()
   await dialog.getByRole("button", { name: "Remove Mac", exact: true }).click()
   await expect(dialog).toHaveCount(0)
-  await expect(page.getByText("1 / 2", { exact: true })).toBeVisible()
-  await expect(page.getByText(firstMac, { exact: true })).toHaveCount(0)
-  await expect(page.getByText(secondMac, { exact: true })).toHaveCount(1)
+  const devices = page.getByRole("region", {
+    name: "Authorized devices",
+    exact: true,
+  })
+  await expect(devices.locator("ol > li")).toHaveCount(1)
+  await expect(
+    devices.getByRole("button", { name: "Remove Alice’s iMac", exact: true })
+  ).toBeVisible()
+  await expect(devices.getByText(firstMac, { exact: true })).toHaveCount(0)
+  await expect(devices.getByText(secondMac, { exact: true })).toHaveCount(0)
   assert.deepEqual(state.customerMutations, [
     {
       action: "remove-device",
@@ -1777,7 +1172,7 @@ test("customer Mac removal requires confirmation and removes only the selected M
 })
 
 test("customer Mac removal conflicts require fresh account data and a new confirmation", async () => {
-  await page.goto(`${origin}/account`)
+  await page.goto(`${origin}/account#devices`)
   await page
     .getByRole("button", { name: "Remove Alice’s MacBook Pro", exact: true })
     .click()
@@ -1809,7 +1204,7 @@ test("customer Mac removal conflicts require fresh account data and a new confir
 })
 
 test("customer Mac removal preserves devices when the session expires", async () => {
-  await page.goto(`${origin}/account`)
+  await page.goto(`${origin}/account#devices`)
   const subscriptionBefore = structuredClone(state.users[0].subscription)
   const devicesBefore = structuredClone(state.users[0].devices)
   await page
@@ -1856,7 +1251,7 @@ test("an existing Mac removal request does not block direct customer removal", a
     adminNote: "",
     handledBy: "",
   })
-  await page.goto(`${origin}/account`)
+  await page.goto(`${origin}/account#devices`)
   const remove = page.getByRole("button", {
     name: "Remove Alice’s MacBook Pro",
     exact: true,
@@ -1874,440 +1269,6 @@ test("an existing Mac removal request does not block direct customer removal", a
   )
   assert.equal(state.accountRequests.length, 1)
   assert.equal(state.accountRequests[0].revision, 1)
-})
-
-test("reminder preferences never change access or block extension requests", async () => {
-  await page.goto(`${origin}/account`)
-  const endsAt = state.users[0].subscription.endsAt
-  await page
-    .getByRole("button", { name: "Turn off reminders", exact: true })
-    .click()
-  await expect(
-    page.getByRole("button", { name: "Turn on reminders", exact: true })
-  ).toBeVisible()
-  assert.equal(state.users[0].subscription.remindersEnabled, false)
-  assert.equal(state.users[0].subscription.endsAt, endsAt)
-  await expect(
-    page.getByRole("button", { name: "Request extension", exact: true })
-  ).toBeEnabled()
-  assert.equal(state.accountRequests.length, 0)
-  await page
-    .getByRole("button", { name: "Turn on reminders", exact: true })
-    .click()
-  assert.equal(state.users[0].subscription.remindersEnabled, true)
-  assert.equal(state.customerMutations.at(-1).expectedRevision, 2)
-})
-
-test("stale reminder preferences refresh without changing access", async () => {
-  await page.goto(`${origin}/account`)
-  const endsAt = state.users[0].subscription.endsAt
-  await expect(
-    page.getByRole("button", { name: "Turn off reminders", exact: true })
-  ).toBeEnabled()
-  state.users[0].subscription.revision++
-  await page
-    .getByRole("button", { name: "Turn off reminders", exact: true })
-    .click()
-  await expect(page.getByRole("main").getByRole("alert")).toContainText(
-    "Revision conflict"
-  )
-  assert.equal(state.users[0].subscription.remindersEnabled, true)
-  await page
-    .getByRole("button", { name: "Turn off reminders", exact: true })
-    .click()
-  await expect(
-    page.getByRole("button", { name: "Turn on reminders", exact: true })
-  ).toBeVisible()
-  assert.equal(state.users[0].subscription.endsAt, endsAt)
-})
-
-test("free accounts request access and keep their named Macs", async () => {
-  state.users[0].subscription = null
-  await page.goto(`${origin}/account`)
-  await expect(
-    page.getByRole("button", { name: "Request access", exact: true })
-  ).toBeEnabled()
-  await expect(
-    page.getByText("Alice’s MacBook Pro", { exact: true })
-  ).toBeVisible()
-  await expect(page.getByRole("button", { name: /reminders/i })).toHaveCount(0)
-  await page
-    .getByRole("button", { name: "Request access", exact: true })
-    .click()
-  await page
-    .getByRole("button", { name: "Submit request", exact: true })
-    .click()
-  await expect(page.getByRole("dialog")).toHaveCount(0)
-  assert.equal(state.users[0].subscription, null)
-  assert.equal(state.accountRequests[0].status, "pending")
-})
-
-test("customer request forms preserve keyboard focus and handle rate and session errors", async () => {
-  await page.goto(`${origin}/account`)
-  await page
-    .getByRole("button", { name: "Request extension", exact: true })
-    .click()
-  const dialog = page.getByRole("dialog")
-  await expect(
-    dialog.getByRole("button", { name: "Cancel", exact: true })
-  ).toBeFocused()
-  await page.keyboard.press("Tab")
-  assert.equal(
-    await dialog.evaluate((element) =>
-      element.contains(document.activeElement)
-    ),
-    true
-  )
-  state.customerFailNext = 429
-  await dialog.getByRole("button", { name: "Submit request" }).click()
-  await expect(dialog.getByRole("alert")).toContainText("Too many requests")
-  await expect(
-    dialog.getByRole("button", { name: "Submit request" })
-  ).toBeEnabled()
-  state.customerFailNext = 401
-  await dialog.getByRole("button", { name: "Submit request" }).click()
-  await expect(
-    dialog.getByRole("button", { name: "Submit request" })
-  ).toBeDisabled()
-  await expect(
-    dialog.getByRole("link", { name: "Sign in", exact: true })
-  ).toHaveAttribute("target", "_blank")
-  await dialog.getByLabel(/Message to the administrator/).focus()
-  await page.keyboard.press("Shift+Tab")
-  await expect(
-    dialog.getByRole("link", { name: "Sign in", exact: true })
-  ).toBeFocused()
-  await page.keyboard.press("Escape")
-  await expect(dialog).toHaveCount(0)
-})
-
-test("request acknowledgement preserves access and approval extends access atomically", async () => {
-  state.accountRequests = [
-    {
-      id: "request_00000000-0000-4000-8000-000000000001",
-      userId: "user_alice",
-      email: "alice@example.test",
-      action: "renewal",
-      deviceId: null,
-      message: "Please renew <script>window.injected=true</script>",
-      status: "pending",
-      revision: 1,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      adminNote: "",
-      handledBy: "",
-    },
-  ]
-  await page
-    .getByRole("navigation", { name: "Admin navigation" })
-    .getByRole("button", { name: /^Operations/ })
-    .click()
-  await page
-    .getByRole("button", { name: "Refresh requests", exact: true })
-    .click()
-  await page
-    .getByRole("button", { name: "Review request", exact: true })
-    .click()
-  await page.getByLabel(/Admin review note/).fill("Follow up with customer")
-  await page.getByRole("button", { name: "Save review", exact: true }).click()
-  await expect(
-    page.getByRole("button", { name: "Review request", exact: true })
-  ).toBeVisible()
-  assert.equal(state.accountRequests[0].status, "acknowledged")
-  assert.equal(state.accountRequests[0].adminNote, "Follow up with customer")
-  assert.equal(state.users[0].subscription.revision, 1)
-  assert.equal(await page.evaluate(() => window.injected), undefined)
-  await page.getByRole("button", { name: "Open account", exact: true }).click()
-  await expect(
-    page.getByRole("heading", { name: "User management", exact: true })
-  ).toBeVisible()
-  await page
-    .getByRole("navigation", { name: "Admin navigation" })
-    .getByRole("button", { name: /^Operations/ })
-    .click()
-  await page
-    .getByRole("button", { name: "Approve and extend", exact: true })
-    .click()
-  await page.getByLabel(/Admin review note/).fill("Follow up with customer")
-  await save("Approve and extend")
-  assert.equal(state.users[0].subscription.revision, 2)
-  await expect(
-    page.getByText("No customer requests in this view.", { exact: true })
-  ).toBeVisible()
-  assert.equal(state.accountRequests[0].status, "resolved")
-  await page.getByLabel("Include completed and declined requests").check()
-  await page.getByRole("button", { name: "View review", exact: true }).click()
-  await expect(
-    page.getByRole("button", { name: "Save review", exact: true })
-  ).toHaveCount(0)
-  await expect(
-    page.getByText("Follow up with customer", { exact: false })
-  ).toBeVisible()
-  await page.getByRole("button", { name: "Close review", exact: true }).click()
-  await page.screenshot({
-    path: join(screenshots, "admin-request-queue.png"),
-    fullPage: true,
-  })
-})
-
-test("request conflicts require refresh and daily reminder checks require configured delivery", async () => {
-  state.accountRequests = [
-    {
-      id: "request_00000000-0000-4000-8000-000000000002",
-      userId: "user_alice",
-      email: "alice@example.test",
-      action: "reset-device",
-      deviceId: secondMac,
-      message: "Please remove this Mac",
-      status: "pending",
-      revision: 1,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      adminNote: "",
-      handledBy: "",
-    },
-  ]
-  await page
-    .getByRole("navigation", { name: "Admin navigation" })
-    .getByRole("button", { name: /^Operations/ })
-    .click()
-  await page
-    .getByRole("button", { name: "Refresh requests", exact: true })
-    .click()
-  await page
-    .getByRole("button", { name: "Review request", exact: true })
-    .click()
-  state.reviewFailNext = 409
-  await page.getByRole("button", { name: "Save review", exact: true }).click()
-  await expect(
-    page.getByRole("region", { name: /Customer requests/ }).getByRole("alert")
-  ).toContainText("request changed")
-  await expect(
-    page.getByRole("button", { name: "Save review", exact: true })
-  ).toBeDisabled()
-  await page
-    .getByRole("navigation", { name: "Admin navigation" })
-    .getByRole("button", { name: /^Operations/ })
-    .click()
-  await page
-    .getByRole("button", { name: "Refresh requests", exact: true })
-    .click()
-  await page
-    .getByRole("button", { name: "Review request", exact: true })
-    .click()
-  await page
-    .getByLabel("Review outcome", { exact: true })
-    .selectOption("reject")
-  await page.getByRole("button", { name: "Save review", exact: true }).click()
-  assert.equal(state.accountRequests[0].status, "rejected")
-  await expect(page.getByText(/Email delivery is disabled/)).toBeVisible()
-  await expect(
-    page.getByRole("button", { name: "Check reminders now", exact: true })
-  ).toBeDisabled()
-  assert.equal(state.reminderRuns, 0)
-  state.reminderMode = "resend"
-  await page
-    .getByRole("button", { name: "Refresh renewal queue", exact: true })
-    .click()
-  await expect(page.getByText(/Reminder delivery is configured/)).toBeVisible()
-  const runResponse = page.waitForResponse(
-    (response) =>
-      response.url().endsWith("/api/admin/subscription-reminders") &&
-      response.request().method() === "POST"
-  )
-  await page
-    .getByRole("button", { name: "Check reminders now", exact: true })
-    .click()
-  await expect(
-    page.getByText("Reminder history (1)", { exact: true })
-  ).toBeVisible()
-  await page.getByText("Reminder history (1)", { exact: true }).click()
-  await expect(
-    page.getByText("Your Photodepot trial ends soon", { exact: true })
-  ).toBeVisible()
-  await expect(page.getByText("sent", { exact: true })).toBeVisible()
-  assert.equal((await (await runResponse).json()).result.sent, 1)
-  assert.equal(state.reminderRuns, 1)
-})
-
-test("queue account details preserve verification and signup metadata", async () => {
-  state.users[0].emailVerified = false
-  state.users[0].createdAt = Date.now() - 20 * day
-  state.reminderDeletedUser = true
-  await page
-    .getByRole("navigation", { name: "Admin navigation" })
-    .getByRole("button", { name: /^Operations/ })
-    .click()
-  await page.getByRole("button", { name: "Refresh renewal queue" }).click()
-  const reminders = page.getByRole("region", { name: "Daily renewal queue" })
-  await expect(
-    reminders.getByText("user_deleted", { exact: true })
-  ).toBeVisible()
-  await expect(
-    reminders.getByRole("button", { name: "Review access", exact: true })
-  ).toHaveCount(1)
-  await page.getByRole("button", { name: "Review access", exact: true }).click()
-  const profile = page.getByRole("region", {
-    name: "User management",
-    exact: true,
-  })
-  await expect(
-    profile.getByText("Email unverified", { exact: true })
-  ).toBeVisible()
-  const joined = new Date(state.users[0].createdAt).toLocaleString("en-US", {
-    timeZone: "America/New_York",
-    dateStyle: "medium",
-    timeStyle: "short",
-  })
-  await expect(profile.getByText(joined, { exact: true })).toBeVisible()
-  state.accountRequests = [
-    {
-      id: "request_00000000-0000-4000-8000-000000000003",
-      userId: "user_alice",
-      email: "alice@example.test",
-      action: "renewal",
-      deviceId: null,
-      message: "",
-      status: "pending",
-      revision: 1,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      adminNote: "",
-      handledBy: "",
-    },
-    {
-      id: "request_00000000-0000-4000-8000-000000000004",
-      userId: "user_deleted",
-      email: "deleted@example.test",
-      action: "renewal",
-      deviceId: null,
-      message: "",
-      status: "pending",
-      revision: 1,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      adminNote: "",
-      handledBy: "",
-    },
-  ]
-  await page
-    .getByRole("navigation", { name: "Admin navigation" })
-    .getByRole("button", { name: /^Operations/ })
-    .click()
-  await page
-    .getByRole("button", { name: "Refresh requests", exact: true })
-    .click()
-  const queue = page.getByRole("region", { name: /Customer requests/ })
-  await expect(
-    queue
-      .locator("li")
-      .filter({ hasText: "deleted@example.test" })
-      .getByRole("button", { name: "Open account", exact: true })
-  ).toBeDisabled()
-  await queue
-    .locator("li")
-    .filter({ hasText: "alice@example.test" })
-    .getByRole("button", { name: "Open account", exact: true })
-    .click()
-  await expect(
-    profile.getByText("Email unverified", { exact: true })
-  ).toBeVisible()
-  await expect(profile.getByText(joined, { exact: true })).toBeVisible()
-})
-
-test("request review retries transient failures and ignores history from a closed review", async () => {
-  state.accountRequests = [
-    {
-      id: "request_00000000-0000-4000-8000-000000000005",
-      userId: "user_alice",
-      email: "alice@example.test",
-      action: "renewal",
-      deviceId: null,
-      message: "",
-      status: "pending",
-      revision: 1,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      adminNote: "",
-      handledBy: "",
-    },
-  ]
-  await page
-    .getByRole("navigation", { name: "Admin navigation" })
-    .getByRole("button", { name: /^Operations/ })
-    .click()
-  await page
-    .getByRole("button", { name: "Refresh requests", exact: true })
-    .click()
-  state.requestHistoryDelay = 200
-  state.requestHistoryFailure = 503
-  await page
-    .getByRole("button", { name: "Review request", exact: true })
-    .click()
-  await expect.poll(() => state.requestHistoryStarted.length).toBe(1)
-  await page.getByRole("button", { name: "Close review", exact: true }).click()
-  await page
-    .getByRole("button", { name: "Review request", exact: true })
-    .click()
-  await expect.poll(() => state.requestHistoryResponses.length).toBe(2)
-  await expect(
-    page.getByText("Test request history unavailable", { exact: true })
-  ).toHaveCount(0)
-  await page.getByLabel(/Admin review note/).fill("Keep this note for retry")
-  state.reviewFailNext = 503
-  await page.getByRole("button", { name: "Save review", exact: true }).click()
-  await expect(
-    page.getByRole("button", { name: "Save review", exact: true })
-  ).toBeEnabled()
-  await expect(page.getByLabel(/Admin review note/)).toHaveValue(
-    "Keep this note for retry"
-  )
-  await page.getByRole("button", { name: "Save review", exact: true }).click()
-  await expect(
-    page.getByRole("button", { name: "Save review", exact: true })
-  ).toHaveCount(0)
-  assert.equal(state.accountRequests[0].status, "acknowledged")
-  assert.equal(state.accountRequests[0].adminNote, "Keep this note for retry")
-})
-
-test("non-JSON unauthorized responses disable customer and reminder mutations until refresh", async () => {
-  await page.route("**/api/admin/subscription-reminders", (route) =>
-    route.fulfill({
-      status: 401,
-      contentType: "text/plain",
-      body: "Unauthorized",
-    })
-  )
-  await page
-    .getByRole("navigation", { name: "Admin navigation" })
-    .getByRole("button", { name: /^Operations/ })
-    .click()
-  await page.getByRole("button", { name: "Refresh renewal queue" }).click()
-  const reminders = page.getByRole("region", { name: "Daily renewal queue" })
-  await expect(reminders.getByRole("alert")).toContainText("session expired")
-  await expect(
-    reminders.getByRole("button", { name: "Check reminders now" })
-  ).toBeDisabled()
-  await page.goto(`${origin}/account`)
-  await page
-    .getByRole("button", { name: "Request extension", exact: true })
-    .click()
-  await page.route("**/api/account/subscription", (route) =>
-    route.fulfill({
-      status: 401,
-      contentType: "text/plain",
-      body: "Unauthorized",
-    })
-  )
-  await page
-    .getByRole("button", { name: "Submit request", exact: true })
-    .click()
-  await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
-    "session expired"
-  )
-  await expect(
-    page.getByRole("button", { name: "Submit request", exact: true })
-  ).toBeDisabled()
 })
 
 test("waitlist session expiry provides a sign-in path and recovers after refreshing", async () => {
@@ -2336,4 +1297,131 @@ test("waitlist session expiry provides a sign-in path and recovers after refresh
     page.getByText("wendy@example.test", { exact: true })
   ).toBeVisible()
   await expect(waitlist.getByRole("alert")).toHaveCount(0)
+})
+
+test("customer sidebar panels stay separate across navigation, reload and history", async () => {
+  await page.goto(`${origin}/account`)
+  const subscription = page.getByRole("region", {
+    name: "Subscription",
+    exact: true,
+  })
+  const devices = page.getByRole("region", {
+    name: "Authorized devices",
+    exact: true,
+  })
+  const navigation = page.getByRole("navigation", {
+    name: "Account navigation",
+  })
+  const subscriptionLink = navigation.getByRole("link", {
+    name: "Subscription",
+    exact: true,
+  })
+  const devicesLink = navigation.getByRole("link", {
+    name: "Authorized devices",
+    exact: true,
+  })
+  await expect(navigation.getByRole("link")).toHaveCount(2)
+  await expect(subscriptionLink).toHaveAttribute("href", "#subscription")
+  await expect(devicesLink).toHaveAttribute("href", "#devices")
+  await expect(subscription).toBeVisible()
+  await expect(devices).toBeHidden()
+  await expect(
+    subscriptionLink.locator("xpath=self::*[@data-active]")
+  ).toHaveCount(1)
+  await expect(devicesLink.locator("xpath=self::*[@data-active]")).toHaveCount(
+    0
+  )
+  await expect(
+    page.getByRole("heading", { name: "Subscription", level: 1, exact: true })
+  ).toBeVisible()
+  for (const name of ["Free", "Monthly", "Yearly"]) {
+    const plan = subscription.getByRole("article", { name, exact: true })
+    await expect(plan).toBeVisible()
+    await expect(
+      plan.getByRole("heading", { name, level: 3, exact: true })
+    ).toBeVisible()
+  }
+  await expect(subscription.getByRole("article")).toHaveCount(3)
+  await expect(page.getByRole("button", { name: /^Remove / })).toHaveCount(0)
+  await devicesLink.click()
+  await expect(page).toHaveURL(`${origin}/account#devices`)
+  await expect(devices).toBeVisible()
+  await expect(subscription).toBeHidden()
+  await expect(devicesLink.locator("xpath=self::*[@data-active]")).toHaveCount(
+    1
+  )
+  await expect(
+    subscriptionLink.locator("xpath=self::*[@data-active]")
+  ).toHaveCount(0)
+  await expect(devices.locator("ol > li")).toHaveCount(2)
+  await expect(
+    devices.getByText("Mac identifier", { exact: true })
+  ).toHaveCount(0)
+  await expect(devices.getByText(firstMac, { exact: true })).toHaveCount(0)
+  await expect(devices.getByText(secondMac, { exact: true })).toHaveCount(0)
+  await page.reload()
+  await expect(devices).toBeVisible()
+  await expect(subscription).toBeHidden()
+  await page.goBack()
+  await expect(page).toHaveURL(`${origin}/account`)
+  await expect(subscription).toBeVisible()
+  await expect(devices).toBeHidden()
+  await page.goForward()
+  await expect(page).toHaveURL(`${origin}/account#devices`)
+  await expect(devices).toBeVisible()
+  await expect(subscription).toBeHidden()
+  await subscriptionLink.click()
+  await expect(page).toHaveURL(`${origin}/account#subscription`)
+  await expect(subscription).toBeVisible()
+  await expect(devices).toBeHidden()
+  await expect(
+    page.getByRole("button", { name: "Refresh", exact: true })
+  ).toHaveCount(0)
+  await expect(
+    page.getByRole("button", { name: /Request|reminders/i })
+  ).toHaveCount(0)
+  await expect(page.getByText(/Pilot account/)).toHaveCount(0)
+  assert.equal(state.customerMutations.length, 0)
+  assert.equal(state.reviewMutations.length, 0)
+  assert.equal(state.accountRequests.length, 0)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth
+      )
+    )
+    .toBe(true)
+})
+
+test("initial account load errors offer retry without restoring a persistent Refresh control", async () => {
+  await page.route("**/api/account/subscription", (route) =>
+    route.fulfill({
+      status: 503,
+      json: { error: "Fixture account temporarily unavailable" },
+    })
+  )
+  await page.goto(`${origin}/account`)
+  await expect(
+    page
+      .getByRole("alert")
+      .filter({ hasText: "Fixture account temporarily unavailable" })
+  ).toBeVisible()
+  await expect(
+    page.getByRole("button", { name: "Refresh", exact: true })
+  ).toHaveCount(0)
+  const retry = page.getByRole("button", { name: "Try again", exact: true })
+  await expect(retry).toBeEnabled()
+  await page.unroute("**/api/account/subscription")
+  await retry.click()
+  await expect(
+    page.getByRole("region", { name: "Authorized devices", exact: true })
+  ).toBeHidden()
+  await expect(
+    page
+      .getByRole("region", { name: "Subscription", exact: true })
+      .getByRole("article")
+  ).toHaveCount(3)
+  await expect(retry).toHaveCount(0)
+  assert.equal(state.customerMutations.length, 0)
 })

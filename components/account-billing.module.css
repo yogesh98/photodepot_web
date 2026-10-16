@@ -1,0 +1,142 @@
+.billing {
+  min-width: 0;
+}
+.plans {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+}
+.plan {
+  display: flex;
+  flex-direction: column;
+  padding: 24px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  background: var(--card);
+}
+.current {
+  border-color: var(--brand-ink);
+}
+.planHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 25px;
+}
+.planHeading h3 {
+  margin: 0;
+  font-size: 21px;
+  font-weight: 550;
+  letter-spacing: -0.7px;
+}
+.currentLabel {
+  padding: 3px 8px;
+  font-size: 10px;
+  color: #2f7250;
+  background: var(--muted);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.price {
+  margin: 25px 0 12px;
+  font-size: 27px;
+  font-weight: 550;
+  letter-spacing: -0.9px;
+}
+.price span {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  font-weight: 400;
+  letter-spacing: 0;
+}
+.description,
+.note,
+.terms {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.8;
+}
+.description {
+  margin: 0;
+}
+.note {
+  margin: 6px 0 0;
+}
+.planNotes {
+  margin-top: 12px;
+}
+.saving {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: #2f7250;
+}
+.planAction {
+  margin-top: auto;
+  padding-top: 24px;
+  min-height: 60px;
+}
+.button {
+  min-height: 36px;
+  padding-inline: 13px;
+  gap: 7px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.terms {
+  margin: 12px 0 0;
+}
+.success {
+  margin: 0 0 16px;
+  font-size: 12px;
+  color: #2f7250;
+}
+.error {
+  padding: 12px;
+  border: 1px solid #ebccc2;
+  background: var(--muted);
+  color: #a4422c;
+  margin: 0 0 16px;
+  font-size: 11px;
+  line-height: 1.7;
+}
+.error a {
+  color: inherit;
+  text-decoration: underline;
+}
+.recovery {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-top: 16px;
+}
+.recovery .note {
+  margin: 0;
+}
+@media (max-width: 1100px) {
+  .plan {
+    padding: 20px;
+  }
+  .planHeading {
+    align-items: start;
+    flex-direction: column;
+    min-height: 48px;
+  }
+}
+@media (max-width: 900px) {
+  .plans {
+    grid-template-columns: 1fr;
+  }
+  .planHeading {
+    align-items: center;
+    flex-direction: row;
+    min-height: 25px;
+  }
+}
+@media (pointer: coarse) {
+  .button {
+    min-height: 44px;
+  }
+}

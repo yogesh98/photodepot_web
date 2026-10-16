@@ -1,7 +1,6 @@
 import type { Env } from "./cloudflare.ts"
-import { resolveAccountAccess } from "./account-access.ts"
 import { listAccountDevicesForUsers } from "./account-sessions.ts"
-import { listSubscriptions } from "./subscription-store.ts"
+import { listAdminEntitlements } from "./admin-entitlements.ts"
 import type { WorkOSUserSummary } from "./subscription-types.ts"
 import { listWorkOSUsers, WORKOS_USER_ID } from "./workos-users.ts"
 
@@ -24,18 +23,21 @@ function matches(
   now: number
 ) {
   const subscription = user.subscription
-  const active = subscription?.status === "active"
+  if (filter !== "all" && user.accessUnavailable) return false
+  const active = user.access.canUseLocal
   const filtered =
     filter === "all" ||
     (filter === "active" && active) ||
-    (filter === "trial" && active && subscription.type === "trial") ||
-    (filter === "standard" && active && subscription.type === "regular") ||
+    (filter === "trial" && active && user.access.tier === "trial") ||
+    (filter === "standard" && active && user.access.tier === "standard") ||
     (filter === "expiring" &&
       active &&
-      subscription.endsAt <= now + 7 * 86_400_000) ||
-    (filter === "expired" && subscription?.status === "expired") ||
-    (filter === "revoked" && subscription?.status === "revoked") ||
-    (filter === "unassigned" && !subscription)
+      user.access.source === "manual" &&
+      user.access.endsAt !== null &&
+      user.access.endsAt <= now + 7 * 86_400_000) ||
+    (filter === "expired" && user.access.status === "expired") ||
+    (filter === "revoked" && user.access.status === "revoked") ||
+    (filter === "unassigned" && user.access.source === null)
   return (
     filtered &&
     (!search ||
@@ -67,17 +69,20 @@ export async function listAdminUsers(
     throw new TypeError("Invalid user filter, search or page.")
   const users: WorkOSUserSummary[] = []
   const seenCursors = new Set<string>()
-  // Bound provider work per request. A continuation is always returned when more
-  // source rows exist, even if none in these pages match. No client-only filtering.
+  // Each account can refresh independent WorkOS credentials and run receipt CAS
+  // queries. Bound hydrated accounts as well as provider pages so filtered scans
+  // stay within the Free plan's subrequest budget.
+  let remainingUsers = 20
   for (let scannedPages = 0; scannedPages < 10; scannedPages++) {
     const page = await listWorkOSUsers(env, cursor)
-    const userIds = page.users.map((user) => user.id)
-    const [subscriptions, deviceLists] = await Promise.all([
-      listSubscriptions(env.DB, userIds, now),
+    const selectedUsers = page.users.slice(0, remainingUsers)
+    remainingUsers -= selectedUsers.length
+    const userIds = selectedUsers.map((user) => user.id)
+    const [entitlements, deviceLists] = await Promise.all([
+      listAdminEntitlements(env, userIds, now),
       listAccountDevicesForUsers(env.DB, userIds),
     ])
-    for (let index = 0; index < page.users.length; index++) {
-      const user = page.users[index]
+    for (const user of selectedUsers) {
       const summary = {
         id: user.id,
         email: user.email,
@@ -85,25 +90,29 @@ export async function listAdminUsers(
         lastName: user.lastName,
         emailVerified: user.emailVerified,
         createdAt: Date.parse(user.createdAt),
-        subscription: subscriptions.get(user.id) ?? null,
-        access: resolveAccountAccess(subscriptions.get(user.id) ?? null, now),
+        subscription: entitlements.get(user.id)!.manual,
+        billing: entitlements.get(user.id)!.billing,
+        managed: entitlements.get(user.id)!.managed,
+        access: entitlements.get(user.id)!.access,
+        accessUnavailable: entitlements.get(user.id)!.accessUnavailable,
         devices: deviceLists.get(user.id) ?? [],
       }
       if (matches(summary, filter, search, now)) users.push(summary)
-      if (users.length === 100)
-        return {
-          users,
-          nextCursor:
-            index < page.users.length - 1 || page.nextCursor ? user.id : null,
-        }
     }
-    if (!page.nextCursor) return { users, nextCursor: null }
-    if (seenCursors.has(page.nextCursor) || page.nextCursor === cursor)
+    // WorkOS may have returned additional users even on its final page. Resume
+    // after the last account we actually processed, including empty match pages.
+    const nextCursor =
+      selectedUsers.length < page.users.length
+        ? selectedUsers.at(-1)!.id
+        : page.nextCursor
+    if (!nextCursor) return { users, nextCursor: null }
+    if (seenCursors.has(nextCursor) || nextCursor === cursor)
       throw new Error("User directory pagination did not advance")
-    seenCursors.add(page.nextCursor)
-    cursor = page.nextCursor
+    seenCursors.add(nextCursor)
+    cursor = nextCursor
     // Preserve ordinary directory pagination; scans are only needed for searches.
-    if (filter === "all" && !search) return { users, nextCursor: cursor }
+    if (remainingUsers === 0 || (filter === "all" && !search))
+      return { users, nextCursor: cursor }
   }
   return { users, nextCursor: cursor ?? null }
 }

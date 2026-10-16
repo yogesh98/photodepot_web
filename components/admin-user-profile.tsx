@@ -12,7 +12,6 @@ import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent } from "@/components/ui/card"
 import type { ReactNode } from "react"
-import type { CustomerRequest } from "@/lib/account-requests"
 import type {
   SubscriptionAudit,
   AccountDevice,
@@ -37,7 +36,6 @@ export type ProfileDetails = {
   }[]
   devices: AccountDeviceHistory[]
   access: AccountAccess
-  requests?: CustomerRequest[]
 }
 export function AdminUserProfile({
   user,
@@ -86,7 +84,7 @@ export function AdminUserProfile({
         )
         .slice(0, 100)
     : []
-  const active = user.access.canUseLocal
+  const active = !user.accessUnavailable && user.access.canUseLocal
   return (
     <section aria-label="User management" aria-busy={loading}>
       <Button variant="ghost" onClick={onBack} className={styles.backButton}>
@@ -129,56 +127,75 @@ export function AdminUserProfile({
               <>
                 <div className={styles.profilePlan}>
                   <strong>
-                    {user.access.tier === "trial"
-                      ? "Trial"
-                      : user.access.tier === "standard"
-                        ? "Standard"
-                        : "Free account"}
+                    {user.accessUnavailable
+                      ? "Access unavailable"
+                      : user.access.tier === "trial"
+                        ? "Trial"
+                        : user.access.tier === "standard"
+                          ? "Standard"
+                          : "Free account"}
                   </strong>
                   <Badge
                     variant="secondary"
                     className={active ? styles.statusActive : ""}
                   >
-                    {user.access.status === "active"
-                      ? "Active"
-                      : user.access.status === "revoked"
-                        ? "Revoked"
-                        : user.access.status === "expired"
-                          ? "Expired"
-                          : "Free account"}
+                    {user.accessUnavailable
+                      ? "Unavailable"
+                      : user.access.status === "active"
+                        ? "Active"
+                        : user.access.status === "revoked"
+                          ? "Revoked"
+                          : user.access.status === "expired"
+                            ? "Expired"
+                            : "Free account"}
                   </Badge>
                 </div>
+                {user.accessUnavailable && (
+                  <p role="status">
+                    We couldn’t check subscription access. You can still manage
+                    this account’s devices and view its history. Refresh to try
+                    again.
+                  </p>
+                )}
                 <dl className={styles.profileFacts}>
                   <div>
-                    <dt>Access starts</dt>
+                    <dt>
+                      {user.access.source === "workos"
+                        ? "Access checked"
+                        : "Access starts"}
+                    </dt>
                     <dd>
-                      {user.access.startsAt != null
+                      {!user.accessUnavailable && user.access.startsAt != null
                         ? date(user.access.startsAt)
                         : "—"}
                     </dd>
                   </div>
                   <div>
-                    <dt>Access ends</dt>
+                    <dt>
+                      {user.access.source === "workos"
+                        ? "Offline access valid until"
+                        : "Access ends"}
+                    </dt>
                     <dd>
-                      {user.access.endsAt != null
+                      {!user.accessUnavailable && user.access.endsAt != null
                         ? date(user.access.endsAt)
                         : "—"}
                     </dd>
                   </div>
                   <div>
-                    <dt>Expiry reminders</dt>
-                    <dd>
-                      {sub ? (sub.remindersEnabled ? "Enabled" : "Off") : "—"}
-                    </dd>
-                  </div>
-                  <div>
                     <dt>Access source</dt>
-                    <dd>{sub ? "Manual grant" : "Free account"}</dd>
+                    <dd>
+                      {user.accessUnavailable
+                        ? "Unavailable"
+                        : user.access.source === "workos"
+                          ? "WorkOS subscription access"
+                          : "Free account"}
+                    </dd>
                   </div>
                 </dl>
                 <div className={styles.profileActions}>{actions}</div>
                 <div className={styles.profileNotes}>
-                  <h3>Admin notes</h3>
+                  <h3>Historical admin notes</h3>
                   <p>{sub?.notes || "No notes."}</p>
                 </div>
               </>
@@ -255,42 +272,6 @@ export function AdminUserProfile({
               ) : (
                 <p className={styles.quietText}>
                   {loading ? "Loading devices…" : "No Mac has been assigned."}
-                </p>
-              )}
-            </div>
-          </CardContent>
-        </Card>
-        <Card className={styles.panel}>
-          <CardContent>
-            <div className={styles.panelHeading}>
-              <div>
-                <h2>Customer requests</h2>
-              </div>
-              <Mail size={18} />
-            </div>
-            <div className={styles.activityList}>
-              {details?.requests?.length ? (
-                details.requests.map((request) => (
-                  <div key={request.id}>
-                    <span className={styles.activityDot} />
-                    <span>
-                      <strong>
-                        {request.action === "renewal"
-                          ? "Access request"
-                          : "Mac reset request"}
-                      </strong>
-                      <small>
-                        {date(request.createdAt)} · {request.status}
-                      </small>
-                      {request.message && <p>{request.message}</p>}
-                    </span>
-                  </div>
-                ))
-              ) : (
-                <p className={styles.quietText}>
-                  {loading
-                    ? "Loading requests…"
-                    : "No requests from this account."}
                 </p>
               )}
             </div>

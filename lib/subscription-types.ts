@@ -5,7 +5,7 @@ export type SubscriptionStatus = "active" | "expired" | "revoked"
 export interface AccountAccess {
   tier: "free" | "trial" | "standard"
   status: "none" | SubscriptionStatus
-  source: "manual" | null
+  source: "manual" | "workos" | null
   startsAt: number | null
   endsAt: number | null
   canUseLocal: boolean
@@ -38,11 +38,35 @@ export interface SubscriptionSummary {
   remindersEnabled: boolean
 }
 
+/** Verified WorkOS proof; expiry is a token deadline, not a billing renewal date. */
+export interface WorkOSEntitlementSummary {
+  userId: string
+  organizationId: string
+  enabled: boolean
+  issuedAt: number
+  expiresAt: number
+  revision: number
+}
+
+/** Billing display only; never an input to authorization. */
+export interface BillingSubscriptionSummary {
+  id: string
+  userId: string
+  status: string
+  startsAt: number
+  endsAt: number
+  priceId: string
+  cancelAtPeriodEnd: boolean
+  revision: number
+  updatedAt: number
+}
+
 export interface SubscriptionOverview {
   totalSubscriptions: number
   active: number
   activeTrials: number
   activeStandard: number
+  verificationNeeded: number
   expired: number
   revoked: number
   expiringSoon: number
@@ -62,7 +86,11 @@ export interface WorkOSUserSummary {
   emailVerified: boolean
   createdAt: number
   subscription: SubscriptionSummary | null
+  billing?: BillingSubscriptionSummary | null
+  managed?: WorkOSEntitlementSummary | null
   access: AccountAccess
+  /** A failed entitlement check is unknown, not a confirmed free or paid state. */
+  accessUnavailable?: boolean
   devices: AccountDevice[]
 }
 

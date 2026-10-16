@@ -7,7 +7,6 @@ import {
   ArrowRight,
   ChevronRight,
   LayoutDashboard,
-  ListChecks,
   Search,
   Users,
   UserRound,
@@ -46,27 +45,11 @@ import type {
   WorkOSUserSummary,
 } from "@/lib/subscription-types"
 import styles from "./subscription-dashboard.module.css"
-import type { AdminRequestQueue } from "@/lib/account-requests"
-import { AccessGrantEditor, type GrantValues } from "./access-grant-editor"
-import { AdminSubscriptionRequests } from "./admin-subscription-requests"
-import { AdminSubscriptionReminders } from "./admin-subscription-reminders"
-
-const day = 86_400_000
-type DialogAction =
-  | "set"
-  | "extend"
-  | "revoke"
-  | "restore"
-  | "remove-device"
-  | "update-notes"
-  | "set-reminders"
-  | "details"
-  | "approve"
+type DialogAction = "remove-device" | "details"
 type PendingDialog = {
   user: WorkOSUserSummary
   action: DialogAction
   device?: AccountDevice
-  request?: AdminRequestQueue["requests"][number]
 }
 type UserPage = {
   users: WorkOSUserSummary[]
@@ -74,7 +57,7 @@ type UserPage = {
   overview: SubscriptionOverview
 }
 type AccountDetails = ProfileDetails
-type Status = "Active" | "Expired" | "Revoked" | "Free account"
+type Status = "Active" | "Expired" | "Revoked" | "Free account" | "Unavailable"
 
 class ApiError extends Error {
   constructor(
@@ -130,6 +113,7 @@ function userName(user: WorkOSUserSummary) {
   return [user.firstName, user.lastName].filter(Boolean).join(" ") || user.email
 }
 function status(user: WorkOSUserSummary): Status {
+  if (user.accessUnavailable) return "Unavailable"
   return user.access.status === "active"
     ? "Active"
     : user.access.status === "revoked"
@@ -137,14 +121,6 @@ function status(user: WorkOSUserSummary): Status {
       : user.access.status === "expired"
         ? "Expired"
         : "Free account"
-}
-function remaining(endsAt: number, now: number) {
-  const days = Math.ceil((endsAt - now) / day)
-  return days <= 0
-    ? "Expiry has passed"
-    : days === 1
-      ? "Less than 24 hours left"
-      : `${days} days left`
 }
 function StatusBadge({ value }: { value: Status }) {
   return (
@@ -254,7 +230,6 @@ export function SubscriptionDashboard({
   const [dialog, setDialog] = useState<PendingDialog | null>(null)
   const [dialogError, setDialogError] = useState("")
   const [reason, setReason] = useState("")
-  const [notes, setNotes] = useState("")
   const [details, setDetails] = useState<AccountDetails | null>(null)
   const [detailsLoading, setDetailsLoading] = useState(false)
   const mounted = useRef(false)
@@ -427,7 +402,7 @@ export function SubscriptionDashboard({
         ? "accounts"
         : target
       setView(
-        ["overview", "accounts", "waitlist", "operations"].includes(normalized)
+        ["overview", "accounts", "waitlist"].includes(normalized)
           ? normalized
           : "overview"
       )
@@ -490,7 +465,6 @@ export function SubscriptionDashboard({
       setDialogError("")
       setNotice("")
       setReason("")
-      setNotes(user.subscription?.notes ?? "")
     },
     [showProfile]
   )
@@ -519,24 +493,15 @@ export function SubscriptionDashboard({
     setSearch("")
     changeFilter("all")
   }
-  async function mutate(body: object, approval = false) {
+  async function mutate(body: object) {
     if (!dialog || busy || sessionExpired || reloadRequired) return
     setBusy(true)
     setDialogError("")
     setError("")
     setNotice("")
     try {
-      await api(
-        "",
-        body,
-        undefined,
-        approval
-          ? "/api/admin/subscription-requests"
-          : "/api/admin/subscriptions"
-      )
-      setNotice(
-        `${approval ? "Request approved and access extended" : dialog.action === "remove-device" ? "Mac removed" : dialog.action === "revoke" ? "Access revoked" : dialog.action === "restore" ? "Access restored; expiry unchanged" : dialog.action === "update-notes" ? "Account notes saved" : dialog.action === "set-reminders" ? `Expiry reminders ${dialog.user.subscription?.remindersEnabled ? "disabled" : "enabled"}` : dialog.action === "extend" ? "Access extended" : "Access granted"} for ${dialog.user.email}.`
-      )
+      await api("", body)
+      setNotice(`Mac removed for ${dialog.user.email}.`)
       setDialog(null)
       setRefreshVersion((value) => value + 1)
       if (profileId) await loadDetails(profileId)
@@ -549,34 +514,6 @@ export function SubscriptionDashboard({
       if (mounted.current) setBusy(false)
     }
   }
-  function saveGrant(values: GrantValues) {
-    if (!dialog) return
-    if (dialog.request) {
-      void mutate(
-        {
-          action: "approve",
-          requestId: dialog.request.id,
-          expectedRevision: dialog.request.revision,
-          expectedSubscriptionRevision: dialog.user.subscription?.revision ?? 0,
-          type: values.type,
-          endsAt: values.endsAt,
-          note: values.reason,
-        },
-        true
-      )
-    } else {
-      void mutate({
-        action: dialog.action,
-        userId: dialog.user.id,
-        expectedRevision: dialog.user.subscription?.revision ?? 0,
-        endsAt: values.endsAt,
-        reason: values.reason,
-        ...(dialog.action === "set"
-          ? { type: values.type, notes: values.notes }
-          : {}),
-      })
-    }
-  }
   function save(event: FormEvent) {
     event.preventDefault()
     if (!dialog) return
@@ -584,26 +521,14 @@ export function SubscriptionDashboard({
       action: dialog.action,
       userId: dialog.user.id,
       reason: reason.trim(),
-      ...(dialog.device
-        ? {
-            sessionId: dialog.device.sessionId,
-            expectedSessionRevision: dialog.device.revision,
-          }
-        : { expectedRevision: dialog.user.subscription?.revision ?? 0 }),
-      ...(dialog.action === "update-notes" ? { notes } : {}),
-      ...(dialog.action === "set-reminders"
-        ? { enabled: !dialog.user.subscription?.remindersEnabled }
-        : {}),
+      sessionId: dialog.device?.sessionId,
+      expectedSessionRevision: dialog.device?.revision,
     })
   }
   const actionsDisabled = busy || sessionExpired || reloadRequired || !hasLoaded
-  const now = lastUpdated ?? 0
   const filteredUsers = users
   const filtersActive = !!search || statusFilter !== "all"
   function accountActions(user: WorkOSUserSummary, inDetails = false) {
-    const disabled =
-      actionsDisabled ||
-      (inDetails && (detailsLoading || !!dialogError || !details))
     return (
       <div className={styles.rowActions}>
         {!inDetails && (
@@ -617,65 +542,7 @@ export function SubscriptionDashboard({
             Details
           </Button>
         )}
-        <Button
-          variant="outline"
-          type="button"
-          disabled={disabled}
-          onClick={() => openDialog(user, "set")}
-          aria-label={`Grant access for ${user.email}`}
-        >
-          Grant access
-        </Button>
-        {user.subscription && (
-          <>
-            <Button
-              variant="outline"
-              type="button"
-              disabled={disabled}
-              onClick={() => openDialog(user, "extend")}
-              aria-label={`Extend access for ${user.email}`}
-            >
-              Extend
-            </Button>
-            <Button
-              variant="outline"
-              type="button"
-              disabled={disabled}
-              onClick={() =>
-                openDialog(
-                  user,
-                  user.subscription?.status === "revoked" ? "restore" : "revoke"
-                )
-              }
-              aria-label={`${user.subscription.status === "revoked" ? "Restore" : "Revoke"} access for ${user.email}`}
-            >
-              {user.subscription.status === "revoked" ? "Restore" : "Revoke"}
-            </Button>
-            {inDetails && (
-              <>
-                <Button
-                  variant="outline"
-                  type="button"
-                  disabled={disabled}
-                  onClick={() => openDialog(user, "update-notes")}
-                >
-                  Edit notes
-                </Button>
-                <Button
-                  variant="outline"
-                  type="button"
-                  disabled={disabled}
-                  onClick={() => openDialog(user, "set-reminders")}
-                  aria-label={`${user.subscription.remindersEnabled ? "Turn off" : "Turn on"} reminders for ${user.email}`}
-                >
-                  {user.subscription.remindersEnabled
-                    ? "Turn off reminders"
-                    : "Turn on reminders"}
-                </Button>
-              </>
-            )}
-          </>
-        )}
+        {inDetails && <p>Subscriptions and discounts are managed in Stripe.</p>}
       </div>
     )
   }
@@ -683,18 +550,15 @@ export function SubscriptionDashboard({
     overview: "Overview",
     accounts: "Accounts",
     waitlist: "Waitlist",
-    operations: "Operations",
   }
   const navigation = [
     { id: "overview", label: "Overview", icon: LayoutDashboard },
     { id: "accounts", label: "Accounts", icon: UserRound },
     { id: "waitlist", label: "Waitlist", icon: Users },
-    { id: "operations", label: "Operations", icon: ListChecks },
   ]
   const filterOptions = [
     { value: "all", label: "All" },
     { value: "active", label: "Active" },
-    { value: "trial", label: "Trials" },
     { value: "standard", label: "Standard" },
     { value: "expired", label: "Expired" },
     { value: "revoked", label: "Revoked" },
@@ -710,12 +574,7 @@ export function SubscriptionDashboard({
         icon: <Icon size={17} />,
         isActive: view === id,
         onSelect: () => navigate(id),
-        badge:
-          id === "operations"
-            ? overview?.openRequests
-            : id === "waitlist"
-              ? overview?.waitlistTotal
-              : undefined,
+        badge: id === "waitlist" ? overview?.waitlistTotal : undefined,
       }))}
     >
       <header className={layout.topbar}>
@@ -811,37 +670,6 @@ export function SubscriptionDashboard({
             {view === "waitlist" && (
               <AdminWaitlist refreshVersion={refreshVersion} />
             )}
-            {view === "operations" && (
-              <>
-                <AdminSubscriptionRequests
-                  refreshVersion={refreshVersion}
-                  disabled={actionsDisabled}
-                  onReview={showProfile}
-                  onApprove={(request) => {
-                    void (async () => {
-                      try {
-                        const result = await api<AccountDetails>(
-                          `?userId=${encodeURIComponent(request.userId)}&history=1`
-                        )
-                        openDialog(result.user, "approve")
-                        setDialog({
-                          user: result.user,
-                          action: "approve",
-                          request,
-                        })
-                      } catch (cause) {
-                        handleError(cause)
-                      }
-                    })()
-                  }}
-                />
-                <AdminSubscriptionReminders
-                  refreshVersion={refreshVersion}
-                  disabled={actionsDisabled}
-                  onReview={showProfile}
-                />
-              </>
-            )}
             {(view === "accounts" || view === "overview") && (
               <section
                 className={layout.tableCard}
@@ -898,21 +726,6 @@ export function SubscriptionDashboard({
                         />
                       </div>
                       <div className={layout.toolbarActions}>
-                        <label className={layout.expiryFilter}>
-                          Access window
-                          <select
-                            aria-label="Expiry"
-                            value={
-                              statusFilter === "expiring" ? "expiring" : "all"
-                            }
-                            onChange={(event) =>
-                              changeFilter(event.target.value)
-                            }
-                          >
-                            <option value="all">Any expiry</option>
-                            <option value="expiring">Next 7 days</option>
-                          </select>
-                        </label>
                         {filtersActive && (
                           <Button variant="ghost" onClick={clearFilters}>
                             Clear filters
@@ -929,8 +742,7 @@ export function SubscriptionDashboard({
                         <TableHead>Account</TableHead>
                         <TableHead>Plan</TableHead>
                         <TableHead>Status</TableHead>
-                        <TableHead>Reminders</TableHead>
-                        <TableHead>Access ends</TableHead>
+                        <TableHead>Offline access valid until</TableHead>
                         <TableHead>Macs</TableHead>
                         <TableHead className={layout.actionsColumn}>
                           Manage
@@ -964,35 +776,21 @@ export function SubscriptionDashboard({
                           </TableCell>
                           <TableCell>
                             <Badge variant="outline">
-                              {user.access.tier === "trial"
-                                ? "Trial"
-                                : user.access.tier === "standard"
-                                  ? "Standard"
-                                  : "Free"}
+                              {user.accessUnavailable
+                                ? "Unknown"
+                                : user.access.tier === "trial"
+                                  ? "Trial"
+                                  : user.access.tier === "standard"
+                                    ? "Standard"
+                                    : "Free"}
                             </Badge>
                           </TableCell>
                           <TableCell>
                             <StatusBadge value={status(user)} />
                           </TableCell>
                           <TableCell>
-                            {user.subscription ? (
-                              <span
-                                className={
-                                  user.subscription.remindersEnabled
-                                    ? layout.renewalOpen
-                                    : layout.renewalCanceled
-                                }
-                              >
-                                {user.subscription.remindersEnabled
-                                  ? "Enabled"
-                                  : "Off"}
-                              </span>
-                            ) : (
-                              "—"
-                            )}
-                          </TableCell>
-                          <TableCell>
-                            {user.access.endsAt != null ? (
+                            {!user.accessUnavailable &&
+                            user.access.endsAt != null ? (
                               <>
                                 <span>
                                   {new Date(
@@ -1002,7 +800,7 @@ export function SubscriptionDashboard({
                                   })}
                                 </span>
                                 <small className={layout.cellSecondary}>
-                                  {remaining(user.access.endsAt, now)}
+                                  Offline access deadline
                                 </small>
                               </>
                             ) : (
@@ -1067,41 +865,11 @@ export function SubscriptionDashboard({
         )}
         {dialog && (
           <DashboardDialog
-            key={`${dialog.user.id}-${dialog.action}-${dialog.request?.id ?? ""}`}
+            key={`${dialog.user.id}-${dialog.action}`}
             onClose={closeDialog}
           >
-            <div className={styles.dialogHeading}>
-              <Button
-                type="button"
-                className={styles.quiet}
-                onClick={closeDialog}
-                disabled={busy}
-                data-dialog-focus
-                aria-label="Close account dialog"
-              >
-                Close
-              </Button>
-            </div>
-            <DialogTitle id="subscription-dialog-title">
-              {dialog.action === "set"
-                ? "Grant access"
-                : dialog.action === "extend"
-                  ? "Extend access"
-                  : dialog.action === "approve"
-                    ? "Approve and extend"
-                    : dialog.action === "remove-device"
-                      ? "Remove Mac?"
-                      : dialog.action === "update-notes"
-                        ? "Edit account notes"
-                        : dialog.action === "set-reminders"
-                          ? `Turn ${dialog.user.subscription?.remindersEnabled ? "off" : "on"} expiry reminders?`
-                          : `${dialog.action === "revoke" ? "Revoke" : "Restore"} access?`}
-            </DialogTitle>
-            <p className={styles.dialogAccount}>
-              <strong>{userName(dialog.user)}</strong>
-              <br />
-              {dialog.user.email}
-            </p>
+            <DialogTitle>Remove Mac?</DialogTitle>
+            <p className={styles.dialogAccount}>{dialog.user.email}</p>
             {dialogError && (
               <ErrorMessage
                 message={dialogError}
@@ -1109,112 +877,43 @@ export function SubscriptionDashboard({
               />
             )}
             {reloadRequired && (
-              <Button
-                type="button"
-                onClick={refreshAfterConflict}
-                disabled={busy}
-              >
+              <Button onClick={refreshAfterConflict} disabled={busy}>
                 Refresh account data
               </Button>
             )}
-            {["set", "extend", "approve"].includes(dialog.action) ? (
-              <AccessGrantEditor
-                subscription={dialog.user.subscription}
-                extend={dialog.action === "extend"}
-                approval={dialog.action === "approve"}
-                disabled={actionsDisabled}
-                busy={busy}
-                onSave={saveGrant}
-                onClose={closeDialog}
-              />
-            ) : (
-              <form onSubmit={save}>
-                {dialog.action === "revoke" && (
-                  <p>
-                    Revoke local project and hosting access. The account remains
-                    signed in and can join collaboration.
-                  </p>
-                )}
-                {dialog.action === "restore" && (
-                  <p>
-                    Restore access with its existing expiry. Expired access must
-                    also be extended.
-                  </p>
-                )}
-                {dialog.action === "remove-device" && (
-                  <p>
-                    Sign out {dialog.device?.deviceName || "this Mac"}. It must
-                    sign in again to reconnect. Other Macs and access dates stay
-                    unchanged.
-                  </p>
-                )}
-                {dialog.action === "set-reminders" && (
-                  <p>
-                    {dialog.user.subscription?.remindersEnabled
-                      ? "Stop trial expiry emails for this account."
-                      : "Enable trial expiry emails for this account."}{" "}
-                    This preference does not change access dates, connected
-                    Macs, or extension requests.
-                  </p>
-                )}
-                <div className={styles.formFields}>
-                  {dialog.action === "update-notes" && (
-                    <label>
-                      Admin notes
-                      <Textarea
-                        value={notes}
-                        onChange={(event) => setNotes(event.target.value)}
-                        maxLength={2000}
-                        rows={3}
-                        disabled={busy}
-                      />
-                    </label>
-                  )}
-                  <label>
-                    Reason for this change{" "}
-                    <span className={styles.optional}>
-                      Optional · recorded in activity history
-                    </span>
-                    <Textarea
-                      value={reason}
-                      onChange={(event) => setReason(event.target.value)}
-                      maxLength={1000}
-                      rows={2}
-                      disabled={busy}
-                    />
-                  </label>
-                </div>
-                <div className={styles.actions}>
-                  <Button
-                    type="submit"
-                    disabled={actionsDisabled}
-                    className={
-                      dialog.action === "revoke" ? styles.danger : undefined
-                    }
-                  >
-                    {busy
-                      ? "Saving…"
-                      : dialog.action === "revoke"
-                        ? "Revoke access"
-                        : dialog.action === "restore"
-                          ? "Restore access"
-                          : dialog.action === "remove-device"
-                            ? "Remove Mac"
-                            : dialog.action === "set-reminders"
-                              ? `Turn ${dialog.user.subscription?.remindersEnabled ? "off" : "on"} reminders`
-                              : "Save notes"}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={closeDialog}
-                    disabled={busy}
-                  >
-                    Cancel
-                  </Button>
-                </div>
-              </form>
-            )}
+            <form onSubmit={save}>
+              <p>
+                Sign out {dialog.device?.deviceName || "this Mac"}. It must sign
+                in again to reconnect.
+              </p>
+              <label>
+                Reason for this change{" "}
+                <span className={styles.optional}>
+                  Optional · recorded in activity history
+                </span>
+                <Textarea
+                  value={reason}
+                  onChange={(event) => setReason(event.target.value)}
+                  maxLength={1000}
+                  rows={2}
+                  disabled={busy}
+                />
+              </label>
+              <div className={styles.actions}>
+                <Button type="submit" disabled={actionsDisabled}>
+                  {busy ? "Saving…" : "Remove Mac"}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={closeDialog}
+                  disabled={busy}
+                  data-dialog-focus
+                >
+                  Cancel
+                </Button>
+              </div>
+            </form>
           </DashboardDialog>
         )}
       </div>

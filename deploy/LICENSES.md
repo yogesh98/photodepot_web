@@ -1,29 +1,24 @@
-# Photodepot accounts and manual access
+# Photodepot accounts and subscriptions
 
 The Accounts directory lives at `/admin`; `/admin/users`, `/admin/subscriptions`,
 and `/admin/licenses` remain aliases. WorkOS owns identity, `desktop_sessions`
 owns approved computers, and one server access resolver determines local-project
-and hosting access. Signing in permits free joining of collaboration. Owners
-assign Trial or Standard access; signups never grant access or Owner membership.
-The existing `subscriptions` table stores manual grants, preserving dates, notes,
-revisions, and audit history. It is not a billing ledger.
+and hosting access. Signing in permits free joining of collaboration. Local
+projects and hosting require verified WorkOS Stripe subscription entitlements.
+Complimentary access uses a discounted subscription, including 100% coupons.
+Signups never grant access or Owner membership. Historical manual grants,
+requests, and audits remain stored but cannot grant access. Manual access and
+request/reminder mutations return HTTP410.
 
-Owners can grant, extend, revoke/restore, save notes, and remove named Macs.
-Extension adds days from the later of now and expiry and preserves revoked status.
-Restore keeps expiry. Revision conflicts return 409. Device removal works for free
-accounts and uses session revisions independently of grants.
+Owners can inspect accounts and remove named Macs. Device removal works for free
+accounts and uses session revisions independently of subscriptions. Manage plans,
+discounts, and cancellation in Stripe.
 
-Customer account responses separate `access`, `devices`, `requests`, and reminder
-preferences. Customers never receive administrator notes, review notes, device
-keys, or administrator audits. **Request access/extension** is deduplicated and
-limited to five new requests in 24 hours. **Approve and extend** opens the grant
-editor; a guarded transaction saves the chosen grant, resolves the request, and
-records both audits. A stale request or grant leaves both unchanged. Declining
-only reviews the request. Existing request and audit history stays readable.
-
-Reminders are explicit preferences rather than billing cancellation. Trial mail
-is eligible in the final 48 hours through the existing deduplicated outbox; see
-[reminder delivery](../workers/README.md). No payment provider is connected.
+Customer account responses contain `user`, `access`, and `devices`. Customers
+never receive administrator notes, device keys, or administrator audits. The
+account dashboard provides subscription purchase, hosted billing management, and
+direct device removal. Stripe handles subscription messages; the manual reminder
+worker is [retired](../workers/README.md).
 The optional signed WorkOS webhook acknowledges notifications without granting
 access or changing billing.
 
@@ -41,14 +36,14 @@ These settings apply to account sign-in and signed access receipts.
    The file contains the **base64 DER PKCS8 private key** and is created with mode 0600 without overwriting existing files. The command prints only `PHOTODEPOT_LICENSE_PUBLIC_KEY`, the public key in base64url DER SPKI format. Save the private key in a secure backup. Set the printed public key as `PHOTODEPOT_LICENSE_PUBLIC_KEY` when building the desktop app, and use `PHOTODEPOT_LICENSE_API_URL=https://photodepot.app` (the default) for that build. The desktop API origin must match this deployment.
 
 3. Set `PHOTODEPOT_LICENSE_SIGNING_PRIVATE_KEY` as a Cloudflare Pages encrypted secret for `photodepot-web`. For example, run `pnpm exec wrangler pages secret put PHOTODEPOT_LICENSE_SIGNING_PRIVATE_KEY --project-name photodepot-web` and provide the file contents privately. Do not put it in `wrangler.jsonc`, `NEXT_PUBLIC_*`, a git-tracked file, a shell command argument, or logs.
-4. Configure WorkOS AuthKit in the intended environment with the standard hosted authentication domain. Set the application's **Initiate login URI** to `https://photodepot.app/api/account/auth/login`. AuthKit uses this URL when hosted sign-in needs to start again; pointing it at `/api/auth/login` incorrectly sends customers into the Owner organization flow. Register the exact redirect URI `https://photodepot.app/api/auth/callback` and the post-sign-out return URL `https://photodepot.app/`. Use standard email/password or Magic Auth; do not enable paid custom domains, Enterprise SSO, Directory Sync, Radar, or other add-ons. [AuthKit pricing](https://workos.com/pricing) currently includes RBAC and up to 1 million monthly active users free. This migration does not enable subscription charging.
+4. Configure WorkOS AuthKit in the intended environment with the standard hosted authentication domain. Set the application's **Initiate login URI** to `https://photodepot.app/api/account/auth/login`. AuthKit uses this URL when hosted sign-in needs to start again; pointing it at `/api/auth/login` incorrectly sends customers into the Owner organization flow. Register the exact redirect URI `https://photodepot.app/api/auth/callback` and the post-sign-out return URL `https://photodepot.app/`. Configure the Stripe Entitlements add-on following [billing setup](STRIPE.md). Account sign-in alone does not enable subscription charging.
 5. Create or select a dedicated Photodepot administration organization. Create the environment-level **Owner** role with the exact slug **`owner`**, leave **Member** (`member`) as the default role, and manually assign Owner to the administrator's membership in that organization. Copy that organization's ID into the application configuration. An Owner in a different organization is not authorized. Do not automatically enroll new signups into the admin organization, enable email-domain auto-enrollment, or make Owner the default. [WorkOS roles documentation](https://workos.com/docs/authkit/roles-and-permissions) explains membership role assignment.
 6. Set Pages environment variables `WORKOS_CLIENT_ID`, `WORKOS_ADMIN_ORGANIZATION_ID`, and `WORKOS_REDIRECT_URI=https://photodepot.app/api/auth/callback`. The administration organization setting is required only for Owner routes; customers do not need organization membership or that setting to sign in. Store `WORKOS_API_KEY` from the same WorkOS Production environment as an encrypted Pages secret. Generate a random `WORKOS_COOKIE_PASSWORD` of at least 32 characters and store it as another encrypted secret. Login uses public PKCE; the API key is used only by server user-management APIs. Keep secrets out of `wrangler.jsonc`, `NEXT_PUBLIC_*`, Git, command arguments, logs, and desktop builds. Missing or invalid settings fail closed.
 7. Leave previews unavailable for sign-in/administration unless separate staging configuration is deliberate. Every admin API and page enforces Owner membership in the dedicated organization. Account login uses separate encrypted cookies and grants no administration access. All sign-in, subscription, pairing, approval, and verification responses are `private, no-store`; keep `/account/*` in Pages Function routing. A desktop built with a test public key cannot trust production receipts.
 8. Run `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm test:auth-browser`, `pnpm test:dashboard`, `pnpm build`, and `pnpm functions:build`, then deploy the backend. The authentication browser regression uses local fixtures and Chromium to verify that sign-out reaches the hosted session while the approval page still blocks external form submissions. Set `PHOTODEPOT_TEST_BROWSER_CHANNEL=chrome` to use installed Chrome instead of bundled Chromium. Production uses WorkOS as the administration login gate; the former Cloudflare Access application and settings were removed after verification. Check Owner access, Member/anonymous denial, alternate-host denial, subscription expiry/revocation, and account pairing. Desktop proof endpoints remain public and require cryptographic device signatures.
 9. Test account sign-in and Trial/Standard subscriptions on a desktop build containing the matching vendor public key. Then release that desktop build through the established signing/notarization process.
 
-For local testing, follow the website README's standard `pnpm preview` workflow and configure the license signing and WorkOS settings in `.dev.vars`. Register the matching local callback URI in WorkOS. The admin API requires an authenticated WorkOS session with the `owner` role in the configured admin organization. Automated integration tests use isolated authentication fixtures and never make real WorkOS calls. All builds use the same manual access policy.
+For local testing, follow the website README's standard `pnpm preview` workflow and configure the license signing and WorkOS settings in `.dev.vars`. Register the matching local callback URI in WorkOS. The admin API requires an authenticated WorkOS session with the `owner` role in the configured admin organization. Automated integration tests use isolated authentication fixtures and never make real WorkOS calls. All builds use the same subscription entitlement policy.
 
 ## Administration sign-in
 
@@ -116,8 +111,8 @@ Verification runs at startup, focus/resume, and every 15 seconds through one
 coalesced pipeline. Cleanup retries do not depend on a UI state-change event.
 
 Legacy license activation/verification and subscription-bound pairing return
-update-required responses. Key users update, sign in, and receive Owner-assigned
-account access; there is no automatic key conversion. Publish the supported desktop
+update-required responses. Key users update, sign in, and subscribe; there is no
+automatic key conversion. Publish the supported desktop
 before retiring old clients. Already-running historical binaries cannot be remotely
 rewritten; retirement follows their existing verification and launch behavior.
 
@@ -126,13 +121,20 @@ HMAC-keyed rate limits without storing raw IPs or request bodies. Protect D1 and
 device-key backups. Keep the signing key stable: rotation requires distributing a
 desktop trusting the replacement public key first.
 
-## Billing later
+## Stripe billing
 
-The access resolver is the integration boundary. Stripe will own paid terms,
-invoices, cancellation, coupons, promotion codes, and charge dates through hosted
-Checkout and billing management. WorkOS's Stripe add-on associates the customer
-with a private personal organization, separate from the administration organization.
-No team UI or seat sync is needed. Manual users enter billing only through explicit
-checkout. Extending paid time must postpone the next charge in Stripe and use its
-confirmed result for access; a local grant edit is not a billing extension. This
-foundation adds no provider tables, checkout endpoints, or coupon engine.
+WorkOS's Stripe Entitlements add-on supplies the paid feature claim. The backend
+checks its signed token against the account's private personal organization and
+configured feature key. Manual grants never authorize access. Stripe provides
+Checkout, Portal, discounts and Tax; live subscription details are for display.
+No custom Stripe webhook/invoice reconciliation grants access.
+
+A separate encrypted, backend-owned WorkOS session supports existing desktop
+sessions without sharing the browser's rotating refresh token. The server signs
+the existing receipt format with a stable identity and bounded 48-hour offline
+authorization deadline. This deadline is not a subscription renewal date. Provider
+failures do not extend it; expired or revoked WorkOS authorization requires
+account confirmation. Free and discounted subscriptions use the same entitlement
+verification and signed receipt path as full-price subscriptions.
+
+Billing is disabled by default. See [setup and verification](STRIPE.md).

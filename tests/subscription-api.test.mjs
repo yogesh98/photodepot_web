@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { generateKeyPairSync, sign } from "node:crypto"
+import { generateKeyPairSync, randomUUID, sign } from "node:crypto"
 import { readFile, readdir } from "node:fs/promises"
 import { after, before, beforeEach, test } from "node:test"
 import { sealData } from "iron-session"
@@ -7,9 +7,12 @@ import { getPlatformProxy, unstable_splitSqlQuery } from "wrangler"
 import { handleAdminSubscriptions } from "../functions/api/admin/subscriptions.ts"
 import { handleAdminWaitlist } from "../functions/api/admin/waitlist.ts"
 import { setSubscription } from "../lib/subscription-store.ts"
+import { getAccountEntitlement } from "../lib/account-entitlement.ts"
+import { workosBillingConfiguration } from "../lib/workos-entitlements.ts"
 
 const origin = "https://photodepot.app"
 const clientId = "client_subscription_api"
+const billingClientId = "client_subscription_api_billing"
 const organizationId = "org_subscription_api_admin"
 const password = "subscription-api-cookie-fixture-at-least-32-characters"
 const adminEmail = "owner@example.test"
@@ -29,6 +32,7 @@ let platform,
   workosUsers,
   userRequests,
   userFailure,
+  billingFailure,
   listPageSize
 function jwt(claims = {}) {
   const header = Buffer.from(
@@ -71,6 +75,7 @@ before(async () => {
   env = {
     ...platform.env,
     WORKOS_CLIENT_ID: clientId,
+    WORKOS_BILLING_CLIENT_ID: billingClientId,
     WORKOS_ADMIN_ORGANIZATION_ID: organizationId,
     WORKOS_COOKIE_PASSWORD: password,
     WORKOS_REDIRECT_URI: `${origin}/api/auth/callback`,
@@ -92,11 +97,22 @@ before(async () => {
   originalFetch = globalThis.fetch
   globalThis.fetch = async (input, options) => {
     const url = new URL(String(input))
-    if (url.href === `https://api.workos.com/sso/jwks/${clientId}`)
+    if (
+      [clientId, billingClientId].some(
+        (id) => url.href === `https://api.workos.com/sso/jwks/${id}`
+      )
+    )
       return Response.json({ keys: [jwk] })
     if (url.pathname === "/user_management/authenticate") {
       const body = JSON.parse(options.body)
       assert.equal(body.grant_type, "refresh_token")
+      if (body.client_id === billingClientId) {
+        assert.equal(billingFailure, 503)
+        return Response.json(
+          { message: "Fixture billing refresh outage" },
+          { status: billingFailure }
+        )
+      }
       assert.equal(body.organization_id, organizationId)
       assert.equal("client_secret" in body, false)
       return Response.json({
@@ -153,10 +169,17 @@ beforeEach(async () => {
   ]
   userRequests = []
   userFailure = undefined
+  billingFailure = undefined
   listPageSize = 100
   await env.DB.batch(
     [
       "DELETE FROM account_devices",
+      "DELETE FROM account_device_audit",
+      "DELETE FROM desktop_sessions",
+      "DELETE FROM workos_entitlements",
+      "DELETE FROM workos_billing_sessions",
+      "DELETE FROM stripe_customers",
+      "DELETE FROM account_entitlements",
       "DELETE FROM subscription_audit",
       "DELETE FROM subscriptions",
       "DELETE FROM waitlist",
@@ -288,6 +311,8 @@ test("listing WorkOS users is read-only and does not itself trigger signup trial
     emailVerified: true,
     createdAt: Date.parse(workosUsers[0].created_at),
     subscription: null,
+    billing: null,
+    managed: null,
     access: {
       tier: "free",
       status: "none",
@@ -297,6 +322,7 @@ test("listing WorkOS users is read-only and does not itself trigger signup trial
       canUseLocal: false,
       canHost: false,
     },
+    accessUnavailable: false,
     devices: [],
   })
   workosUsers.unshift(user("user_api_new", "new@example.test"))
@@ -331,191 +357,6 @@ test("user pagination uses the WorkOS cursor and rejects malformed cursors befor
     )
   assert.equal(userRequests.length, start)
 })
-test("setting and extending subscriptions use exact day lengths and stable account identity", async () => {
-  const created = await api(setBody())
-  assert.equal(created.status, 201)
-  let subscription = (await created.json()).subscription
-  assert.equal(subscription.userId, "user_api_trial")
-  assert.equal(subscription.type, "trial")
-  assert.equal(subscription.status, "active")
-  assert.equal(subscription.endsAt - subscription.startsAt, 14 * day)
-  const id = subscription.id
-  const edited = await api(
-    setBody("user_api_trial", {
-      type: "regular",
-      durationDays: 365,
-      expectedRevision: 1,
-    })
-  )
-  subscription = (await edited.json()).subscription
-  assert.equal(subscription.id, id)
-  assert.equal(subscription.type, "regular")
-  assert.equal(subscription.revision, 2)
-  assert.equal(subscription.endsAt - subscription.startsAt, 365 * day)
-  const previousEnd = subscription.endsAt
-  const extended = await api({
-    action: "extend",
-    userId: "user_api_trial",
-    durationDays: 7,
-    expectedRevision: 2,
-  })
-  subscription = (await extended.json()).subscription
-  assert.equal(subscription.type, "regular")
-  assert.equal(subscription.endsAt, previousEnd + 7 * day)
-  const page = await (await api()).json()
-  assert.deepEqual(
-    page.users.find((entry) => entry.id === "user_api_trial").subscription,
-    subscription
-  )
-  const history = await (
-    await api(undefined, "?userId=user_api_trial&history=1")
-  ).json()
-  assert.equal(history.audit.length, 3)
-  assert.ok(history.audit.every((entry) => entry.actor === adminEmail))
-})
-test("revoked access stays revoked on extension and restoring an ended term keeps it expired", async () => {
-  await api(setBody())
-  const revoked = await (
-    await api({
-      action: "revoke",
-      userId: "user_api_trial",
-      expectedRevision: 1,
-    })
-  ).json()
-  assert.equal(revoked.subscription.status, "revoked")
-  const extended = await (
-    await api({
-      action: "extend",
-      userId: "user_api_trial",
-      durationDays: 7,
-      expectedRevision: 2,
-    })
-  ).json()
-  assert.equal(extended.subscription.status, "revoked")
-  const restored = await (
-    await api({
-      action: "restore",
-      userId: "user_api_trial",
-      expectedRevision: 3,
-    })
-  ).json()
-  assert.equal(restored.subscription.status, "active")
-  const now = Date.now()
-  await setSubscription(
-    env.DB,
-    {
-      userId: "user_api_regular",
-      type: "regular",
-      expectedRevision: 0,
-      endsAt: now - day,
-    },
-    adminEmail,
-    now - 10 * day
-  )
-  await api({
-    action: "revoke",
-    userId: "user_api_regular",
-    expectedRevision: 1,
-  })
-  const old = await (
-    await api({
-      action: "restore",
-      userId: "user_api_regular",
-      expectedRevision: 2,
-    })
-  ).json()
-  assert.equal(old.subscription.status, "expired")
-  const renewed = await (
-    await api({
-      action: "extend",
-      userId: "user_api_regular",
-      durationDays: 30,
-      expectedRevision: 3,
-    })
-  ).json()
-  assert.equal(renewed.subscription.status, "active")
-  assert.ok(renewed.subscription.endsAt >= now + 30 * day)
-})
-test("stale revisions produce a conflict without changing subscription state or audit history", async () => {
-  await api(setBody())
-  const duplicate = await api(setBody())
-  assert.equal(duplicate.status, 409)
-  await api({ action: "revoke", userId: "user_api_trial", expectedRevision: 1 })
-  const stale = await api(setBody("user_api_trial", { expectedRevision: 1 }))
-  assert.equal(stale.status, 409)
-  assert.equal(await count("subscription_audit"), 2)
-  const record = await env.DB.prepare(
-    "SELECT status, revision FROM subscriptions WHERE user_id = ?"
-  )
-    .bind("user_api_trial")
-    .first()
-  assert.deepEqual(record, { status: "revoked", revision: 2 })
-})
-test("mutations require an existing WorkOS user and fail closed during lookup outages", async () => {
-  for (const action of ["set", "extend", "revoke", "restore"]) {
-    const missing = await api({
-      ...setBody("user_api_deleted"),
-      action,
-      expectedRevision: action === "set" ? 0 : 1,
-    })
-    assert.equal(missing.status, 404)
-  }
-  userFailure = 503
-  assert.equal((await api(setBody())).status, 503)
-  assert.equal(await count("subscriptions"), 0)
-})
-test("subscription mutations reject invalid fields, cross-origin requests and oversized JSON", async () => {
-  for (const durationDays of [0, -1, 3651, 1.5, "30", null])
-    assert.equal((await api(setBody(undefined, { durationDays }))).status, 400)
-  for (const expectedRevision of [-1, 0.5, "1", null, Number.MAX_SAFE_INTEGER])
-    assert.equal(
-      (await api(setBody(undefined, { expectedRevision }))).status,
-      400
-    )
-  for (const values of [
-    { type: "standard" },
-    { type: "owner" },
-    { action: "grant" },
-    { userId: "invalid" },
-  ])
-    assert.equal((await api(setBody(undefined, values))).status, 400)
-  assert.equal(
-    (await api(setBody(), "", { origin: "https://attacker.example" })).status,
-    403
-  )
-  assert.equal(
-    (await api(setBody(), "", { "content-type": "text/plain" })).status,
-    415
-  )
-  const suppliedCookie = await cookie()
-  const large = new Request(`${origin}/api/admin/subscriptions`, {
-    method: "POST",
-    headers: {
-      origin,
-      cookie: suppliedCookie,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({ ...setBody(), notes: "a".repeat(9000) }),
-  })
-  assert.equal((await handleAdminSubscriptions(large, env)).status, 413)
-  const malformed = new Request(`${origin}/api/admin/subscriptions`, {
-    method: "POST",
-    headers: {
-      origin,
-      cookie: suppliedCookie,
-      "content-type": "application/json",
-    },
-    body: "{",
-  })
-  assert.equal((await handleAdminSubscriptions(malformed, env)).status, 400)
-  const unsupported = await handleAdminSubscriptions(
-    request("", undefined, { cookie: suppliedCookie }, "PUT"),
-    env
-  )
-  assert.equal(unsupported.status, 405)
-  assert.equal(unsupported.headers.get("allow"), "GET, POST")
-  assert.equal(userRequests.length, 0)
-})
 test("user-list failures are service errors rather than empty account lists", async () => {
   userFailure = 503
   const outage = await api()
@@ -536,7 +377,7 @@ test("refreshed Owner cookies propagate on successful reads and rejected mutatio
       request("", body, { cookie: await cookie({ exp: 1 }) }),
       env
     )
-    assert.equal(response.status, body ? 400 : 200)
+    assert.equal(response.status, body ? 410 : 200)
     assert.ok(
       response.headers
         .getSetCookie()
@@ -547,215 +388,6 @@ test("refreshed Owner cookies propagate on successful reads and rejected mutatio
         )
     )
   }
-})
-
-test("dashboard overview counts the whole subscription database rather than the current WorkOS page", async (t) => {
-  const now = Date.now()
-  t.mock.method(Date, "now", () => now)
-  listPageSize = 1
-  await api(setBody("user_api_trial", { durationDays: 7 }))
-  await api(setBody("user_api_regular", { type: "regular", durationDays: 30 }))
-  await setSubscription(
-    env.DB,
-    {
-      userId: "user_not_on_page",
-      type: "trial",
-      expectedRevision: 0,
-      endsAt: now,
-    },
-    adminEmail,
-    now - day
-  )
-  await setSubscription(
-    env.DB,
-    {
-      userId: "user_other_hidden",
-      type: "regular",
-      expectedRevision: 0,
-      endsAt: now + day,
-    },
-    adminEmail,
-    now
-  )
-  await env.DB.prepare(
-    "UPDATE subscriptions SET status = 'revoked' WHERE user_id = 'user_other_hidden'"
-  ).run()
-  const page = await (await api()).json()
-  assert.equal(page.users.length, 1)
-  assert.equal(page.nextCursor, "user_api_trial")
-  assert.deepEqual(page.overview, {
-    totalSubscriptions: 4,
-    active: 2,
-    activeTrials: 1,
-    activeStandard: 1,
-    expired: 1,
-    revoked: 1,
-    expiringSoon: 1,
-    assignedMacs: 0,
-    waitlistTotal: 0,
-    waitlistLast30Days: 0,
-    openRequests: 0,
-    asOf: now,
-    expiringWithinDays: 7,
-  })
-  assert.equal(page.billingMode, "manual")
-  assert.equal("trialDays" in page, false)
-})
-
-test("exact grant and extension dates, administrator notes and reasons are persisted with guarded audits", async (t) => {
-  const now = Date.now()
-  t.mock.method(Date, "now", () => now)
-  const granted = await api({
-    action: "set",
-    userId: "user_api_trial",
-    type: "trial",
-    endsAt: now + 10 * day,
-    expectedRevision: 0,
-    notes: "  Manual customer grant  ",
-    reason: "Approved by owner",
-  })
-  assert.equal(granted.status, 201)
-  const original = (await granted.json()).subscription
-  assert.equal(original.endsAt, now + 10 * day)
-  assert.equal(original.notes, "Manual customer grant")
-  const extended = await api({
-    action: "extend",
-    userId: "user_api_trial",
-    endsAt: now + 20 * day,
-    expectedRevision: 1,
-    reason: "Support extension",
-  })
-  assert.equal(extended.status, 200)
-  const extension = (await extended.json()).subscription
-  assert.equal(extension.startsAt, original.startsAt)
-  assert.equal(extension.endsAt, now + 20 * day)
-  assert.equal(extension.notes, original.notes)
-  const annotated = await api({
-    action: "update-notes",
-    userId: "user_api_trial",
-    notes: "Support case 42",
-    expectedRevision: 2,
-    reason: "Internal account review",
-  })
-  assert.equal(annotated.status, 200)
-  assert.equal((await annotated.json()).subscription.revision, 3)
-  const history = await (
-    await api(undefined, "?history=1&userId=user_api_trial")
-  ).json()
-  assert.equal(history.subscription.notes, "Support case 42")
-  assert.deepEqual(history.devices, [])
-  assert.equal(
-    history.audit.find((entry) => entry.action === "set").reason,
-    "Approved by owner"
-  )
-  assert.equal(
-    history.audit.find((entry) => entry.action === "extend").reason,
-    "Support extension"
-  )
-  assert.equal(
-    history.audit.find((entry) => entry.action === "update-notes").reason,
-    "Internal account review"
-  )
-  const shortened = await api({
-    action: "extend",
-    userId: "user_api_trial",
-    endsAt: original.endsAt,
-    expectedRevision: 3,
-  })
-  assert.equal(shortened.status, 400)
-  const conflict = await api({
-    action: "update-notes",
-    userId: "user_api_trial",
-    notes: "Stale client notes",
-    expectedRevision: 2,
-  })
-  assert.equal(conflict.status, 409)
-  assert.equal(await count("subscription_audit"), 3)
-})
-
-test("invalid notes, reasons and exact expiry fields fail before contacting WorkOS or mutating access", async () => {
-  const future = Date.now() + day
-  for (const values of [
-    { notes: 42 },
-    { notes: null },
-    { notes: "a".repeat(2001) },
-    { reason: 42 },
-    { reason: null },
-    { reason: "a".repeat(1001) },
-    { endsAt: future },
-    { durationDays: undefined, endsAt: null },
-    { durationDays: undefined, endsAt: "2030-01-01" },
-    { durationDays: undefined, endsAt: Date.now() - 1 },
-    { durationDays: undefined, endsAt: 8_640_000_000_000_001 },
-    { action: "update-notes", notes: undefined, expectedRevision: 1 },
-  ])
-    assert.equal((await api(setBody(undefined, values))).status, 400)
-  assert.equal(
-    (await api(setBody(), "", { "content-type": "application/json-invalid" }))
-      .status,
-    415
-  )
-  assert.equal(userRequests.length, 0)
-  assert.equal(await count("subscriptions"), 0)
-  assert.equal(await count("subscription_audit"), 0)
-})
-
-test("server filters and search find subscriptions beyond the initial WorkOS page", async () => {
-  workosUsers = Array.from({ length: 205 }, (_, index) =>
-    user(`user_search_${index}`, `person${index}@example.test`)
-  )
-  listPageSize = 20
-  await api(
-    setBody("user_search_204", {
-      type: "regular",
-      notes: "Priority portrait studio",
-    })
-  )
-  const canceled = await api({
-    action: "set-reminders",
-    userId: "user_search_204",
-    expectedRevision: 1,
-    enabled: false,
-  })
-  assert.equal(canceled.status, 200)
-  assert.equal((await canceled.json()).subscription.remindersEnabled, false)
-  // Ten source pages are a bounded scan; its cursor must not imply an empty directory.
-  const initial = await (await api(undefined, "?filter=standard")).json()
-  assert.deepEqual(initial.users, [])
-  assert.equal(initial.nextCursor, "user_search_199")
-  const next = await (
-    await api(undefined, `?filter=standard&cursor=${initial.nextCursor}`)
-  ).json()
-  assert.deepEqual(
-    next.users.map(({ id }) => id),
-    ["user_search_204"]
-  )
-  assert.equal(next.nextCursor, null)
-  const searched = await (
-    await api(undefined, "?q=person204&cursor=user_search_199")
-  ).json()
-  assert.equal(searched.users[0].id, "user_search_204")
-  const notesSearch = await (
-    await api(undefined, "?q=portrait%20studio&cursor=user_search_199")
-  ).json()
-  assert.equal(notesSearch.users[0].id, "user_search_204")
-  for (const query of ["?filter=paid", `?q=${"x".repeat(201)}`])
-    assert.equal((await api(undefined, query)).status, 400)
-  const stale = await api({
-    action: "set-reminders",
-    userId: "user_search_204",
-    expectedRevision: 1,
-    enabled: true,
-  })
-  assert.equal(stale.status, 409)
-  const resumed = await api({
-    action: "set-reminders",
-    userId: "user_search_204",
-    expectedRevision: 2,
-    enabled: true,
-  })
-  assert.equal(resumed.status, 200)
-  assert.equal((await resumed.json()).subscription.remindersEnabled, true)
 })
 
 test("waitlist is Owner-only, globally searchable, paginated and counted independently of the current page", async () => {
@@ -836,4 +468,219 @@ test("waitlist is Owner-only, globally searchable, paginated and counted indepen
   const overview = (await (await api()).json()).overview
   assert.equal(overview.waitlistTotal, 55)
   assert.equal(overview.waitlistLast30Days, 50)
+})
+
+test("manual administration is retired without changing stored grants or audit history", async () => {
+  const grant = await setSubscription(
+    env.DB,
+    {
+      userId: "user_api_trial",
+      type: "trial",
+      endsAt: Date.now() + day,
+      expectedRevision: 0,
+    },
+    adminEmail
+  )
+  const before = (await env.DB.prepare("SELECT * FROM subscriptions").all())
+    .results
+  const audits = (
+    await env.DB.prepare("SELECT * FROM subscription_audit").all()
+  ).results
+  const lookups = userRequests.length
+  for (const action of [
+    "set",
+    "extend",
+    "revoke",
+    "restore",
+    "update-notes",
+    "set-reminders",
+    "approve",
+  ]) {
+    const result = await api({
+      action,
+      userId: grant.userId,
+      expectedRevision: grant.revision,
+      durationDays: 30,
+      type: "regular",
+      enabled: true,
+      notes: "Ignored",
+    })
+    assert.equal(result.status, 410, action)
+    assert.match((await result.json()).error, /retired/)
+  }
+  assert.deepEqual(
+    (await env.DB.prepare("SELECT * FROM subscriptions").all()).results,
+    before
+  )
+  assert.deepEqual(
+    (await env.DB.prepare("SELECT * FROM subscription_audit").all()).results,
+    audits
+  )
+  assert.equal(userRequests.length, lookups)
+  const detail = await (
+    await api(undefined, "?history=1&userId=user_api_trial")
+  ).json()
+  assert.equal(detail.subscription.id, grant.id)
+  assert.equal(detail.access.canHost, false)
+  assert.equal("requests" in detail, false)
+  const page = await (await api()).json()
+  assert.equal(page.billingMode, "subscriptions")
+  assert.equal(page.overview.active, 0)
+  assert.equal(page.overview.totalSubscriptions, 0)
+})
+
+test("remaining device administration retains origin, body size and method checks", async () => {
+  assert.equal(
+    (
+      await api({ action: "remove-device", userId: "user_api_trial" }, "", {
+        origin: "https://attacker.example",
+      })
+    ).status,
+    403
+  )
+  const oversized = await handleAdminSubscriptions(
+    new Request(origin + "/api/admin/subscriptions", {
+      method: "POST",
+      headers: {
+        cookie: await cookie(),
+        origin,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        action: "remove-device",
+        padding: "x".repeat(20_000),
+      }),
+    }),
+    env
+  )
+  assert.equal(oversized.status, 413)
+  assert.equal(
+    (
+      await handleAdminSubscriptions(
+        request("", undefined, { cookie: await cookie() }, "DELETE"),
+        env
+      )
+    ).status,
+    405
+  )
+})
+
+test("billing refresh outages preserve admin account history and device removal without authorizing access", async () => {
+  const userId = "user_api_trial"
+  const now = Date.now()
+  const personalOrganization = "org_api_personal"
+  const backendSid = "session_api_billing"
+  const desktopSessionId = randomUUID()
+  const grant = await setSubscription(
+    env.DB,
+    {
+      userId,
+      type: "regular",
+      endsAt: now + day,
+      expectedRevision: 0,
+      notes: "Historical support notes",
+    },
+    adminEmail
+  )
+  const encrypted = await sealData(
+    {
+      version: 1,
+      purpose: "photodepot-billing-auth",
+      clientId: billingClientId,
+      userId,
+      organizationId: personalOrganization,
+      sessionId: backendSid,
+      accessToken: jwt({
+        client_id: billingClientId,
+        sub: userId,
+        sid: backendSid,
+        org_id: personalOrganization,
+        iat: Math.floor(now / 1000) - 60,
+        exp: Math.floor(now / 1000) - 1,
+        entitlements: ["photodepot-standard"],
+      }),
+      refreshToken: "billing_refresh_fixture",
+    },
+    { password, ttl: 0 }
+  )
+  await env.DB.batch([
+    env.DB.prepare(
+      "INSERT INTO stripe_customers (user_id,stripe_customer_id,workos_organization_id,customer_create_token) VALUES (?,?,?,?)"
+    ).bind(userId, "cus_api_fixture", personalOrganization, "create_fixture"),
+    env.DB.prepare(
+      "INSERT INTO workos_billing_sessions (user_id,session_id,encrypted_tokens,updated_at) VALUES (?,?,?,?)"
+    ).bind(userId, backendSid, encrypted, now),
+    env.DB.prepare(
+      "INSERT INTO workos_entitlements (user_id,organization_id,context,enabled,issued_at,expires_at,revision) VALUES (?,?,?,1,?,?,1)"
+    ).bind(
+      userId,
+      personalOrganization,
+      workosBillingConfiguration(env).context,
+      now - 60_000,
+      now - 1000
+    ),
+    env.DB.prepare(
+      "INSERT INTO desktop_sessions (id,device_id,user_id,email,public_key,created_at,updated_at,device_name) VALUES (?,?,?,?,?,?,?,?)"
+    ).bind(
+      desktopSessionId,
+      "a".repeat(64),
+      userId,
+      "trial@example.test",
+      "fixture_public_key",
+      now,
+      now,
+      "Customer Mac"
+    ),
+  ])
+  billingFailure = 503
+  await assert.rejects(getAccountEntitlement(env, userId))
+  const response = await api(undefined, `?history=1&userId=${userId}`)
+  assert.equal(response.status, 200)
+  const details = await response.json()
+  assert.equal(details.accessUnavailable, true)
+  assert.equal(details.user.accessUnavailable, true)
+  assert.equal(details.access.canHost, false)
+  assert.equal(details.access.canUseLocal, false)
+  assert.equal(details.managed, null)
+  assert.equal(details.subscription.id, grant.id)
+  assert.equal(details.subscription.notes, "Historical support notes")
+  assert.equal(details.audit.length, 1)
+  assert.equal(details.devices[0].sessionId, desktopSessionId)
+  assert.equal(details.user.devices[0].deviceName, "Customer Mac")
+
+  const directory = await api()
+  assert.equal(directory.status, 200)
+  const directoryData = await directory.json()
+  assert.equal(directoryData.users.length, 3)
+  assert.equal(directoryData.users[0].accessUnavailable, true)
+  assert.ok(
+    directoryData.users.slice(1).every((user) => !user.accessUnavailable)
+  )
+
+  const removed = await api({
+    action: "remove-device",
+    userId,
+    sessionId: desktopSessionId,
+    expectedSessionRevision: 1,
+    reason: "Customer requested removal during billing outage",
+  })
+  assert.equal(removed.status, 200)
+  assert.deepEqual((await removed.json()).devices, [])
+  const updated = await (
+    await api(undefined, `?history=1&userId=${userId}`)
+  ).json()
+  assert.equal(updated.accessUnavailable, true)
+  assert.equal(updated.devices[0].current, false)
+  assert.equal(updated.deviceAudit.length, 1)
+  assert.equal(await count("account_entitlements"), 0)
+  assert.equal(
+    (
+      await env.DB.prepare(
+        "SELECT reauth_needed FROM workos_billing_sessions WHERE user_id=?"
+      )
+        .bind(userId)
+        .first()
+    ).reauth_needed,
+    0
+  )
 })

@@ -1,7 +1,6 @@
 import { timingSafeEqual } from "node:crypto"
 import type { PagesFunction } from "@cloudflare/workers-types"
 import { json, type Env } from "../../../lib/cloudflare.ts"
-import { runSubscriptionReminders } from "../../../lib/subscription-reminders.ts"
 
 export async function handleScheduledReminders(request: Request, env: Env) {
   if (request.method !== "POST") {
@@ -21,11 +20,13 @@ export async function handleScheduledReminders(request: Request, env: Env) {
     !timingSafeEqual(supplied, expected)
   )
     return json({ error: "Unauthorized." }, 401)
-  try {
-    return json(await runSubscriptionReminders(env))
-  } catch {
-    return json({ error: "Reminder delivery unavailable." }, 503)
-  }
+  return json(
+    {
+      error:
+        "Manual access reminders have been retired. Subscription billing notifications are managed by Stripe.",
+    },
+    410
+  )
 }
 export const onRequest: PagesFunction<Env> = (context) =>
   handleScheduledReminders(

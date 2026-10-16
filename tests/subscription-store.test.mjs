@@ -118,6 +118,9 @@ before(async () => {
   await migrate("0011_desktop_account_sessions.sql")
   await migrate("0012_desktop_device_metadata.sql")
   await migrate("0013_manual_access_cleanup.sql")
+  await migrate("0014_stripe_billing.sql")
+  await migrate("0015_account_entitlements.sql")
+  await migrate("0016_workos_entitlements.sql")
 })
 
 after(async () => {
@@ -577,7 +580,7 @@ test("exact expiration extensions preserve the start, type, notes and revocation
   assert.equal((await listSubscriptionAudit(database, userId)).length, 3)
 })
 
-test("overview includes all subscriptions and classifies expiration boundaries independently of user pages", async () => {
+test("overview excludes historical manual grants in every state", async () => {
   const before = await getSubscriptionOverview(database, now)
   await set("user_overview_trial", { endsAt: now + 7 * day })
   await set("user_overview_standard", {
@@ -597,13 +600,14 @@ test("overview includes all subscriptions and classifies expiration boundaries i
   )
   const result = await getSubscriptionOverview(database, now)
   for (const [field, added] of Object.entries({
-    totalSubscriptions: 4,
-    active: 2,
-    activeTrials: 1,
-    activeStandard: 1,
-    expired: 1,
-    revoked: 1,
-    expiringSoon: 1,
+    totalSubscriptions: 0,
+    active: 0,
+    activeTrials: 0,
+    activeStandard: 0,
+    verificationNeeded: 0,
+    expired: 0,
+    revoked: 0,
+    expiringSoon: 0,
   }))
     assert.equal(result[field], before[field] + added, field)
   assert.equal(result.assignedMacs, before.assignedMacs)

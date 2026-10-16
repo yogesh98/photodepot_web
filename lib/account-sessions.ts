@@ -10,8 +10,8 @@ import {
   validDeviceProof,
 } from "./license-crypto.ts"
 import { allowLicenseAttempt } from "./license-rate-limit.ts"
-import { getSubscription, subscriptionReason } from "./subscription-store.ts"
-import { resolveAccountAccess } from "./account-access.ts"
+import { subscriptionReason } from "./subscription-store.ts"
+import { getAccountEntitlement } from "./account-entitlement.ts"
 import type {
   AccountDevice,
   AccountDeviceHistory,
@@ -314,8 +314,20 @@ export async function desktopSessionResponse(
   challenge: string,
   now = Date.now()
 ) {
-  const subscription =
-    row.active === 1 ? await getSubscription(env.DB, row.user_id, now) : null
+  let entitlement: Awaited<ReturnType<typeof getAccountEntitlement>> | null =
+    null
+  let entitlementUnavailable = false
+  if (row.active === 1) {
+    try {
+      entitlement = await getAccountEntitlement(env, row.user_id, now)
+    } catch {
+      // Account identity remains usable during a billing outage. The signed
+      // marker lets clients retain an existing paid proof within its original
+      // offline limits, without treating this response as a new paid grant.
+      entitlementUnavailable = true
+    }
+  }
+  const subscription = entitlement?.grant ?? null
   // A removal can race the subscription read; sign only the latest session.
   row = (await getDesktopSession(env.DB, row.id))!
   const signer = signingKey(env.PHOTODEPOT_LICENSE_SIGNING_PRIVATE_KEY)
@@ -327,6 +339,9 @@ export async function desktopSessionResponse(
       userId: row.user_id,
       email: row.email,
       status: row.active === 1 ? "active" : "revoked",
+      ...(row.active === 1 && entitlementUnavailable
+        ? { entitlementStatus: "unavailable" }
+        : {}),
       revision: row.revision,
       challenge,
       issuedAt: now,
@@ -340,9 +355,7 @@ export async function desktopSessionResponse(
     ),
   }
   const receipt =
-    row.active === 1 &&
-    subscription !== null &&
-    resolveAccountAccess(subscription, now).canHost
+    row.active === 1 && subscription !== null && entitlement?.access.canHost
       ? signedReceipt(
           signer,
           {

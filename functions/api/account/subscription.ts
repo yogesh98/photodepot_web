@@ -10,22 +10,13 @@ import {
   sameOrigin,
   type Env,
 } from "../../../lib/cloudflare.ts"
-import {
-  changeSubscriptionReminders,
-  getSubscription,
-  SubscriptionConflictError,
-} from "../../../lib/subscription-store.ts"
+import { getAccountEntitlement } from "../../../lib/account-entitlement.ts"
 import { resolveAccountAccess } from "../../../lib/account-access.ts"
 import {
   AccountDeviceConflictError,
   listAccountDevices,
   removeAccountDevice,
 } from "../../../lib/account-sessions.ts"
-import {
-  AccountRequestLimitError,
-  createAccountRequest,
-  listAccountRequests,
-} from "../../../lib/account-requests.ts"
 
 export async function handleAccountSubscription(request: Request, env: Env) {
   const auth = await authenticateWorkOSAccount(request, env)
@@ -53,38 +44,24 @@ export async function handleAccountSubscription(request: Request, env: Env) {
         return respond(json({ error: "Invalid request." }, 400))
       const body = supplied as Record<string, unknown>
       if (
-        body.userId !== undefined ||
-        !["request-renewal", "remove-device", "set-reminders"].includes(
-          body.action as string
-        )
+        [
+          "request-renewal",
+          "request-reset-device",
+          "reset-device",
+          "set-reminders",
+        ].includes(body.action as string)
       )
-        return respond(json({ error: "Invalid account request." }, 400))
-      if (body.action === "set-reminders") {
-        if (
-          body.deviceId !== undefined ||
-          body.sessionId !== undefined ||
-          body.message !== undefined
-        )
-          return respond(json({ error: "Choose a reminder preference." }, 400))
-        const grant = await changeSubscriptionReminders(
-          env.DB,
-          auth.userId,
-          body.enabled as boolean,
-          body.expectedRevision as number,
-          auth.email,
-          Date.now(),
-          "Customer reminder preference"
-        )
         return respond(
-          json({
-            access: resolveAccountAccess(grant),
-            reminders: {
-              enabled: grant.remindersEnabled,
-              revision: grant.revision,
+          json(
+            {
+              error:
+                "Access requests and manual grants have been retired. Manage your subscription from billing.",
             },
-          })
+            410
+          )
         )
-      }
+      if (body.userId !== undefined || body.action !== "remove-device")
+        return respond(json({ error: "Invalid account action." }, 400))
       if (body.action === "remove-device") {
         if (body.message !== undefined)
           return respond(json({ error: "Choose a current computer." }, 400))
@@ -99,43 +76,34 @@ export async function handleAccountSubscription(request: Request, env: Env) {
         )
         return respond(json({ devices }))
       }
-      if (body.deviceId !== undefined || body.sessionId !== undefined)
-        return respond(
-          json({ error: "An access request does not select a computer." }, 400)
-        )
-      const result = await createAccountRequest(env.DB, {
-        userId: auth.userId,
-        email: auth.email,
-        action: "renewal",
-        message: body.message as string | undefined,
-      })
-      return respond(json(result, result.created ? 201 : 200))
     }
-    const grant = await getSubscription(env.DB, auth.userId)
+
+    let access = resolveAccountAccess(null)
+    let accessUnavailable = false
+    try {
+      access = (await getAccountEntitlement(env, auth.userId)).access
+    } catch {
+      // Account management does not require paid access. Failed authorization
+      // checks must not hide the customer's devices or billing controls.
+      accessUnavailable = true
+    }
     return respond(
       json({
         user: { email: auth.email },
-        access: resolveAccountAccess(grant),
-        reminders: {
-          enabled: grant?.remindersEnabled ?? true,
-          revision: grant?.revision ?? 0,
-        },
+        access,
+        accessUnavailable,
         devices: await listAccountDevices(env.DB, auth.userId),
-        requests: await listAccountRequests(env.DB, auth.userId),
       })
     )
   } catch (error) {
     const status =
       error instanceof BodyError
         ? error.status
-        : error instanceof AccountRequestLimitError
-          ? 429
-          : error instanceof SubscriptionConflictError ||
-              error instanceof AccountDeviceConflictError
-            ? 409
-            : error instanceof TypeError
-              ? 400
-              : 503
+        : error instanceof AccountDeviceConflictError
+          ? 409
+          : error instanceof TypeError
+            ? 400
+            : 503
     return respond(
       json(
         {
