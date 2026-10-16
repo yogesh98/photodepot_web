@@ -1210,9 +1210,10 @@ test("annual pricing and existing discounts come from Stripe rather than a clien
 })
 
 test("invalid or mismatched configured prices cannot be advertised or purchased", async () => {
-  const deps = checkoutDeps({ connected: false })
+  const deps = checkoutDeps()
   const retrieve = deps.stripe.prices.retrieve
   for (const invalid of [
+    { active: false },
     { unit_amount: null },
     { unit_amount: -1 },
     { livemode: true },
@@ -1222,11 +1223,129 @@ test("invalid or mismatched configured prices cannot be advertised or purchased"
       ...(await retrieve(id)),
       ...invalid,
     })
+    const summary = await billingSummary(env, identity.userId, {
+      stripe: deps.stripe,
+    })
+    assert.deepEqual(summary.intervals, [])
+    assert.deepEqual(summary.prices, {})
+    for (const interval of ["monthly", "annual"])
+      await assert.rejects(
+        createBillingCheckout(env, identity, interval, deps),
+        /price needs review/
+      )
+    deps.stripe.subscriptions.list = async () => ({
+      data: [subscription()],
+      has_more: false,
+    })
     await assert.rejects(
-      billingSummary(env, identity.userId, { stripe: deps.stripe }),
+      createBillingSubscriptionFlow(env, identity, "upgrade", deps),
       /price needs review/
     )
+    deps.stripe.subscriptions.list = async () => ({
+      data: [],
+      has_more: false,
+    })
   }
+  assert.deepEqual(deps.created.sessions, [])
+  assert.deepEqual(deps.created.portals, [])
+})
+
+test("archived monthly or annual prices preserve existing subscription management", async () => {
+  customer()
+  const deps = checkoutDeps({ connected: false })
+  const retrieve = deps.stripe.prices.retrieve
+  for (const interval of ["monthly", "annual"]) {
+    const current = subscription()
+    current.items.data[0].price.id = `price_${interval}`
+    current.items.data[0].price.recurring.interval =
+      interval === "monthly" ? "month" : "year"
+    current.items.data[0].price.unit_amount =
+      interval === "monthly" ? 2000 : 20000
+    deps.stripe.subscriptions.list = async () => ({
+      data: [current],
+      has_more: false,
+    })
+    deps.stripe.prices.retrieve = async (id) => ({
+      ...(await retrieve(id)),
+      active: id !== `price_${interval}`,
+    })
+
+    const summary = await billingSummary(env, identity.userId, {
+      stripe: deps.stripe,
+    })
+    const availableInterval = interval === "monthly" ? "annual" : "monthly"
+    assert.deepEqual(summary.intervals, [availableInterval])
+    assert.deepEqual(summary.prices, {
+      [availableInterval]: {
+        amount: availableInterval === "monthly" ? 2000 : 20000,
+        currency: "usd",
+      },
+    })
+    assert.equal(summary.enabled, true)
+    assert.equal(summary.hasCustomer, true)
+    assert.equal(summary.portalEnabled, true)
+    assert.equal(summary.subscription.status, "active")
+    assert.equal(summary.subscription.interval, interval)
+    assert.equal(
+      summary.subscription.amount,
+      current.items.data[0].price.unit_amount
+    )
+    assert.equal(summary.subscription.endsAt, monthEnd * 1000)
+    assert.equal(
+      (await createBillingSubscriptionFlow(env, identity, "cancel", deps))
+        .provider,
+      "stripe"
+    )
+    assert.equal(
+      (await createBillingPortal(env, identity, deps)).provider,
+      "stripe"
+    )
+  }
+  assert.deepEqual(deps.created.sessions, [])
+})
+
+test("all unavailable prices disable purchases without hiding existing billing", async () => {
+  const deps = checkoutDeps({ connected: false })
+  const retrieve = deps.stripe.prices.retrieve
+  deps.stripe.prices.retrieve = async (id) => {
+    if (id === "price_annual") throw new Error("Price retrieval unavailable")
+    return { ...(await retrieve(id)), active: false }
+  }
+  const unregistered = await billingSummary(env, identity.userId, {
+    stripe: deps.stripe,
+  })
+  assert.equal(unregistered.enabled, false)
+  assert.equal(unregistered.hasCustomer, false)
+  assert.deepEqual(unregistered.intervals, [])
+  assert.deepEqual(unregistered.prices, {})
+
+  customer()
+  deps.stripe.subscriptions.list = async () => ({
+    data: [subscription()],
+    has_more: false,
+  })
+  const existing = await billingSummary(env, identity.userId, {
+    stripe: deps.stripe,
+  })
+  assert.equal(existing.enabled, true)
+  assert.equal(existing.hasCustomer, true)
+  assert.equal(existing.portalEnabled, true)
+  assert.deepEqual(existing.intervals, [])
+  assert.deepEqual(existing.prices, {})
+  assert.equal(existing.subscription.status, "active")
+  assert.equal(existing.subscription.interval, "monthly")
+  assert.equal(existing.subscription.amount, 2000)
+  assert.equal(existing.subscription.endsAt, monthEnd * 1000)
+  assert.equal(
+    (await createBillingSubscriptionFlow(env, identity, "cancel", deps))
+      .provider,
+    "stripe"
+  )
+  assert.equal(
+    (await createBillingPortal(env, identity, deps)).provider,
+    "stripe"
+  )
+  assert.deepEqual(deps.created.sessions, [])
 })
 
 test("terminal subscriptions display their actual end, never the original future billing period", async () => {

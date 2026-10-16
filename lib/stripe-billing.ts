@@ -223,21 +223,29 @@ export async function billingSummary(
     accessUnavailable = true
   }
   const stripe = options.stripe ?? createBillingStripe(config)
-  const intervals =
+  const configuredIntervals =
     env.PHOTODEPOT_STRIPE_ENABLED === "true" && billingConfigured
       ? (Object.keys(config.prices) as BillingInterval[])
       : []
-  const prices = Object.fromEntries(
-    await Promise.all(
-      intervals.map(async (interval) => {
-        const price = await configuredPrice(config, stripe, interval)
-        return [
-          interval,
-          { amount: price.unit_amount!, currency: price.currency },
-        ]
-      })
-    )
-  ) as Partial<Record<BillingInterval, { amount: number; currency: string }>>
+  // Purchase options may be retired or unavailable independently of existing
+  // subscriptions. Keep their management state available and offer only prices
+  // that pass the same validation used by Checkout and upgrades.
+  const priceResults = await Promise.allSettled(
+    configuredIntervals.map(async (interval) => {
+      const price = await configuredPrice(config, stripe, interval)
+      return [
+        interval,
+        { amount: price.unit_amount!, currency: price.currency },
+      ] as const
+    })
+  )
+  const availablePrices = priceResults.flatMap((result) =>
+    result.status === "fulfilled" ? [result.value] : []
+  )
+  const intervals = availablePrices.map(([interval]) => interval)
+  const prices = Object.fromEntries(availablePrices) as Partial<
+    Record<BillingInterval, { amount: number; currency: string }>
+  >
   const subscriptions = customer?.stripe_customer_id
     ? await stripe.subscriptions.list({
         customer: customer.stripe_customer_id,
@@ -268,9 +276,7 @@ export async function billingSummary(
       ? item.price.unit_amount * item.quantity
       : null
   return {
-    enabled:
-      (env.PHOTODEPOT_STRIPE_ENABLED === "true" && billingConfigured) ||
-      Boolean(customer?.stripe_customer_id),
+    enabled: intervals.length > 0 || Boolean(customer?.stripe_customer_id),
     intervals,
     prices,
     subscription: subscription
@@ -301,8 +307,7 @@ export async function billingSummary(
     hasCustomer: Boolean(customer?.stripe_customer_id),
     portalEnabled: Boolean(config.portalConfiguration),
     trialDays:
-      !billingConfigured ||
-      env.PHOTODEPOT_STRIPE_ENABLED !== "true" ||
+      !intervals.length ||
       customer?.trial_used ||
       manualTrial ||
       subscriptions?.data.some((sub) => Boolean(sub.trial_start))

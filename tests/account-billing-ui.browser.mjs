@@ -323,6 +323,25 @@ for (const name of ["Monthly", "Yearly"])
     assert.equal(state.billing.subscription.cancelAtPeriodEnd, false)
   })
 
+for (const action of ["cancel", "portal"])
+  test(`an existing subscriber can open ${action} when no purchase prices are available`, async () => {
+    setSubscription()
+    state.billing.intervals = []
+    state.billing.prices = {}
+    state.redirect = `https://billing.stripe.com/p/session/test_${action}`
+    await page.goto(`${origin}/account`)
+    const manage = subscription().getByRole("button", {
+      name: "Manage billing",
+      exact: true,
+    })
+    await expect(cancel("Monthly")).toBeEnabled()
+    await expect(manage).toBeEnabled()
+    await expect(upgrade("Yearly")).toBeDisabled()
+    await (action === "cancel" ? cancel("Monthly") : manage).click()
+    await page.waitForURL(state.redirect)
+    assert.deepEqual(state.posts, [{ action }])
+  })
+
 test("yearly current plan has Cancel and no upgrade or lower-plan action", async () => {
   setSubscription({
     interval: "annual",
