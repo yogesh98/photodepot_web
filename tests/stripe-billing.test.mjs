@@ -14,6 +14,7 @@ import {
 } from "../lib/stripe-billing.ts"
 import { BillingConflictError } from "../lib/stripe-billing-store.ts"
 import { handleAccountBilling } from "../functions/api/account/billing.ts"
+import { workosBillingConfiguration } from "../lib/workos-entitlements.ts"
 
 let sqlite, db, env
 const now = Math.floor(Date.now() / 1000)
@@ -85,6 +86,9 @@ beforeEach(async () => {
     STRIPE_PORTAL_CONFIGURATION_ID: "bpc_fixture",
     WORKOS_API_KEY: "sk_workos",
     WORKOS_CLIENT_ID: "client_fixture",
+    WORKOS_BILLING_CLIENT_ID: "client_billing_fixture",
+    WORKOS_COOKIE_PASSWORD:
+      "stripe-billing-test-password-at-least-32-characters",
   }
 })
 afterEach(() => sqlite.close())
@@ -138,6 +142,16 @@ function checkoutDeps({ connected = true } = {}) {
         "INSERT INTO workos_billing_sessions(user_id, session_id, encrypted_tokens, updated_at) VALUES (?, 'session_fixture', 'sealed_fixture', ?)"
       )
       .run(identity.userId, Date.now())
+    sqlite
+      .prepare(
+        "INSERT INTO workos_entitlements(user_id,organization_id,context,enabled,issued_at,expires_at,revision) VALUES (?, 'org_personal', ?, 0, ?, ?, 1)"
+      )
+      .run(
+        identity.userId,
+        workosBillingConfiguration(env).context,
+        Date.now(),
+        Date.now() + 300_000
+      )
   }
   const created = {
     customers: [],
@@ -300,6 +314,78 @@ test("billing requires an explicit purchase flag and matching test/live credenti
   assert.equal(
     billingConfiguration({ ...env, STRIPE_SECRET_KEY: "rk_test_fixture" }).live,
     false
+  )
+})
+
+test("new purchases require a distinct billing client before creating provider resources", async () => {
+  const deps = checkoutDeps({ connected: false })
+  for (const value of [undefined, "", "invalid-client", env.WORKOS_CLIENT_ID]) {
+    const invalid = { ...env, WORKOS_BILLING_CLIENT_ID: value }
+    assert.throws(() => billingConfiguration(invalid), /not configured/)
+    await assert.rejects(
+      createBillingCheckout(invalid, identity, "monthly", deps),
+      /not configured/
+    )
+    assert.equal(
+      sqlite.prepare("SELECT COUNT(*) AS n FROM stripe_customers").get().n,
+      0
+    )
+    assert.deepEqual(deps.created.customers, [])
+    assert.deepEqual(deps.created.memberships, [])
+    assert.deepEqual(deps.created.sessions, [])
+  }
+})
+
+test("legacy same-client sessions cannot skip separate billing authorization", async () => {
+  const deps = checkoutDeps()
+  sqlite
+    .prepare("UPDATE workos_entitlements SET context=?")
+    .run(JSON.stringify([env.WORKOS_CLIENT_ID, "photodepot-standard"]))
+  const checkout = await createBillingCheckout(env, identity, "monthly", deps)
+  assert.deepEqual(checkout, {
+    url: "/api/account/billing/authorize?action=checkout&interval=monthly",
+    provider: "workos",
+  })
+  assert.deepEqual(deps.created.sessions, [])
+  const summary = await billingSummary(env, identity.userId, {
+    stripe: deps.stripe,
+  })
+  assert.equal(summary.accessConnected, false)
+  assert.equal(summary.accessUnavailable, false)
+})
+
+test("existing billing management survives missing billing client setup even with purchases enabled", async () => {
+  const deps = checkoutDeps()
+  await createBillingCheckout(env, identity, "monthly", deps)
+  delete env.WORKOS_BILLING_CLIENT_ID
+  deps.stripe.subscriptions.list = async () => ({
+    data: [subscription()],
+    has_more: false,
+  })
+  const summary = await billingSummary(env, identity.userId, {
+    stripe: deps.stripe,
+  })
+  assert.equal(summary.accessConnected, false)
+  assert.equal(summary.accessUnavailable, true)
+  assert.equal(summary.portalEnabled, true)
+  assert.deepEqual(summary.intervals, [])
+  assert.equal(
+    (await createBillingPortal(env, identity, deps)).provider,
+    "stripe"
+  )
+  assert.equal(
+    (await createBillingSubscriptionFlow(env, identity, "cancel", deps))
+      .provider,
+    "stripe"
+  )
+  await assert.rejects(
+    createBillingCheckout(env, identity, "monthly", deps),
+    /not configured/
+  )
+  env.PHOTODEPOT_STRIPE_ENABLED = "false"
+  assert.equal(
+    (await createBillingPortal(env, identity, deps)).provider,
+    "stripe"
   )
 })
 
@@ -805,6 +891,7 @@ test("trials require explicit days, are reused on retry, and prior manual trial 
     0
   )
   sqlite.prepare("DELETE FROM workos_billing_sessions").run()
+  sqlite.prepare("DELETE FROM workos_entitlements").run()
   sqlite.prepare("DELETE FROM stripe_customers").run()
   sqlite
     .prepare(

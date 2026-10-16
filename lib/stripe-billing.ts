@@ -14,6 +14,7 @@ import {
 import {
   getWorkOSEntitlement,
   hasWorkOSBillingSession,
+  workosBillingConfiguration,
 } from "./workos-entitlements.ts"
 
 export type BillingInterval = "monthly" | "annual"
@@ -107,6 +108,14 @@ export function billingConfiguration(
   if (portalConfiguration && !/^bpc_[A-Za-z0-9]+$/.test(portalConfiguration))
     return fail()
   if (!env.WORKOS_API_KEY || !env.WORKOS_CLIENT_ID) return fail()
+  if (
+    !existingBilling &&
+    env.PHOTODEPOT_STRIPE_ENABLED === "true" &&
+    (!env.WORKOS_BILLING_CLIENT_ID ||
+      !/^client_[A-Za-z0-9_]+$/.test(env.WORKOS_BILLING_CLIENT_ID) ||
+      env.WORKOS_BILLING_CLIENT_ID === env.WORKOS_CLIENT_ID)
+  )
+    return fail()
   return {
     secret,
     live,
@@ -196,23 +205,26 @@ export async function billingSummary(
   }
   if (!config) return disabled
   const customer = await getBillingCustomer(env.DB, userId)
-  let connected = await hasWorkOSBillingSession(env.DB, userId)
+  let connected = false
+  let billingConfigured = false
   let accessUnavailable = false
-  if (connected) {
-    try {
+  try {
+    const context = workosBillingConfiguration(env).context
+    billingConfigured = true
+    connected = await hasWorkOSBillingSession(env.DB, userId, context)
+    if (connected)
       await getWorkOSEntitlement(env, userId, {
         forceRefresh: options.forceRefresh,
       })
-    } catch {
-      // Stripe's display and management flows remain available when an
-      // independent access check fails. This never authorizes paid features.
-      accessUnavailable = true
-    }
+    connected = await hasWorkOSBillingSession(env.DB, userId, context)
+  } catch {
+    // Stripe's display and management flows remain available when an
+    // independent access check fails. This never authorizes paid features.
+    accessUnavailable = true
   }
-  connected = await hasWorkOSBillingSession(env.DB, userId)
   const stripe = options.stripe ?? createBillingStripe(config)
   const intervals =
-    env.PHOTODEPOT_STRIPE_ENABLED === "true"
+    env.PHOTODEPOT_STRIPE_ENABLED === "true" && billingConfigured
       ? (Object.keys(config.prices) as BillingInterval[])
       : []
   const prices = Object.fromEntries(
@@ -257,7 +269,7 @@ export async function billingSummary(
       : null
   return {
     enabled:
-      env.PHOTODEPOT_STRIPE_ENABLED === "true" ||
+      (env.PHOTODEPOT_STRIPE_ENABLED === "true" && billingConfigured) ||
       Boolean(customer?.stripe_customer_id),
     intervals,
     prices,
@@ -289,6 +301,7 @@ export async function billingSummary(
     hasCustomer: Boolean(customer?.stripe_customer_id),
     portalEnabled: Boolean(config.portalConfiguration),
     trialDays:
+      !billingConfigured ||
       env.PHOTODEPOT_STRIPE_ENABLED !== "true" ||
       customer?.trial_used ||
       manualTrial ||
@@ -446,6 +459,7 @@ export async function createBillingCheckout(
   deps: BillingDependencies = {}
 ) {
   const config = requiredConfig(env)
+  const billingContext = workosBillingConfiguration(env).context
   const priceId = config.prices[interval]
   if (!priceId) throw new TypeError("Choose an available billing interval.")
   const { customer: row, token } = await lockBillingAccount(
@@ -462,7 +476,9 @@ export async function createBillingCheckout(
       token,
       deps
     )
-    if (!(await hasWorkOSBillingSession(env.DB, identity.userId)))
+    if (
+      !(await hasWorkOSBillingSession(env.DB, identity.userId, billingContext))
+    )
       return {
         url: `/api/account/billing/authorize?action=checkout&interval=${interval}`,
         provider: "workos" as const,
@@ -789,6 +805,7 @@ export async function createBillingAccessConnection(
 ) {
   const config = billingConfiguration(env, true)
   if (!config) throw new BillingUnavailableError("Billing is not configured.")
+  workosBillingConfiguration(env)
   const { customer, token } = await lockBillingAccount(env.DB, identity.userId)
   try {
     if (!customer.stripe_customer_id)

@@ -176,7 +176,8 @@ async function accessClaims(
 export async function verifyWorkOSAccessToken(
   accessToken: string,
   clientId: string,
-  now = Date.now()
+  now = Date.now(),
+  issuerClientId = clientId
 ): Promise<JWTPayload> {
   let keys = jwks.get(clientId)
   if (!keys) {
@@ -196,7 +197,9 @@ export async function verifyWorkOSAccessToken(
     issuer: [
       "https://api.workos.com",
       "https://api.workos.com/",
-      `https://api.workos.com/user_management/${clientId}`,
+      // Applications in one WorkOS environment share the default app's issuer.
+      // The exact client_id below still binds the token to the requested app.
+      `https://api.workos.com/user_management/${issuerClientId}`,
     ],
     requiredClaims: ["sub", "sid", "client_id", "exp", "iat"],
     currentDate: new Date(now),

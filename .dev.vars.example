@@ -3,13 +3,15 @@
 # Generate with scripts/generate-license-keypair.mjs; use a separate test pair locally.
 PHOTODEPOT_LICENSE_SIGNING_PRIVATE_KEY=""
 # WorkOS hosted AuthKit. No local admin bypass exists.
-# Server-only production API key for listing users and checking account status.
+# Server-only environment API key for user checks and personal billing organization setup.
 WORKOS_API_KEY=""
-# Owner role slug "owner" must belong to this specific admin organization.
+# Browser/default WorkOS application. Keep this as the environment's default application.
 WORKOS_CLIENT_ID="client_replace-with-your-client-id"
+# Owner role slug "owner" must belong to this specific admin organization.
 WORKOS_ADMIN_ORGANIZATION_ID="org_replace-with-admin-organization-id"
-# Register this exact callback in WorkOS. Use http://localhost:8788/api/auth/callback
-# for a separate staging application when testing in local Pages preview.
+# Register this exact callback on both browser and billing WorkOS applications.
+# Use http://localhost:8788/api/auth/callback on both apps in a separate staging
+# environment when testing in local Pages preview.
 WORKOS_REDIRECT_URI="https://photodepot.app/api/auth/callback"
 # Generate a random secret of at least 32 characters; never use a sample password.
 # Store it as an encrypted Pages secret in production and do not commit .dev.vars.
@@ -25,6 +27,10 @@ PHOTODEPOT_REMINDER_TOKEN=""
 # Stripe Billing + Tax, with WorkOS-managed entitlements. Leave disabled until test-mode verification passes.
 # These are Pages Functions secrets/settings, never NEXT_PUBLIC_ variables.
 PHOTODEPOT_STRIPE_ENABLED="false"
+# Create a separate WorkOS Application in the same environment as WORKOS_CLIENT_ID.
+# Its client ID must differ from WORKOS_CLIENT_ID. Register WORKOS_REDIRECT_URI on it too.
+# Billing uses public-client PKCE and refresh; no separate billing API key is required.
+WORKOS_BILLING_CLIENT_ID="client_replace-with-your-billing-client-id"
 # Attach this Stripe Entitlements feature lookup key to the subscribed product.
 # Enable the WorkOS Stripe Entitlements add-on for the matching WorkOS environment.
 PHOTODEPOT_WORKOS_ENTITLEMENT="photodepot-standard"

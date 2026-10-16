@@ -385,11 +385,17 @@ Stripe still provides hosted Checkout, Customer Portal, promotion codes and Tax.
 Its live subscription dates are display-only.
 
 Each billing account has a private WorkOS organization, active membership and
-Stripe customer link, separate from administration. A separate AuthKit PKCE
-flow authorizes one encrypted backend-owned WorkOS session for billing access.
+Stripe customer link, separate from administration. Create a separate
+[WorkOS Application](https://workos.com/docs/authkit/applications) in the same
+environment and set its client ID as `WORKOS_BILLING_CLIENT_ID`, distinct from the
+browser/default `WORKOS_CLIENT_ID`. Register the existing `/api/auth/callback`
+redirect on both applications. The billing application's AuthKit PKCE flow
+authorizes one encrypted backend-owned WorkOS session for billing access.
 Browser login/logout and individual Mac removal remain independent. Tokens stay
 on the server, with serialized refresh and fail-closed expiry/revocation. An
-expired billing session can be reconnected from the account dashboard.
+expired billing session can be reconnected from the account dashboard. Existing
+same-client billing sessions also require reconnection after this configuration
+change; previously signed desktop receipts retain their original bounded deadlines.
 
 The existing signed desktop protocol and stable receipt IDs remain compatible.
 A fresh WorkOS proof permits the existing 48-hour offline authorization allowance;

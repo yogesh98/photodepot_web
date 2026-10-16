@@ -21,6 +21,7 @@ import {
 } from "../lib/account-sessions.ts"
 import { handleAccountSubscription } from "../functions/api/account/subscription.ts"
 import { handleLicenseRequest } from "../lib/license-api.ts"
+import { workosBillingConfiguration } from "../lib/workos-entitlements.ts"
 
 const origin = "https://photodepot.app"
 const clientId = "client_pairing_tests"
@@ -49,6 +50,7 @@ before(async () => {
   env = {
     ...platform.env,
     WORKOS_CLIENT_ID: clientId,
+    WORKOS_BILLING_CLIENT_ID: "client_billing_pairing_tests",
     WORKOS_ADMIN_ORGANIZATION_ID: "org_pairing_admin",
     WORKOS_COOKIE_PASSWORD: cookiePassword,
     WORKOS_REDIRECT_URI: `${origin}/api/auth/callback`,
@@ -391,7 +393,7 @@ test("subscription withdrawal removes local entitlement while keeping the accoun
       "org_session_entitlement",
       now,
       now + 300_000,
-      JSON.stringify([clientId, "photodepot-standard"])
+      workosBillingConfiguration(env).context
     ),
   ])
   const loggedIn = await accountLogin(userId)

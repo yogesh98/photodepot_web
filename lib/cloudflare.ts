@@ -5,6 +5,7 @@ export interface Env {
   DB: D1Database
   PHOTODEPOT_LICENSE_SIGNING_PRIVATE_KEY?: string
   WORKOS_CLIENT_ID?: string
+  WORKOS_BILLING_CLIENT_ID?: string
   WORKOS_API_KEY?: string
   WORKOS_ADMIN_ORGANIZATION_ID?: string
   WORKOS_COOKIE_PASSWORD?: string

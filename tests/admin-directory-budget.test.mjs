@@ -3,6 +3,7 @@ import { readFile, readdir } from "node:fs/promises"
 import { DatabaseSync } from "node:sqlite"
 import { afterEach, beforeEach, test } from "node:test"
 import { listAdminUsers } from "../lib/admin-directory.ts"
+import { workosBillingConfiguration } from "../lib/workos-entitlements.ts"
 
 const now = 1_800_000_000_000
 const clientId = "client_directory_budget"
@@ -107,7 +108,7 @@ function managed(userId, enabled, reauthNeeded = 0) {
     .run(
       userId,
       `org_${userId}`,
-      JSON.stringify([clientId, "photodepot-standard"]),
+      workosBillingConfiguration(env).context,
       enabled ? 1 : 0,
       now,
       now + 300_000
@@ -126,6 +127,7 @@ beforeEach(async () => {
   env = {
     DB: database(),
     WORKOS_CLIENT_ID: clientId,
+    WORKOS_BILLING_CLIENT_ID: "client_billing_directory_budget",
     WORKOS_API_KEY: "sk_directory_fixture",
     WORKOS_COOKIE_PASSWORD: "directory-budget-test-cookie-password-at-least-32",
   }

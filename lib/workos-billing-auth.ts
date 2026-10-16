@@ -12,6 +12,7 @@ import {
 import {
   billingOrganization,
   storeWorkOSBillingSession,
+  workosBillingConfiguration,
   WorkOSEntitlementUnavailableError,
 } from "./workos-entitlements.ts"
 import {
@@ -93,14 +94,21 @@ function configuration(request: Request, env: Env) {
     throw json({ error: "Billing access is not configured." }, 503)
   const origin = new URL(request.url).origin
   const secure = new URL(origin).protocol === "https:"
+  const billing = workosBillingConfiguration(env)
   return {
-    clientId: env.WORKOS_CLIENT_ID!,
+    clientId: billing.clientId,
+    issuerClientId: billing.issuerClientId,
     password: env.WORKOS_COOKIE_PASSWORD!,
     redirectUri: env.WORKOS_REDIRECT_URI!,
     origin,
     secure,
     name: `${secure ? "__Host-" : ""}photodepot-billing-auth`,
     workos: createWorkOS({
+      clientId: billing.clientId,
+      timeout: 5000,
+      maxRetries: 0,
+    }),
+    management: createWorkOS({
       apiKey: env.WORKOS_API_KEY,
       clientId: env.WORKOS_CLIENT_ID!,
       timeout: 5000,
@@ -140,7 +148,7 @@ async function personalOrganization(
   const mapped = await billingOrganization(env, userId)
   if (!mapped)
     throw json({ error: "Start billing setup from your account." }, 409)
-  const organization = await config.workos.organizations.getOrganization(
+  const organization = await config.management.organizations.getOrganization(
     mapped.organizationId
   )
   if (
@@ -178,7 +186,7 @@ function failure(error: unknown) {
   )
 }
 
-/** The account cookie authorizes starting a new, independent AuthKit grant. */
+/** The account cookie authorizes a grant for the separate billing application. */
 export async function handleWorkOSBillingAuthorize(request: Request, env: Env) {
   if (request.method !== "GET") return methodNotAllowed()
   const auth = await authenticateWorkOSAccount(request, env)
@@ -194,7 +202,8 @@ export async function handleWorkOSBillingAuthorize(request: Request, env: Env) {
         redirectUri: config.redirectUri,
         organizationId: organization.organizationId,
         screenHint: "sign-in",
-        // Silent AuthKit authorization can reuse the browser's token family.
+        // Freshness only: the separate client isolates this session from the
+        // browser. max_age reauthentication itself preserves the existing SID.
         maxAge: 0,
       })
     const state = `billing_${authorization.state}`
@@ -309,7 +318,9 @@ export async function handleWorkOSBillingCallback(request: Request, env: Env) {
           )
         const initialClaims = await verifyWorkOSAccessToken(
           result.accessToken,
-          config.clientId
+          config.clientId,
+          Date.now(),
+          config.issuerClientId
         )
         if (initialClaims.sub !== auth.userId)
           throw json(
@@ -319,7 +330,7 @@ export async function handleWorkOSBillingCallback(request: Request, env: Env) {
             },
             401
           )
-        // A fresh login must own its token family before we rotate or scope it.
+        // The billing application must own its token family before scoping it.
         if (initialClaims.sid === auth.sessionId)
           throw new WorkOSEntitlementUnavailableError(
             "A separate billing sign-in is required."

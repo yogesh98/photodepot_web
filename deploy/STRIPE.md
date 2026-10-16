@@ -12,7 +12,8 @@ listen to Stripe subscription webhooks or interpret invoices to authorize access
 - Authenticated, same-origin Checkout and Portal actions with server-owned Prices,
   customers and return URLs. Duplicate purchases are checked against live Stripe.
 - One encrypted backend-owned WorkOS AuthKit session per billing account. Its
-  authorization-code/PKCE flow is separate from the ordinary account cookie.
+  authorization-code/PKCE flow uses a separate WorkOS Application in the same
+  environment, identified by `WORKOS_BILLING_CLIENT_ID`.
   Browser logout and removing one Mac do not revoke this shared billing session.
 - Verification of WorkOS-signed `entitlements` for the exact client, user and
   personal organization. Only `PHOTODEPOT_WORKOS_ENTITLEMENT` grants paid access.
@@ -34,49 +35,70 @@ abandoned Checkout interval expires the old session before creating a replacemen
 WorkOS currently does **not** support connecting a Stripe Sandbox account. Use a
 standard Stripe account and its **test mode**. The earlier `photodepot sandbox`
 connection cannot activate this add-on. Match the WorkOS environment to the app's
-`WORKOS_CLIENT_ID`; use separate databases, keys and Prices for test and live modes.
+browser/default `WORKOS_CLIENT_ID`; the billing application must belong to that
+same environment. Use separate databases, keys and Prices for test and live modes.
 
-1. In the matching WorkOS environment, enable the Stripe add-on and authorize its
+1. Create a separate WorkOS Application for backend billing sessions in that
+   environment. Set `WORKOS_BILLING_CLIENT_ID` to its client ID; it must differ
+   from `WORKOS_CLIENT_ID`. Keep `WORKOS_CLIENT_ID` as the existing browser/default
+   application so its issuer and normal account/admin sessions remain unchanged.
+2. In the matching WorkOS environment, enable the Stripe add-on and authorize its
    Stripe Connect connection. Enable **Use Stripe entitlements**. Individual
    Photodepot accounts do not need Seat Sync. This OAuth connection requires the
    account owner's browser authorization; setting a local flag cannot create it.
-2. In Stripe test mode, create the product and recurring monthly and annual
+3. In Stripe test mode, create the product and recurring monthly and annual
    Prices: USD20/month and USD200/year (two months free compared with monthly).
    Use the same product and explicit tax behavior for both. Attach a Stripe
    Entitlements feature with lookup key `photodepot-standard` to the product,
    or set `PHOTODEPOT_WORKOS_ENTITLEMENT` to the chosen key. WorkOS propagates this
    feature into tokens. Adding features to existing subscriptions may take effect
    at the next billing cycle; verify with a newly created test subscription.
-3. Create a test-mode Customer Portal configuration. Enable payment updates,
+4. Create a test-mode Customer Portal configuration. Enable payment updates,
    invoices and period-end cancellation. Enable price updates and restrict them to
    the Standard product's monthly and annual Prices, with quantity changes
    disabled. Stripe calculates prorations and presents them for confirmation.
    Set `STRIPE_PORTAL_CONFIGURATION_ID`.
-4. Apply migrations through `0016_workos_entitlements.sql`. Earlier Stripe ledger
+5. Apply migrations through `0016_workos_entitlements.sql`. Earlier Stripe ledger
    tables are retained for history/upgrade compatibility and are not used by
    runtime authorization. No Stripe webhook endpoint or signing secret is needed.
-5. Configure the server-only settings from `.dev.vars.example`:
-   `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `WORKOS_COOKIE_PASSWORD`,
+6. Configure the server-only settings from `.dev.vars.example`:
+   `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `WORKOS_BILLING_CLIENT_ID`, `WORKOS_COOKIE_PASSWORD`,
    `WORKOS_REDIRECT_URI`, `STRIPE_SECRET_KEY`, `STRIPE_PRICE_MONTHLY` and/or
    `STRIPE_PRICE_ANNUAL`, `STRIPE_PORTAL_CONFIGURATION_ID`,
    `PHOTODEPOT_WORKOS_ENTITLEMENT`, `PHOTODEPOT_STRIPE_MODE=test`, and
-   `PHOTODEPOT_STRIPE_ORIGIN`.
-6. Keep the existing exact WorkOS callback `/api/auth/callback`, customer initiate
-   login `/api/account/auth/login`, and sign-out URLs registered for the selected
-   application. The new billing flow uses the shared callback with its own sealed
-   transaction cookie; it does not change the normal account/admin login flows.
-7. Review Stripe Tax's business address, product tax code, markets, registrations,
+   `PHOTODEPOT_STRIPE_ORIGIN`. The existing server-only environment API key is used
+   for user and organization reads/setup. Billing uses public-client PKCE for
+   authorization-code exchange and the same billing client ID for refresh; neither
+   requires a separate billing API key.
+7. Register the exact `WORKOS_REDIRECT_URI` ending in `/api/auth/callback` on both
+   WorkOS applications. Keep `/api/account/auth/login` as the browser application's
+   initiate-login URI and preserve its sign-out URLs. Billing authorization starts
+   at `/api/account/billing/authorize`; use that route if configuring a billing-app
+   initiate-login URI. It requires an already signed-in browser account and prior
+   billing setup. The shared callback dispatches the sealed billing transaction
+   separately from normal account/admin login flows.
+8. Review Stripe Tax's business address, product tax code, markets, registrations,
    and inclusive/exclusive behavior. Checkout enables automatic tax by default,
    collects billing addresses/tax IDs, and saves customer address/name changes.
    Set `PHOTODEPOT_STRIPE_AUTOMATIC_TAX=false` only as an explicit merchant decision.
-8. Leave `PHOTODEPOT_STRIPE_TRIAL_DAYS` unset unless a trial policy is chosen. Prior
-   manual or Stripe trial history prevents another offered trial. Enable purchases
-   with `PHOTODEPOT_STRIPE_ENABLED=true` only after the test-mode setup is ready.
+9. Leave `PHOTODEPOT_STRIPE_TRIAL_DAYS` unset unless a trial policy is chosen. Prior
+   manual or Stripe trial history prevents another offered trial. Configure the
+   distinct `WORKOS_BILLING_CLIENT_ID` before enabling new purchases with
+   `PHOTODEPOT_STRIPE_ENABLED=true`, after the test-mode setup is ready. Existing
+   billing management and cancellation remain available during this setup.
 
 Never commit keys, encrypted session credentials, refresh tokens or cookie secrets.
 `WORKOS_COOKIE_PASSWORD` seals the server-owned tokens with purpose/client/user/org
 bindings. Preserve it across deployments; rotating it requires reconnecting access
 as well as normal account sessions.
+
+Complete the code and configuration rollout to every backend instance before
+reconnecting billing, so an older instance cannot invalidate a new-client session.
+After rollout, customers with encrypted billing sessions issued through the old
+browser client must reconnect billing from the account dashboard. Those sessions
+cannot serve as the new billing application's grant. Previously signed desktop
+receipts retain their original verification deadlines; reconnection requirements
+do not extend their offline allowance.
 
 ## Customer flow
 
@@ -87,11 +109,14 @@ through WorkOS. The server seals the chosen interval in the authorization
 transaction and resumes Stripe Checkout automatically after the callback. The app
 refreshes WorkOS entitlements after Checkout/Portal return;
 regular polling uses the current short-lived proof until it needs refreshing.
-This separate authorization requires a fresh sign-in (`max_age=0`) so AuthKit
-does not reuse the browser's token family. If social sign-in returns an unscoped
-token, the callback explicitly selects the private billing organization using the
-new grant before saving it. The ordinary browser session is never rotated into
-the billing store.
+The billing application's separate client provides session isolation. The flow
+also requests a fresh sign-in (`max_age=0`); this enforces authentication freshness
+and does not create an independent token family by itself. If social sign-in
+returns an unscoped token, the callback explicitly selects the private billing
+organization using the new grant before saving it. The ordinary browser session
+is never rotated into the billing store. Both applications use the environment's
+default issuer; token validation separately requires the billing application's
+`client_id` claim.
 Stripe's own recovery and portal flows handle payment problems and cancellation.
 The current paid card's **Cancel** button opens a `subscription_cancel` portal
 flow for period-end cancellation. A monthly subscriber's yearly **Upgrade**
@@ -124,8 +149,10 @@ feature synchronization, payment collection, or Tax setup is operational.
 In the connected test-mode account, verify monthly/annual purchases, prior trial
 history, promotions, Tax and Portal changes/cancellation. Confirm refreshed WorkOS
 claims grant/remove the configured feature, unrelated organization/user claims do
-not authorize, and browser logout does not interrupt Mac access. Verify expired
-billing sessions reconnect, failed refreshes preserve rather than extend the last
+not authorize, and browser logout does not interrupt Mac access. Confirm that the
+billing grant has the billing application's `client_id` and a different session
+ID from the ordinary browser session. Verify expired billing sessions reconnect,
+failed refreshes preserve rather than extend the last
 offline allowance, historical manual grants cannot authorize, and existing Mac receipts keep
 stable IDs and increasing revisions.
 
@@ -137,6 +164,8 @@ explicit deployment decision.
 ## References
 
 - [WorkOS Stripe Entitlements add-on](https://workos.com/docs/authkit/add-ons/stripe)
+- [WorkOS Applications and client context](https://workos.com/docs/authkit/applications)
+- [WorkOS reauthentication and authentication freshness](https://workos.com/docs/authkit/reauthentication)
 - [WorkOS sessions and organization switching](https://workos.com/docs/authkit/sessions)
 - [WorkOS session resilience](https://workos.com/docs/authkit/session-resilience)
 - [Stripe Entitlements](https://docs.stripe.com/billing/entitlements)

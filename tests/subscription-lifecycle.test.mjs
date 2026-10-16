@@ -27,6 +27,7 @@ import {
   listSubscriptionAudit,
 } from "../lib/subscription-store.ts"
 import { LICENSE_GRACE_MS } from "../lib/license-crypto.ts"
+import { workosBillingConfiguration } from "../lib/workos-entitlements.ts"
 
 const origin = "http://localhost:8788"
 const clientId = "client_local_lifecycle"
@@ -90,6 +91,7 @@ before(async () => {
   env = {
     ...platform.env,
     WORKOS_CLIENT_ID: clientId,
+    WORKOS_BILLING_CLIENT_ID: "client_billing_local_lifecycle",
     WORKOS_ADMIN_ORGANIZATION_ID: organizationId,
     WORKOS_COOKIE_PASSWORD: cookiePassword,
     WORKOS_REDIRECT_URI: `${origin}/api/auth/callback`,
@@ -429,7 +431,7 @@ test("browser login, subscription access and independent computer removal share 
       "org_lifecycle_billing",
       issuedAt,
       issuedAt + 300_000,
-      JSON.stringify([clientId, "photodepot-standard"])
+      workosBillingConfiguration(env).context
     ),
   ])
   const verified = await verifyMac(firstMac, firstSession.sessionId)

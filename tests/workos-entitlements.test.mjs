@@ -8,11 +8,14 @@ import {
   getWorkOSEntitlement,
   hasWorkOSBillingSession,
   storeWorkOSBillingSession,
+  workosBillingConfiguration,
 } from "../lib/workos-entitlements.ts"
 import { handleWorkOSBillingAuthorize } from "../lib/workos-billing-auth.ts"
 import { billingSummary } from "../lib/stripe-billing.ts"
 import {
   handleAdminCallback,
+  handleAccountLogin,
+  handleAccountLogout,
   authenticateWorkOSAccount,
   verifyWorkOSAccessToken,
 } from "../lib/license-admin-auth.ts"
@@ -23,6 +26,7 @@ import { getSubscriptionOverview } from "../lib/subscription-store.ts"
 
 const origin = "https://photodepot.app"
 const clientId = "client_workos_entitlements_tests"
+const billingClientId = "client_workos_billing_entitlements_tests"
 const password = "workos-billing-tests-password-at-least-32-characters"
 const userId = "user_billing_entitlements"
 const organizationId = "org_billing_personal"
@@ -94,8 +98,9 @@ function jwt(changes = {}) {
   ).toString("base64url")
   const payload = Buffer.from(
     JSON.stringify({
-      iss: "https://api.workos.com",
-      client_id: clientId,
+      // AuthKit applications share their environment's default issuer.
+      iss: `https://api.workos.com/user_management/${clientId}`,
+      client_id: billingClientId,
       sub: userId,
       sid: backendSid,
       org_id: organizationId,
@@ -156,6 +161,7 @@ async function browserCookie() {
       clientId,
       origin,
       accessToken: jwt({
+        client_id: clientId,
         sid: browserSid,
         org_id: undefined,
         entitlements: undefined,
@@ -178,7 +184,8 @@ async function authorize(query = "") {
   assert.equal(start.status, 303)
   const location = new URL(start.headers.get("location"))
   assert.equal(location.searchParams.get("organization_id"), organizationId)
-  // A silent AuthKit grant can reuse the browser SID and its rotating tokens.
+  // Reauthentication can retain a SID; the separate application isolates it.
+  assert.equal(location.searchParams.get("client_id"), billingClientId)
   assert.equal(location.searchParams.get("max_age"), "0")
   const transactionCookie = start.headers
     .getSetCookie()
@@ -203,6 +210,7 @@ beforeEach(async () => {
   env = {
     DB: d1(sqlite),
     WORKOS_CLIENT_ID: clientId,
+    WORKOS_BILLING_CLIENT_ID: billingClientId,
     WORKOS_API_KEY: "sk_workos_fixture",
     WORKOS_ADMIN_ORGANIZATION_ID: "org_administration",
     WORKOS_COOKIE_PASSWORD: password,
@@ -226,7 +234,17 @@ beforeEach(async () => {
     expires_at: Math.floor(epoch / 1000) + 3600,
   }
   subscriptionResponse = { object: "list", data: [], has_more: false }
-  tokenResponse = authentication()
+  tokenResponse = (body) =>
+    body.client_id === clientId
+      ? authentication(
+          jwt({
+            client_id: clientId,
+            sid: browserSid,
+            entitlements: undefined,
+          }),
+          "refresh_browser_rotated"
+        )
+      : authentication()
   authenticationFailure = null
   organizationResponse = {
     object: "organization",
@@ -243,7 +261,11 @@ beforeEach(async () => {
   globalThis.fetch = async (input, init) => {
     const url = String(input)
     const parsed = new URL(url)
-    if (url === `https://api.workos.com/sso/jwks/${clientId}`)
+    if (
+      [clientId, billingClientId].some(
+        (id) => url === `https://api.workos.com/sso/jwks/${id}`
+      )
+    )
       return Response.json({ keys: [jwk] })
     if (url === `https://api.workos.com/organizations/${organizationId}`)
       return Response.json(organizationResponse)
@@ -309,6 +331,11 @@ beforeEach(async () => {
     }
     assert.equal(url, "https://api.workos.com/user_management/authenticate")
     authenticationCalls.push(JSON.parse(init.body))
+    assert.ok(
+      [clientId, billingClientId].includes(authenticationCalls.at(-1).client_id)
+    )
+    if (authenticationCalls.at(-1).client_id === billingClientId)
+      assert.equal("client_secret" in authenticationCalls.at(-1), false)
     if (authenticationFailure instanceof Error) throw authenticationFailure
     if (authenticationFailure)
       return Response.json(authenticationFailure, { status: 400 })
@@ -333,6 +360,7 @@ test("dedicated authorization binds account, personal organization and state wit
   assert.equal(transaction.userId, userId)
   assert.equal(transaction.organizationId, organizationId)
   assert.equal(transaction.browserSessionId, browserSid)
+  assert.equal(transaction.clientId, billingClientId)
   assert.ok(transaction.codeVerifier)
   assert.match(pending.state, /^billing_/)
   const result = await handleAdminCallback(
@@ -355,13 +383,198 @@ test("dedicated authorization binds account, personal organization and state wit
   assert.equal(await hasWorkOSBillingSession(env.DB, userId), true)
   const tokens = await storedTokens()
   assert.equal(tokens.sessionId, backendSid)
+  assert.equal(tokens.clientId, billingClientId)
   assert.equal(tokens.refreshToken, "refresh_backend_rotated")
   assert.equal(authenticationCalls[0].grant_type, "authorization_code")
+  assert.equal(authenticationCalls[0].client_id, billingClientId)
   assert.equal(authenticationCalls[0].code_verifier, transaction.codeVerifier)
   const cached = await getWorkOSEntitlement(env, userId)
   assert.equal(cached.enabled, true)
   assert.equal(authenticationCalls.length, 1)
   assert.equal(checkoutCalls.length, 0)
+})
+
+test("existing hosted sessions stay in their client families through billing, browser sign-in, refresh and logout", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: epoch })
+  enableCheckout()
+  const pending = await authorize("?action=checkout&interval=monthly")
+  const connected = await completeBillingAuthorization(pending)
+  assert.equal(connected.status, 303)
+  assert.equal(connected.headers.get("location"), checkoutSession.url)
+  assert.equal((await storedTokens()).sessionId, backendSid)
+  assert.equal(
+    (
+      await authenticateWorkOSAccount(
+        request("/account", pending.accountCookie),
+        env
+      )
+    ).sessionId,
+    browserSid
+  )
+
+  // AuthKit may keep an existing SID even when an authorization asks for fresh
+  // authentication. Model that per client instead of assigning a fresh SID per
+  // authorization, which would conceal browser/backend token-family sharing.
+  const login = await handleAccountLogin(
+    request("/api/account/auth/login"),
+    env
+  )
+  const authorization = new URL(login.headers.get("location"))
+  assert.equal(authorization.searchParams.get("client_id"), clientId)
+  const loginCookie = login.headers
+    .getSetCookie()
+    .find((value) => value.startsWith("__Host-photodepot-account-login="))
+    .split(";")[0]
+  const callback = await handleAdminCallback(
+    request(
+      `/api/auth/callback?code=browser_code&state=${authorization.searchParams.get("state")}`,
+      loginCookie
+    ),
+    env
+  )
+  assert.equal(callback.status, 303)
+  const accountCookie = callback.headers
+    .getSetCookie()
+    .find((value) => value.startsWith("__Host-photodepot-account="))
+    .split(";")[0]
+  const auth = await authenticateWorkOSAccount(
+    request("/account", accountCookie),
+    env
+  )
+  assert.equal(auth.sessionId, browserSid)
+  assert.notEqual(auth.sessionId, (await storedTokens()).sessionId)
+
+  t.mock.timers.tick(300_001)
+  epoch = Date.now()
+  const refreshed = await authenticateWorkOSAccount(
+    request("/account", accountCookie),
+    env
+  )
+  assert.equal(refreshed.sessionId, browserSid)
+  assert.ok(refreshed.setCookie)
+  const browserRefresh = authenticationCalls.at(-1)
+  assert.equal(browserRefresh.client_id, clientId)
+  assert.equal(browserRefresh.refresh_token, "refresh_browser_rotated")
+  await getWorkOSEntitlement(env, userId, { forceRefresh: true })
+  const billingRefresh = authenticationCalls.at(-1)
+  assert.equal(billingRefresh.client_id, billingClientId)
+  assert.equal(billingRefresh.refresh_token, "refresh_backend_rotated")
+
+  const saved = await storedTokens()
+  const logout = await handleAccountLogout(
+    new Request(`${origin}/api/account/auth/logout`, {
+      method: "POST",
+      headers: { cookie: refreshed.setCookie.split(";")[0], origin },
+    }),
+    env
+  )
+  const html = await logout.text()
+  assert.ok(html.includes(`session_id=${browserSid}`))
+  assert.equal(html.includes(`session_id=${backendSid}`), false)
+  assert.deepEqual(await storedTokens(), saved)
+  assert.equal((await getWorkOSEntitlement(env, userId)).enabled, true)
+})
+
+test("missing, invalid or reused billing clients fail closed before billing provider calls", async () => {
+  const cookie = await browserCookie()
+  for (const invalid of [undefined, "", "invalid-client", clientId]) {
+    env.WORKOS_BILLING_CLIENT_ID = billingClientId
+    const pending = await authorize()
+    env.WORKOS_BILLING_CLIENT_ID = invalid
+    const providerFetch = globalThis.fetch
+    const calls = []
+    globalThis.fetch = async (input, init) => {
+      calls.push(String(input))
+      return providerFetch(input, init)
+    }
+    try {
+      const start = await handleWorkOSBillingAuthorize(
+        request("/api/account/billing/authorize", cookie),
+        env
+      )
+      assert.equal(start.status, 503)
+      assert.equal(start.headers.has("location"), false)
+      assert.equal((await completeBillingAuthorization(pending)).status, 503)
+      await assert.rejects(store())
+      assert.deepEqual(calls, [])
+      assert.equal(await storedTokens(), null)
+    } finally {
+      globalThis.fetch = providerFetch
+    }
+  }
+})
+
+test("billing tokens cannot become a browser account session or a browser logout target", async () => {
+  await store()
+  const prior = await storedTokens()
+  const login = await handleAccountLogin(
+    request("/api/account/auth/login"),
+    env
+  )
+  const authorization = new URL(login.headers.get("location"))
+  const loginCookie = login.headers.getSetCookie()[0].split(";")[0]
+  tokenResponse = authentication(jwt(), "refresh_backend_never_adopt")
+  const callback = await handleAdminCallback(
+    request(
+      `/api/auth/callback?code=wrong_family&state=${authorization.searchParams.get("state")}`,
+      loginCookie
+    ),
+    env
+  )
+  assert.equal(callback.status, 401)
+  assert.equal(callback.headers.has("location"), false)
+  assert.equal(
+    callback.headers
+      .getSetCookie()
+      .some(
+        (value) =>
+          value.startsWith("__Host-photodepot-account=") &&
+          !value.includes("Max-Age=0")
+      ),
+    false
+  )
+
+  const mixedCookie = `__Host-photodepot-account=${await sealData(
+    {
+      version: 1,
+      audience: "account",
+      clientId,
+      origin,
+      accessToken: jwt(),
+      refreshToken: "refresh_backend_never_adopt",
+      user: { id: userId, email: "billing@example.test", emailVerified: true },
+    },
+    { password, ttl: 604800 }
+  )}`
+  assert.equal(
+    (await authenticateWorkOSAccount(request("/account", mixedCookie), env))
+      .status,
+    401
+  )
+  const logout = await handleAccountLogout(
+    new Request(`${origin}/api/account/auth/logout`, {
+      method: "POST",
+      headers: { cookie: mixedCookie, origin },
+    }),
+    env
+  )
+  assert.equal(logout.status, 303)
+  assert.equal(logout.headers.get("location"), "/")
+  assert.deepEqual(await storedTokens(), prior)
+})
+
+test("a cached grant cannot authorize when the independent billing application is unconfigured", async () => {
+  await store()
+  const prior = sqlite.prepare("SELECT * FROM workos_entitlements").get()
+  for (const value of [undefined, clientId]) {
+    env.WORKOS_BILLING_CLIENT_ID = value
+    await assert.rejects(getWorkOSEntitlement(env, userId), /not configured/)
+    assert.deepEqual(
+      sqlite.prepare("SELECT * FROM workos_entitlements").get(),
+      prior
+    )
+  }
+  assert.equal(authenticationCalls.length, 0)
 })
 
 function enableCheckout() {
@@ -693,6 +906,8 @@ test("expired JWTs refresh in the mapped organization and persist rotated backen
   assert.equal(refreshed.revision, 2)
   assert.equal(authenticationCalls.length, 1)
   assert.equal(authenticationCalls[0].grant_type, "refresh_token")
+  assert.equal(authenticationCalls[0].client_id, billingClientId)
+  assert.equal("client_secret" in authenticationCalls[0], false)
   assert.equal(authenticationCalls[0].refresh_token, "refresh_backend_initial")
   assert.equal(authenticationCalls[0].organization_id, organizationId)
   assert.equal((await storedTokens()).refreshToken, "refresh_backend_second")
@@ -1000,20 +1215,15 @@ test("cached snapshots cannot authorize without their dedicated active session",
   assert.equal(await getWorkOSEntitlement(env, userId), null)
 })
 
-test("shared verification rejects forged issuer, application, and expired tokens", async () => {
-  assert.equal((await verifyWorkOSAccessToken(jwt(), clientId)).sub, userId)
-  await assert.rejects(
-    verifyWorkOSAccessToken(jwt({ iss: "https://elsewhere.example" }), clientId)
-  )
-  await assert.rejects(
-    verifyWorkOSAccessToken(jwt({ client_id: "client_other" }), clientId)
-  )
-  await assert.rejects(
-    verifyWorkOSAccessToken(
-      jwt({ exp: Math.floor(epoch / 1000) - 1 }),
-      clientId
-    )
-  )
+test("billing verification trusts the explicit default issuer and rejects forged issuer, application, and expired tokens", async () => {
+  const verify = (token) =>
+    verifyWorkOSAccessToken(token, billingClientId, epoch, clientId)
+  assert.equal((await verify(jwt())).sub, userId)
+  await assert.rejects(verifyWorkOSAccessToken(jwt(), billingClientId, epoch))
+  await assert.rejects(verify(jwt({ iss: "https://elsewhere.example" })))
+  await assert.rejects(verify(jwt({ client_id: clientId })))
+  await assert.rejects(verify(jwt({ client_id: "client_other" })))
+  await assert.rejects(verify(jwt({ exp: Math.floor(epoch / 1000) - 1 })))
 })
 
 test("rotating the cookie encryption secret requests reconnection instead of trapping billing in a 503", async () => {
@@ -1198,13 +1408,13 @@ test("changing the configured entitlement key recomputes an unexpired cache from
   assert.equal(authenticationCalls.length, 0)
   assert.equal(
     sqlite.prepare("SELECT context FROM workos_entitlements").get().context,
-    JSON.stringify([clientId, "another-premium-feature"])
+    workosBillingConfiguration(env).context
   )
 })
 
 test("changing the WorkOS client cannot authorize from an unexpired proof for another application", async () => {
   await store()
-  env.WORKOS_CLIENT_ID = "client_another_application"
+  env.WORKOS_BILLING_CLIENT_ID = "client_another_application"
   assert.equal(await getWorkOSEntitlement(env, userId), null)
   assert.equal(await hasWorkOSBillingSession(env.DB, userId), false)
   assert.equal(
@@ -1250,6 +1460,8 @@ test("an initially unscoped independent sign-in explicitly refreshes into the pr
   )
   assert.equal(authenticationCalls[1].refresh_token, "refresh_fresh_unscoped")
   assert.equal(authenticationCalls[1].organization_id, organizationId)
+  assert.equal(authenticationCalls[1].client_id, billingClientId)
+  assert.equal("client_secret" in authenticationCalls[1], false)
   const tokens = await storedTokens()
   assert.equal(tokens.organizationId, organizationId)
   assert.equal(tokens.refreshToken, "refresh_backend_scoped")
@@ -1280,6 +1492,7 @@ test("invalid initial JWTs and mismatched subjects are rejected before organizat
   forged[2] = `${forged[2][0] === "A" ? "B" : "A"}${forged[2].slice(1)}`
   for (const initialToken of [
     jwt({ org_id: undefined, iss: "https://attacker.example" }),
+    jwt({ org_id: undefined, client_id: clientId }),
     jwt({ org_id: undefined, sub: "user_another" }),
     forged.join("."),
   ]) {
@@ -1308,6 +1521,7 @@ test("organization scoping rejects wrong final identity, organization, browser s
   const priorProof = sqlite.prepare("SELECT * FROM workos_entitlements").get()
   const cases = [
     authentication(jwt({ sid: "session_fresh_pending", org_id: "org_wrong" })),
+    authentication(jwt({ sid: "session_fresh_pending", client_id: clientId })),
     authentication(jwt({ sid: "session_fresh_pending", sub: "user_another" })),
     authentication(jwt({ sid: browserSid })),
     {

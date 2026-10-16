@@ -24,13 +24,17 @@ import {
   updateSubscriptionNotes,
 } from "../lib/subscription-store.ts"
 import { LICENSE_GRACE_MS } from "../lib/license-crypto.ts"
-import { hasWorkOSBillingSession } from "../lib/workos-entitlements.ts"
+import {
+  hasWorkOSBillingSession,
+  workosBillingConfiguration,
+} from "../lib/workos-entitlements.ts"
 
 const now = 1_800_000_000_000,
   day = 86_400_000,
   actor = "owner@example.test"
 const billingConfig = {
   WORKOS_CLIENT_ID: "client_entitlement",
+  WORKOS_BILLING_CLIENT_ID: "client_billing_entitlement",
   WORKOS_COOKIE_PASSWORD: "test-workos-cookie-password-at-least-32-characters",
 }
 let platform, db, seeded
@@ -75,7 +79,7 @@ async function paid(
       enabled ? 1 : 0,
       issuedAt,
       expiresAt,
-      JSON.stringify([billingConfig.WORKOS_CLIENT_ID, "photodepot-standard"])
+      workosBillingConfiguration(billingConfig).context
     )
     .run()
 }
@@ -351,6 +355,91 @@ test("snapshot races retry instead of signing a concurrently withdrawn WorkOS gr
     ).n,
     1
   )
+})
+
+test("a proof replaced by another application, feature or organization after verification cannot authorize", async () => {
+  for (const [suffix, replacement] of [
+    [
+      "application",
+      {
+        context: workosBillingConfiguration({
+          ...billingConfig,
+          WORKOS_BILLING_CLIENT_ID: "client_other_billing_application",
+        }).context,
+      },
+    ],
+    [
+      "feature",
+      {
+        context: workosBillingConfiguration({
+          ...billingConfig,
+          PHOTODEPOT_WORKOS_ENTITLEMENT: "another-feature",
+        }).context,
+      },
+    ],
+    ["organization", { organizationId: "org_another_billing_account" }],
+  ]) {
+    const userId = `user_context_race_${suffix}`
+    await paid(userId, { enabled: false })
+    let intercepted = false
+    const racing = {
+      ...platform.env,
+      ...billingConfig,
+      DB: {
+        prepare(query) {
+          let statement = db.prepare(query)
+          if (
+            intercepted ||
+            query !== "SELECT * FROM workos_entitlements WHERE user_id = ?"
+          )
+            return statement
+          intercepted = true
+          const wrapper = {
+            bind(...values) {
+              statement = statement.bind(...values)
+              return wrapper
+            },
+            async first() {
+              const verified = await statement.first()
+              await db
+                .prepare(
+                  "UPDATE workos_entitlements SET enabled=1, context=?, organization_id=?, revision=revision+1 WHERE user_id=?"
+                )
+                .bind(
+                  replacement.context ?? verified.context,
+                  replacement.organizationId ?? verified.organization_id,
+                  userId
+                )
+                .run()
+              return verified
+            },
+          }
+          return wrapper
+        },
+        batch: db.batch.bind(db),
+      },
+    }
+    try {
+      const result = await getAccountEntitlement(racing, userId, now)
+      assert.equal(intercepted, true)
+      assert.equal(result.access.canHost, false, suffix)
+      assert.equal(result.grant, null, suffix)
+      assert.equal(result.managed, null, suffix)
+    } finally {
+      // The shared fixture also checks deployment-wide overview counts later.
+      // Keep these deliberately inconsistent replacement rows local to this test.
+      await db.batch(
+        [
+          "account_entitlements",
+          "workos_entitlements",
+          "workos_billing_sessions",
+          "stripe_customers",
+        ].map((table) =>
+          db.prepare(`DELETE FROM ${table} WHERE user_id=?`).bind(userId)
+        )
+      )
+    }
+  }
 })
 
 test("stored manual and request history cannot override subscription authorization", async () => {

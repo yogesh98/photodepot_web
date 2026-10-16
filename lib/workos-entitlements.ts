@@ -96,13 +96,17 @@ function terminalRefreshFailure(error: unknown) {
   )
 }
 
-function configuration(env: Env) {
-  const clientId = env.WORKOS_CLIENT_ID
+export function workosBillingConfiguration(env: Env) {
+  const clientId = env.WORKOS_BILLING_CLIENT_ID
+  const issuerClientId = env.WORKOS_CLIENT_ID
   const password = env.WORKOS_COOKIE_PASSWORD
   const entitlement = env.PHOTODEPOT_WORKOS_ENTITLEMENT ?? "photodepot-standard"
   if (
     !clientId ||
     !/^client_[A-Za-z0-9_]+$/.test(clientId) ||
+    !issuerClientId ||
+    !/^client_[A-Za-z0-9_]+$/.test(issuerClientId) ||
+    clientId === issuerClientId ||
     !password ||
     password.length < 32 ||
     !entitlement ||
@@ -113,18 +117,25 @@ function configuration(env: Env) {
     )
   return {
     clientId,
+    issuerClientId,
     password,
     entitlement,
-    context: JSON.stringify([clientId, entitlement]),
+    context: JSON.stringify([clientId, issuerClientId, entitlement]),
   }
 }
-export async function hasWorkOSBillingSession(db: D1Database, userId: string) {
+export async function hasWorkOSBillingSession(
+  db: D1Database,
+  userId: string,
+  expectedContext?: string
+) {
   return Boolean(
     await db
       .prepare(
-        "SELECT 1 FROM workos_billing_sessions WHERE user_id = ? AND reauth_needed = 0"
+        `SELECT 1 FROM workos_billing_sessions WHERE user_id = ? AND reauth_needed = 0
+        AND (? IS NULL OR EXISTS (SELECT 1 FROM workos_entitlements
+          WHERE user_id = workos_billing_sessions.user_id AND context = ?))`
       )
-      .bind(userId)
+      .bind(userId, expectedContext ?? null, expectedContext ?? null)
       .first()
   )
 }
@@ -259,14 +270,15 @@ export async function storeWorkOSBillingSession(
   options: WorkOSEntitlementDependencies & { now?: number } = {}
 ) {
   const now = options.now ?? Date.now()
-  const config = configuration(env)
+  const config = workosBillingConfiguration(env)
   const organization = await billingOrganization(env, input.userId)
   if (!organization || organization.organizationId !== input.organizationId)
     throw new WorkOSEntitlementUnavailableError("Billing account changed.")
   const claims = await (options.verifyAccessToken ?? verifyWorkOSAccessToken)(
     input.accessToken,
     config.clientId,
-    now
+    now,
+    config.issuerClientId
   )
   if (
     typeof claims.sid !== "string" ||
@@ -333,7 +345,7 @@ export async function getWorkOSEntitlement(
   if (!session) return null
   const organization = await billingOrganization(env, userId)
   if (!organization) return null
-  const config = configuration(env)
+  const config = workosBillingConfiguration(env)
   const cached = await readSnapshot(env.DB, userId)
   if (
     !options.forceRefresh &&
@@ -397,7 +409,12 @@ export async function getWorkOSEntitlement(
     let claims: JWTPayload | undefined
     if (!options.forceRefresh) {
       try {
-        claims = await verify(tokens.accessToken, config.clientId, clock())
+        claims = await verify(
+          tokens.accessToken,
+          config.clientId,
+          clock(),
+          config.issuerClientId
+        )
       } catch (error) {
         if (!(error instanceof errors.JWTExpired)) throw error
       }
@@ -455,7 +472,12 @@ export async function getWorkOSEntitlement(
         throw new WorkOSEntitlementUnavailableError(
           "Billing access lease expired."
         )
-      claims = await verify(tokens.accessToken, config.clientId, clock())
+      claims = await verify(
+        tokens.accessToken,
+        config.clientId,
+        clock(),
+        config.issuerClientId
+      )
     }
     const value = proof(claims, tokens, config.entitlement)
     if (value.expiresAt <= clock())

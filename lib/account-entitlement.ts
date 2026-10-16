@@ -8,11 +8,15 @@ import {
 } from "./subscription-store.ts"
 import type { WorkOSEntitlementSummary } from "./subscription-types.ts"
 import type { Env } from "./cloudflare.ts"
-import { getWorkOSEntitlement } from "./workos-entitlements.ts"
+import {
+  getWorkOSEntitlement,
+  workosBillingConfiguration,
+} from "./workos-entitlements.ts"
 
 interface ManagedRow {
   user_id: string
   organization_id: string
+  context: string
   enabled: number
   issued_at: number
   expires_at: number
@@ -58,10 +62,17 @@ export async function getAccountEntitlement(
   const env = "DB" in source ? source : null
   const database = env ? env.DB : (source as D1Database)
   let allowManaged = true
+  let managedContext: string | undefined
+  let managedOrganization: string | undefined
   if (env) {
     // A missing/revoked session cannot revive old proof. Provider failures must
     // propagate; a historical manual grant never authorizes a replacement receipt.
-    allowManaged = (await getWorkOSEntitlement(env, userId, { now })) !== null
+    const verified = await getWorkOSEntitlement(env, userId, { now })
+    allowManaged = verified !== null
+    if (verified) {
+      managedContext = workosBillingConfiguration(env).context
+      managedOrganization = verified.organizationId
+    }
   }
 
   for (let attempt = 0; attempt < 8; attempt++) {
@@ -83,7 +94,16 @@ export async function getAccountEntitlement(
     const prior = snapshot[2].results[0] as unknown as ProjectionRow | undefined
     if (env) now = decisionNow()
     const manual = manualRow ? subscriptionSummary(manualRow, now) : null
-    const managed = allowManaged ? managedSummary(managedRow) : null
+    // An overlapping deployment can replace this row after verification. Never
+    // consume a proof for another application, feature, or organization.
+    const managed =
+      allowManaged &&
+      (!env ||
+        (managedRow !== undefined &&
+          managedRow.context === managedContext &&
+          managedRow.organization_id === managedOrganization))
+        ? managedSummary(managedRow)
+        : null
     const billing = null
     const selected = selectAccountGrant(manual, managed, now)
     const access = resolveAccountAccess(manual, now, managed)
