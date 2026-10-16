@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { generateKeyPairSync, sign } from "node:crypto"
+import { generateKeyPairSync, randomUUID, sign } from "node:crypto"
 import { readFile, readdir } from "node:fs/promises"
 import { after, before, beforeEach, test } from "node:test"
 import { sealData } from "iron-session"
@@ -7,9 +7,12 @@ import { getPlatformProxy, unstable_splitSqlQuery } from "wrangler"
 import { handleAdminSubscriptions } from "../functions/api/admin/subscriptions.ts"
 import { handleAdminWaitlist } from "../functions/api/admin/waitlist.ts"
 import { setSubscription } from "../lib/subscription-store.ts"
+import { getAccountEntitlement } from "../lib/account-entitlement.ts"
+import { workosBillingConfiguration } from "../lib/workos-entitlements.ts"
 
 const origin = "https://photodepot.app"
 const clientId = "client_subscription_api"
+const billingClientId = "client_subscription_api_billing"
 const organizationId = "org_subscription_api_admin"
 const password = "subscription-api-cookie-fixture-at-least-32-characters"
 const adminEmail = "owner@example.test"
@@ -29,6 +32,7 @@ let platform,
   workosUsers,
   userRequests,
   userFailure,
+  billingFailure,
   listPageSize
 function jwt(claims = {}) {
   const header = Buffer.from(
@@ -71,6 +75,7 @@ before(async () => {
   env = {
     ...platform.env,
     WORKOS_CLIENT_ID: clientId,
+    WORKOS_BILLING_CLIENT_ID: billingClientId,
     WORKOS_ADMIN_ORGANIZATION_ID: organizationId,
     WORKOS_COOKIE_PASSWORD: password,
     WORKOS_REDIRECT_URI: `${origin}/api/auth/callback`,
@@ -92,11 +97,22 @@ before(async () => {
   originalFetch = globalThis.fetch
   globalThis.fetch = async (input, options) => {
     const url = new URL(String(input))
-    if (url.href === `https://api.workos.com/sso/jwks/${clientId}`)
+    if (
+      [clientId, billingClientId].some(
+        (id) => url.href === `https://api.workos.com/sso/jwks/${id}`
+      )
+    )
       return Response.json({ keys: [jwk] })
     if (url.pathname === "/user_management/authenticate") {
       const body = JSON.parse(options.body)
       assert.equal(body.grant_type, "refresh_token")
+      if (body.client_id === billingClientId) {
+        assert.equal(billingFailure, 503)
+        return Response.json(
+          { message: "Fixture billing refresh outage" },
+          { status: billingFailure }
+        )
+      }
       assert.equal(body.organization_id, organizationId)
       assert.equal("client_secret" in body, false)
       return Response.json({
@@ -153,10 +169,17 @@ beforeEach(async () => {
   ]
   userRequests = []
   userFailure = undefined
+  billingFailure = undefined
   listPageSize = 100
   await env.DB.batch(
     [
       "DELETE FROM account_devices",
+      "DELETE FROM account_device_audit",
+      "DELETE FROM desktop_sessions",
+      "DELETE FROM workos_entitlements",
+      "DELETE FROM workos_billing_sessions",
+      "DELETE FROM stripe_customers",
+      "DELETE FROM account_entitlements",
       "DELETE FROM subscription_audit",
       "DELETE FROM subscriptions",
       "DELETE FROM waitlist",
@@ -299,6 +322,7 @@ test("listing WorkOS users is read-only and does not itself trigger signup trial
       canUseLocal: false,
       canHost: false,
     },
+    accessUnavailable: false,
     devices: [],
   })
   workosUsers.unshift(user("user_api_new", "new@example.test"))
@@ -538,5 +562,125 @@ test("remaining device administration retains origin, body size and method check
       )
     ).status,
     405
+  )
+})
+
+test("billing refresh outages preserve admin account history and device removal without authorizing access", async () => {
+  const userId = "user_api_trial"
+  const now = Date.now()
+  const personalOrganization = "org_api_personal"
+  const backendSid = "session_api_billing"
+  const desktopSessionId = randomUUID()
+  const grant = await setSubscription(
+    env.DB,
+    {
+      userId,
+      type: "regular",
+      endsAt: now + day,
+      expectedRevision: 0,
+      notes: "Historical support notes",
+    },
+    adminEmail
+  )
+  const encrypted = await sealData(
+    {
+      version: 1,
+      purpose: "photodepot-billing-auth",
+      clientId: billingClientId,
+      userId,
+      organizationId: personalOrganization,
+      sessionId: backendSid,
+      accessToken: jwt({
+        client_id: billingClientId,
+        sub: userId,
+        sid: backendSid,
+        org_id: personalOrganization,
+        iat: Math.floor(now / 1000) - 60,
+        exp: Math.floor(now / 1000) - 1,
+        entitlements: ["photodepot-standard"],
+      }),
+      refreshToken: "billing_refresh_fixture",
+    },
+    { password, ttl: 0 }
+  )
+  await env.DB.batch([
+    env.DB.prepare(
+      "INSERT INTO stripe_customers (user_id,stripe_customer_id,workos_organization_id,customer_create_token) VALUES (?,?,?,?)"
+    ).bind(userId, "cus_api_fixture", personalOrganization, "create_fixture"),
+    env.DB.prepare(
+      "INSERT INTO workos_billing_sessions (user_id,session_id,encrypted_tokens,updated_at) VALUES (?,?,?,?)"
+    ).bind(userId, backendSid, encrypted, now),
+    env.DB.prepare(
+      "INSERT INTO workos_entitlements (user_id,organization_id,context,enabled,issued_at,expires_at,revision) VALUES (?,?,?,1,?,?,1)"
+    ).bind(
+      userId,
+      personalOrganization,
+      workosBillingConfiguration(env).context,
+      now - 60_000,
+      now - 1000
+    ),
+    env.DB.prepare(
+      "INSERT INTO desktop_sessions (id,device_id,user_id,email,public_key,created_at,updated_at,device_name) VALUES (?,?,?,?,?,?,?,?)"
+    ).bind(
+      desktopSessionId,
+      "a".repeat(64),
+      userId,
+      "trial@example.test",
+      "fixture_public_key",
+      now,
+      now,
+      "Customer Mac"
+    ),
+  ])
+  billingFailure = 503
+  await assert.rejects(getAccountEntitlement(env, userId))
+  const response = await api(undefined, `?history=1&userId=${userId}`)
+  assert.equal(response.status, 200)
+  const details = await response.json()
+  assert.equal(details.accessUnavailable, true)
+  assert.equal(details.user.accessUnavailable, true)
+  assert.equal(details.access.canHost, false)
+  assert.equal(details.access.canUseLocal, false)
+  assert.equal(details.managed, null)
+  assert.equal(details.subscription.id, grant.id)
+  assert.equal(details.subscription.notes, "Historical support notes")
+  assert.equal(details.audit.length, 1)
+  assert.equal(details.devices[0].sessionId, desktopSessionId)
+  assert.equal(details.user.devices[0].deviceName, "Customer Mac")
+
+  const directory = await api()
+  assert.equal(directory.status, 200)
+  const directoryData = await directory.json()
+  assert.equal(directoryData.users.length, 3)
+  assert.equal(directoryData.users[0].accessUnavailable, true)
+  assert.ok(
+    directoryData.users.slice(1).every((user) => !user.accessUnavailable)
+  )
+
+  const removed = await api({
+    action: "remove-device",
+    userId,
+    sessionId: desktopSessionId,
+    expectedSessionRevision: 1,
+    reason: "Customer requested removal during billing outage",
+  })
+  assert.equal(removed.status, 200)
+  assert.deepEqual((await removed.json()).devices, [])
+  const updated = await (
+    await api(undefined, `?history=1&userId=${userId}`)
+  ).json()
+  assert.equal(updated.accessUnavailable, true)
+  assert.equal(updated.devices[0].current, false)
+  assert.equal(updated.deviceAudit.length, 1)
+  assert.equal(await count("account_entitlements"), 0)
+  assert.equal(
+    (
+      await env.DB.prepare(
+        "SELECT reauth_needed FROM workos_billing_sessions WHERE user_id=?"
+      )
+        .bind(userId)
+        .first()
+    ).reauth_needed,
+    0
   )
 })

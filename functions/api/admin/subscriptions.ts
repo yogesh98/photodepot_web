@@ -21,7 +21,7 @@ import {
   listAccountDeviceHistory,
   removeAccountDevice,
 } from "../../../lib/account-sessions.ts"
-import { getAccountEntitlement } from "../../../lib/account-entitlement.ts"
+import { getAdminEntitlement } from "../../../lib/admin-entitlements.ts"
 import { listAdminUsers } from "../../../lib/admin-directory.ts"
 
 export async function handleAdminSubscriptions(request: Request, env: Env) {
@@ -42,7 +42,7 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
         const [user, entitlement, devices, audit, deviceAudit] =
           await Promise.all([
             getWorkOSUser(env, userId),
-            getAccountEntitlement(env, userId, now),
+            getAdminEntitlement(env, userId, now),
             listAccountDeviceHistory(env.DB, userId),
             listSubscriptionAudit(env.DB, userId),
             env.DB.prepare(
@@ -53,7 +53,13 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
           ])
         if (!user)
           return json({ error: "This user no longer exists in WorkOS." }, 404)
-        const { manual: subscription, access, billing, managed } = entitlement
+        const {
+          manual: subscription,
+          access,
+          accessUnavailable,
+          billing,
+          managed,
+        } = entitlement
         return json({
           user: {
             id: user.id,
@@ -66,6 +72,7 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
             billing,
             managed,
             access,
+            accessUnavailable,
             devices: devices
               .filter((device) => device.current)
               .map(({ current, ...device }) => {
@@ -77,6 +84,7 @@ async function authorized(request: Request, env: Env, auth: AdminAuth) {
           billing,
           managed,
           access,
+          accessUnavailable,
           devices,
           audit,
           deviceAudit: deviceAudit.results,

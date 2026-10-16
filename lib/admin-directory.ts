@@ -1,6 +1,6 @@
 import type { Env } from "./cloudflare.ts"
 import { listAccountDevicesForUsers } from "./account-sessions.ts"
-import { listAccountEntitlements } from "./account-entitlement.ts"
+import { listAdminEntitlements } from "./admin-entitlements.ts"
 import type { WorkOSUserSummary } from "./subscription-types.ts"
 import { listWorkOSUsers, WORKOS_USER_ID } from "./workos-users.ts"
 
@@ -23,6 +23,7 @@ function matches(
   now: number
 ) {
   const subscription = user.subscription
+  if (filter !== "all" && user.accessUnavailable) return false
   const active = user.access.canUseLocal
   const filtered =
     filter === "all" ||
@@ -78,7 +79,7 @@ export async function listAdminUsers(
     remainingUsers -= selectedUsers.length
     const userIds = selectedUsers.map((user) => user.id)
     const [entitlements, deviceLists] = await Promise.all([
-      listAccountEntitlements(env, userIds, now),
+      listAdminEntitlements(env, userIds, now),
       listAccountDevicesForUsers(env.DB, userIds),
     ])
     for (const user of selectedUsers) {
@@ -93,6 +94,7 @@ export async function listAdminUsers(
         billing: entitlements.get(user.id)!.billing,
         managed: entitlements.get(user.id)!.managed,
         access: entitlements.get(user.id)!.access,
+        accessUnavailable: entitlements.get(user.id)!.accessUnavailable,
         devices: deviceLists.get(user.id) ?? [],
       }
       if (matches(summary, filter, search, now)) users.push(summary)

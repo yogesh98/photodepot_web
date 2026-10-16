@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { readFile, readdir } from "node:fs/promises"
 import { DatabaseSync } from "node:sqlite"
 import { afterEach, beforeEach, test } from "node:test"
-import { listAdminUsers } from "../lib/admin-directory.ts"
+import { ADMIN_USER_FILTERS, listAdminUsers } from "../lib/admin-directory.ts"
 import { workosBillingConfiguration } from "../lib/workos-entitlements.ts"
 
 const now = 1_800_000_000_000
@@ -241,4 +241,85 @@ test("small provider pages cannot bypass the hydration budget during filtered sc
     providerUsers.slice(0, 20).map((entry) => entry.id)
   )
   assert.equal(metrics.providerCalls, 7)
+})
+
+test("one busy entitlement retains directory data and search without entering a confirmed access filter", async () => {
+  providerUsers = providerUsers.slice(0, 3)
+  const unavailableId = providerUsers[0].id
+  managed(unavailableId, true)
+  managed(providerUsers[1].id, true)
+  sqlite
+    .prepare("UPDATE workos_entitlements SET expires_at=? WHERE user_id=?")
+    .run(now - 1, unavailableId)
+  sqlite
+    .prepare(
+      "UPDATE workos_billing_sessions SET operation_token='other_request',lease_until=? WHERE user_id=?"
+    )
+    .run(now + 30_000, unavailableId)
+  sqlite
+    .prepare(
+      "INSERT INTO subscriptions (id,user_id,type,started_at,end_at,updated_at,notes) VALUES (?,?,?,?,?,?,?)"
+    )
+    .run(
+      "legacy_grant",
+      unavailableId,
+      "regular",
+      now - 1,
+      now + 86_400_000,
+      now,
+      "Support followup"
+    )
+  sqlite
+    .prepare(
+      "INSERT INTO desktop_sessions (id,device_id,user_id,email,public_key,created_at,updated_at,device_name) VALUES (?,?,?,?,?,?,?,?)"
+    )
+    .run(
+      "desktop_session",
+      "device_id",
+      unavailableId,
+      providerUsers[0].email,
+      "fixture_key",
+      now,
+      now,
+      "Customer Mac"
+    )
+
+  const result = await page()
+  assert.equal(result.users.length, 3)
+  assert.equal(result.nextCursor, null)
+  const unavailable = result.users[0]
+  assert.equal(unavailable.accessUnavailable, true)
+  assert.equal(unavailable.access.canHost, false)
+  assert.equal(unavailable.access.canUseLocal, false)
+  assert.equal(unavailable.managed, null)
+  assert.equal(unavailable.subscription.notes, "Support followup")
+  assert.equal(unavailable.devices[0].deviceName, "Customer Mac")
+  assert.equal(result.users[1].accessUnavailable, false)
+  assert.equal(result.users[1].access.canHost, true)
+  assert.equal(result.users[2].accessUnavailable, false)
+  assert.equal(result.users[2].access.source, null)
+
+  const found = await page("q=support")
+  assert.deepEqual(
+    found.users.map((user) => user.id),
+    [unavailableId]
+  )
+  const unrelated = await page("q=person2")
+  assert.deepEqual(
+    unrelated.users.map((user) => user.id),
+    [providerUsers[2].id]
+  )
+  for (const filter of ADMIN_USER_FILTERS.filter((value) => value !== "all")) {
+    const filtered = await page(`filter=${filter}`)
+    assert.ok(
+      filtered.users.every((user) => user.id !== unavailableId),
+      filter
+    )
+  }
+  assert.equal(
+    sqlite
+      .prepare("SELECT COUNT(*) AS n FROM account_entitlements WHERE user_id=?")
+      .get(unavailableId).n,
+    0
+  )
 })

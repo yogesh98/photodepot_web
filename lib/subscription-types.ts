@@ -89,6 +89,8 @@ export interface WorkOSUserSummary {
   billing?: BillingSubscriptionSummary | null
   managed?: WorkOSEntitlementSummary | null
   access: AccountAccess
+  /** A failed entitlement check is unknown, not a confirmed free or paid state. */
+  accessUnavailable?: boolean
   devices: AccountDevice[]
 }
 

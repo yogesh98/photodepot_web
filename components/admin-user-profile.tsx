@@ -84,7 +84,7 @@ export function AdminUserProfile({
         )
         .slice(0, 100)
     : []
-  const active = user.access.canUseLocal
+  const active = !user.accessUnavailable && user.access.canUseLocal
   return (
     <section aria-label="User management" aria-busy={loading}>
       <Button variant="ghost" onClick={onBack} className={styles.backButton}>
@@ -127,25 +127,36 @@ export function AdminUserProfile({
               <>
                 <div className={styles.profilePlan}>
                   <strong>
-                    {user.access.tier === "trial"
-                      ? "Trial"
-                      : user.access.tier === "standard"
-                        ? "Standard"
-                        : "Free account"}
+                    {user.accessUnavailable
+                      ? "Access unavailable"
+                      : user.access.tier === "trial"
+                        ? "Trial"
+                        : user.access.tier === "standard"
+                          ? "Standard"
+                          : "Free account"}
                   </strong>
                   <Badge
                     variant="secondary"
                     className={active ? styles.statusActive : ""}
                   >
-                    {user.access.status === "active"
-                      ? "Active"
-                      : user.access.status === "revoked"
-                        ? "Revoked"
-                        : user.access.status === "expired"
-                          ? "Expired"
-                          : "Free account"}
+                    {user.accessUnavailable
+                      ? "Unavailable"
+                      : user.access.status === "active"
+                        ? "Active"
+                        : user.access.status === "revoked"
+                          ? "Revoked"
+                          : user.access.status === "expired"
+                            ? "Expired"
+                            : "Free account"}
                   </Badge>
                 </div>
+                {user.accessUnavailable && (
+                  <p role="status">
+                    We couldn’t check subscription access. You can still manage
+                    this account’s devices and view its history. Refresh to try
+                    again.
+                  </p>
+                )}
                 <dl className={styles.profileFacts}>
                   <div>
                     <dt>
@@ -154,7 +165,7 @@ export function AdminUserProfile({
                         : "Access starts"}
                     </dt>
                     <dd>
-                      {user.access.startsAt != null
+                      {!user.accessUnavailable && user.access.startsAt != null
                         ? date(user.access.startsAt)
                         : "—"}
                     </dd>
@@ -166,7 +177,7 @@ export function AdminUserProfile({
                         : "Access ends"}
                     </dt>
                     <dd>
-                      {user.access.endsAt != null
+                      {!user.accessUnavailable && user.access.endsAt != null
                         ? date(user.access.endsAt)
                         : "—"}
                     </dd>
@@ -174,9 +185,11 @@ export function AdminUserProfile({
                   <div>
                     <dt>Access source</dt>
                     <dd>
-                      {user.access.source === "workos"
-                        ? "WorkOS subscription access"
-                        : "Free account"}
+                      {user.accessUnavailable
+                        ? "Unavailable"
+                        : user.access.source === "workos"
+                          ? "WorkOS subscription access"
+                          : "Free account"}
                     </dd>
                   </div>
                 </dl>

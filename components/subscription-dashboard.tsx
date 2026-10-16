@@ -57,7 +57,7 @@ type UserPage = {
   overview: SubscriptionOverview
 }
 type AccountDetails = ProfileDetails
-type Status = "Active" | "Expired" | "Revoked" | "Free account"
+type Status = "Active" | "Expired" | "Revoked" | "Free account" | "Unavailable"
 
 class ApiError extends Error {
   constructor(
@@ -113,6 +113,7 @@ function userName(user: WorkOSUserSummary) {
   return [user.firstName, user.lastName].filter(Boolean).join(" ") || user.email
 }
 function status(user: WorkOSUserSummary): Status {
+  if (user.accessUnavailable) return "Unavailable"
   return user.access.status === "active"
     ? "Active"
     : user.access.status === "revoked"
@@ -775,18 +776,21 @@ export function SubscriptionDashboard({
                           </TableCell>
                           <TableCell>
                             <Badge variant="outline">
-                              {user.access.tier === "trial"
-                                ? "Trial"
-                                : user.access.tier === "standard"
-                                  ? "Standard"
-                                  : "Free"}
+                              {user.accessUnavailable
+                                ? "Unknown"
+                                : user.access.tier === "trial"
+                                  ? "Trial"
+                                  : user.access.tier === "standard"
+                                    ? "Standard"
+                                    : "Free"}
                             </Badge>
                           </TableCell>
                           <TableCell>
                             <StatusBadge value={status(user)} />
                           </TableCell>
                           <TableCell>
-                            {user.access.endsAt != null ? (
+                            {!user.accessUnavailable &&
+                            user.access.endsAt != null ? (
                               <>
                                 <span>
                                   {new Date(

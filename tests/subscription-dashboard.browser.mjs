@@ -185,7 +185,7 @@ function overview() {
   }
 }
 function accountAccess(user) {
-  const managed = user.managed,
+  const managed = user.accessUnavailable ? null : user.managed,
     valid = managed?.enabled && managed.expiresAt > Date.now()
   return {
     tier: valid ? "standard" : "free",
@@ -220,6 +220,7 @@ async function handleApi(request, response, url) {
       return respond(response, 200, {
         user: publicUser(user),
         access: accountAccess(user),
+        accessUnavailable: user.accessUnavailable ?? false,
         subscription: user.subscription,
         deviceAudit: state.deviceAudits.filter(
           (entry) => entry.userId === user.id
@@ -258,10 +259,11 @@ async function handleApi(request, response, url) {
         return false
       return (
         filter === "all" ||
-        (filter === "active" && active) ||
-        (filter === "standard" && active) ||
-        (filter === "expired" && access.status === "expired") ||
-        (filter === "unassigned" && access.source === null)
+        (!user.accessUnavailable &&
+          ((filter === "active" && active) ||
+            (filter === "standard" && active) ||
+            (filter === "expired" && access.status === "expired") ||
+            (filter === "unassigned" && access.source === null)))
       )
     })
     const cursor = url.searchParams.get("cursor")
@@ -763,6 +765,58 @@ test("server-side search, subscription segments, and pagination include the comp
     path: join(screenshots, "subscriptions-desktop.png"),
     fullPage: true,
   })
+})
+
+test("unavailable access preserves admin account history and device removal", async () => {
+  state.users[0].accessUnavailable = true
+  await page.getByRole("button", { name: "Refresh", exact: true }).click()
+  const row = page.locator("tbody tr").filter({ hasText: "alice@example.test" })
+  await expect(row.getByText("Unknown", { exact: true })).toBeVisible()
+  await expect(row.getByText("Unavailable", { exact: true })).toBeVisible()
+  await expect(row.getByText("Free", { exact: true })).toHaveCount(0)
+  await expect(
+    row.getByText("Offline access deadline", { exact: true })
+  ).toHaveCount(0)
+  await expect(
+    page.getByRole("button", { name: "View bob@example.test", exact: true })
+  ).toBeVisible()
+  await row
+    .getByRole("button", { name: "View alice@example.test", exact: true })
+    .click()
+  const profile = page.getByRole("region", {
+    name: "User management",
+    exact: true,
+  })
+  await expect(
+    profile.getByText("Access unavailable", { exact: true })
+  ).toBeVisible()
+  await expect(profile.getByText("Free account", { exact: true })).toHaveCount(
+    0
+  )
+  await expect(
+    profile.getByText(/We couldn’t check subscription access/)
+  ).toBeVisible()
+  await expect(
+    profile.getByText("Browser test history reason", { exact: true })
+  ).toBeVisible()
+  await expect(
+    profile.getByText(state.users[0].subscription.notes, { exact: true })
+  ).toBeVisible()
+  await profile
+    .getByRole("button", { name: "Remove Alice’s MacBook Pro", exact: true })
+    .click()
+  await save("Remove Mac")
+  assert.equal(state.users[0].devices.length, 1)
+  assert.equal(state.requests.at(-1).action, "remove-device")
+  await expect(
+    profile.getByText("Access unavailable", { exact: true })
+  ).toBeVisible()
+  state.users[0].accessUnavailable = false
+  await page.getByRole("button", { name: "Refresh", exact: true }).click()
+  await expect(profile.getByText("Standard", { exact: true })).toBeVisible()
+  await expect(
+    profile.getByText("Access unavailable", { exact: true })
+  ).toHaveCount(0)
 })
 
 test("the admin overview links verified access counts to Accounts filters", async () => {
